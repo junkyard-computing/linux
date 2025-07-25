@@ -30,6 +30,7 @@ struct panthor_job;
 struct panthor_mmu;
 struct panthor_fw;
 struct panthor_perfcnt;
+struct panthor_perf;
 struct panthor_pwr;
 struct panthor_vm;
 struct panthor_vm_pool;
@@ -185,6 +186,7 @@ struct panthor_device {
 	/** @devfreq: Device frequency scaling management data. */
 	struct panthor_devfreq *devfreq;
 
+<<<<<<< HEAD
 	/** @reclaim: Reclaim related stuff */
 	struct {
 		/** @reclaim.shrinker: Shrinker instance */
@@ -253,6 +255,9 @@ struct panthor_device {
 		unsigned long nr_pages_reclaimed_on_last_scan;
 #endif
 	} reclaim;
+
+	/** @perf: Performance counter management data. */
+	struct panthor_perf *perf;
 
 	/** @unplug: Device unplug related fields. */
 	struct {
