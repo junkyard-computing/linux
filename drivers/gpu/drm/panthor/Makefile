@@ -11,6 +11,7 @@ panthor-y := \
 	panthor_hw.o \
 	panthor_mmu.o \
 	panthor_pwr.o \
+	panthor_perf.o \
 	panthor_sched.o
 
 obj-$(CONFIG_DRM_PANTHOR) += panthor.o
