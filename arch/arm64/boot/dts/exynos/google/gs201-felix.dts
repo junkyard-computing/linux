@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Google Pixel Fold (felix) device tree source
+ *
+ * Copyright 2026 Google LLC
+ *
+ * The Pixel Fold uses the GS201 (Tensor G2) SoC.
+ *
+ * Headless mainline Linux configuration:
+ *   - Serial console via UART0 at 115200 baud (earlycon)
+ *   - UFS storage via google,gs201-ufs
+ *   - USB host via USB 3.1 DWC3 (USB-C port)
+ *   - GPU via Panthor (Mali-G710 CSF)
+ *
+ * Not enabled (no mainline driver or Android-only):
+ *   - Display (DRM Samsung DECON + DSI panels)
+ *   - Wi-Fi / Bluetooth (Broadcom BCM4390)
+ *   - Cellular modem (Samsung S5300)
+ *   - Camera (LWIS / ISP)
+ *   - Audio (CS35L45, CS40L26)
+ *   - NFC, fingerprint, touch
+ *   - Google Security Anchor / GSC TPM (GSA/GSC)
+ *   - AoC always-on coprocessor
+ *   - EdgeTPU / GXP
+ */
+
+/dts-v1/;
+
+#include "gs201.dtsi"
+
+/ {
+	model = "Google Pixel Fold";
+	compatible = "google,felix", "google,gs201";
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+};
+
+/* Enable the debug UART (UART0 / PERIC0 USI0) */
+&serial_0 {
+	status = "okay";
+};
+
+/*
+ * Enable UFS storage.
+ * The controller and PHY are defined in gs201.dtsi; the GPIO pins used for
+ * UFS reset and reference-clock output are PERIC0 / HSI2UFS domain pins.
+ */
+&ufs_0 {
+	status = "okay";
+};
+
+&ufs_0_phy {
+	status = "okay";
+};
