@@ -1,0 +1,708 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Google GS201 (Tensor G2) SoC device tree source
+ *
+ * Copyright 2026 Google LLC
+ *
+ * This DTSI covers the subset of GS201 hardware required for a
+ * headless mainline Linux system: interrupt controller, timers, PSCI,
+ * ACPM/clocks, pinctrl, serial console, UFS storage, USB, and the
+ * Mali-G710 GPU via the Panthor driver.
+ *
+ * TODO: A GS201 CMU (Clock Management Unit) driver is not yet written.
+ * UFS and USB peripheral clocks are supplied as fixed-rate stubs
+ * (matching the frequencies the Android bootloader programmes) until
+ * proper CMU drivers are contributed.  GPU DVFS clocks are ACPM-based
+ * and work without the CMU driver.
+ */
+
+#include <dt-bindings/clock/google,gs201-acpm.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	compatible = "google,gs201";
+	interrupt-parent = <&gic>;
+	#address-cells = <2>;
+	#size-cells = <1>;
+
+	aliases {
+		pinctrl0 = &pinctrl_0;
+		pinctrl1 = &pinctrl_1;
+		pinctrl2 = &pinctrl_2;
+		pinctrl3 = &pinctrl_3;
+		pinctrl4 = &pinctrl_4;
+		pinctrl5 = &pinctrl_5;
+		pinctrl6 = &pinctrl_6;
+		pinctrl7 = &pinctrl_7;
+		pinctrl8 = &pinctrl_8;
+		serial0  = &serial_0;
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* CPU topology                                                         */
+	/* ------------------------------------------------------------------ */
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu-map {
+			cluster0 {
+				core0 { cpu = <&cpu0>; };
+				core1 { cpu = <&cpu1>; };
+				core2 { cpu = <&cpu2>; };
+				core3 { cpu = <&cpu3>; };
+			};
+			cluster1 {
+				core0 { cpu = <&cpu4>; };
+				core1 { cpu = <&cpu5>; };
+			};
+			cluster2 {
+				core0 { cpu = <&cpu6>; };
+				core1 { cpu = <&cpu7>; };
+			};
+		};
+
+		/* cluster0: ANANKE (Cortex-A55 derivative) */
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x0 0x0000>;
+			enable-method = "psci";
+			cpu-idle-states = <&ananke_cpu_sleep>;
+			capacity-dmips-mhz = <250>;
+			dynamic-power-coefficient = <89>;
+			operating-points-v2 = <&cluster0_opp>;
+		};
+		cpu1: cpu@100 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x0 0x0100>;
+			enable-method = "psci";
+			cpu-idle-states = <&ananke_cpu_sleep>;
+			capacity-dmips-mhz = <250>;
+			dynamic-power-coefficient = <89>;
+			operating-points-v2 = <&cluster0_opp>;
+		};
+		cpu2: cpu@200 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x0 0x0200>;
+			enable-method = "psci";
+			cpu-idle-states = <&ananke_cpu_sleep>;
+			capacity-dmips-mhz = <250>;
+			dynamic-power-coefficient = <89>;
+			operating-points-v2 = <&cluster0_opp>;
+		};
+		cpu3: cpu@300 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x0 0x0300>;
+			enable-method = "psci";
+			cpu-idle-states = <&ananke_cpu_sleep>;
+			capacity-dmips-mhz = <250>;
+			dynamic-power-coefficient = <89>;
+			operating-points-v2 = <&cluster0_opp>;
+		};
+
+		/* cluster1: HERCULES (Cortex-A78 derivative) */
+		cpu4: cpu@400 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a78";
+			reg = <0x0 0x0400>;
+			enable-method = "psci";
+			cpu-idle-states = <&hercules_cpu_sleep>;
+			capacity-dmips-mhz = <927>;
+			dynamic-power-coefficient = <513>;
+			operating-points-v2 = <&cluster1_opp>;
+		};
+		cpu5: cpu@500 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a78";
+			reg = <0x0 0x0500>;
+			enable-method = "psci";
+			cpu-idle-states = <&hercules_cpu_sleep>;
+			capacity-dmips-mhz = <927>;
+			dynamic-power-coefficient = <513>;
+			operating-points-v2 = <&cluster1_opp>;
+		};
+
+		/* cluster2: HERA (Cortex-X1 derivative) */
+		cpu6: cpu@600 {
+			device_type = "cpu";
+			compatible = "arm,cortex-x1";
+			reg = <0x0 0x0600>;
+			enable-method = "psci";
+			cpu-idle-states = <&hera_cpu_sleep>;
+			capacity-dmips-mhz = <1024>;
+			dynamic-power-coefficient = <757>;
+			operating-points-v2 = <&cluster2_opp>;
+		};
+		cpu7: cpu@700 {
+			device_type = "cpu";
+			compatible = "arm,cortex-x1";
+			reg = <0x0 0x0700>;
+			enable-method = "psci";
+			cpu-idle-states = <&hera_cpu_sleep>;
+			capacity-dmips-mhz = <1024>;
+			dynamic-power-coefficient = <757>;
+			operating-points-v2 = <&cluster2_opp>;
+		};
+
+		idle-states {
+			entry-method = "arm,psci";
+
+			ananke_cpu_sleep: ananke-cpu-sleep {
+				compatible = "arm,idle-state";
+				idle-state-name = "c2";
+				arm,psci-suspend-param = <0x0010000>;
+				entry-latency-us = <70>;
+				exit-latency-us = <160>;
+				min-residency-us = <2000>;
+			};
+
+			hercules_cpu_sleep: hercules-cpu-sleep {
+				compatible = "arm,idle-state";
+				idle-state-name = "c2";
+				arm,psci-suspend-param = <0x0010000>;
+				entry-latency-us = <150>;
+				exit-latency-us = <190>;
+				min-residency-us = <2500>;
+			};
+
+			hera_cpu_sleep: hera-cpu-sleep {
+				compatible = "arm,idle-state";
+				idle-state-name = "c2";
+				arm,psci-suspend-param = <0x0010000>;
+				entry-latency-us = <235>;
+				exit-latency-us = <220>;
+				min-residency-us = <3500>;
+			};
+		};
+	};
+
+	/* CPU OPP tables — frequencies sourced from Android DVFS tables */
+	cluster0_opp: opp-table-cl0 {
+		compatible = "operating-points-v2";
+		opp-shared;
+		opp-300000000  { opp-hz = /bits/ 64 <300000000>;  };
+		opp-574000000  { opp-hz = /bits/ 64 <574000000>;  };
+		opp-738000000  { opp-hz = /bits/ 64 <738000000>;  };
+		opp-930000000  { opp-hz = /bits/ 64 <930000000>;  };
+		opp-1066000000 { opp-hz = /bits/ 64 <1066000000>; };
+		opp-1197000000 { opp-hz = /bits/ 64 <1197000000>; };
+		opp-1328000000 { opp-hz = /bits/ 64 <1328000000>; };
+		opp-1459000000 { opp-hz = /bits/ 64 <1459000000>; };
+		opp-1574000000 { opp-hz = /bits/ 64 <1574000000>; };
+		opp-1746000000 { opp-hz = /bits/ 64 <1746000000>; };
+		opp-1836000000 { opp-hz = /bits/ 64 <1836000000>; };
+	};
+
+	cluster1_opp: opp-table-cl1 {
+		compatible = "operating-points-v2";
+		opp-shared;
+		opp-400000000  { opp-hz = /bits/ 64 <400000000>;  };
+		opp-553000000  { opp-hz = /bits/ 64 <553000000>;  };
+		opp-696000000  { opp-hz = /bits/ 64 <696000000>;  };
+		opp-852000000  { opp-hz = /bits/ 64 <852000000>;  };
+		opp-984000000  { opp-hz = /bits/ 64 <984000000>;  };
+		opp-1106000000 { opp-hz = /bits/ 64 <1106000000>; };
+		opp-1197000000 { opp-hz = /bits/ 64 <1197000000>; };
+		opp-1328000000 { opp-hz = /bits/ 64 <1328000000>; };
+		opp-1459000000 { opp-hz = /bits/ 64 <1459000000>; };
+		opp-1606000000 { opp-hz = /bits/ 64 <1606000000>; };
+		opp-1737000000 { opp-hz = /bits/ 64 <1737000000>; };
+		opp-1836000000 { opp-hz = /bits/ 64 <1836000000>; };
+		opp-1950000000 { opp-hz = /bits/ 64 <1950000000>; };
+		opp-2048000000 { opp-hz = /bits/ 64 <2048000000>; };
+		opp-2130000000 { opp-hz = /bits/ 64 <2130000000>; };
+		opp-2253000000 { opp-hz = /bits/ 64 <2253000000>; };
+		opp-2348000000 { opp-hz = /bits/ 64 <2348000000>; };
+	};
+
+	cluster2_opp: opp-table-cl2 {
+		compatible = "operating-points-v2";
+		opp-shared;
+		opp-500000000  { opp-hz = /bits/ 64 <500000000>;  };
+		opp-851000000  { opp-hz = /bits/ 64 <851000000>;  };
+		opp-955000000  { opp-hz = /bits/ 64 <955000000>;  };
+		opp-1098000000 { opp-hz = /bits/ 64 <1098000000>; };
+		opp-1197000000 { opp-hz = /bits/ 64 <1197000000>; };
+		opp-1328000000 { opp-hz = /bits/ 64 <1328000000>; };
+		opp-1459000000 { opp-hz = /bits/ 64 <1459000000>; };
+		opp-1557000000 { opp-hz = /bits/ 64 <1557000000>; };
+		opp-1647000000 { opp-hz = /bits/ 64 <1647000000>; };
+		opp-1745000000 { opp-hz = /bits/ 64 <1745000000>; };
+		opp-1836000000 { opp-hz = /bits/ 64 <1836000000>; };
+		opp-1950000000 { opp-hz = /bits/ 64 <1950000000>; };
+		opp-2048000000 { opp-hz = /bits/ 64 <2048000000>; };
+		opp-2130000000 { opp-hz = /bits/ 64 <2130000000>; };
+		opp-2253000000 { opp-hz = /bits/ 64 <2253000000>; };
+		opp-2348000000 { opp-hz = /bits/ 64 <2348000000>; };
+		opp-2500000000 { opp-hz = /bits/ 64 <2500000000>; };
+		opp-2630000000 { opp-hz = /bits/ 64 <2630000000>; };
+		opp-2704000000 { opp-hz = /bits/ 64 <2704000000>; };
+		opp-2802000000 { opp-hz = /bits/ 64 <2802000000>; };
+		opp-2850000000 { opp-hz = /bits/ 64 <2850000000>; };
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* System                                                               */
+	/* ------------------------------------------------------------------ */
+
+	psci {
+		compatible = "arm,psci-1.0";
+		method = "smc";
+	};
+
+	/* 24.576 MHz crystal — primary oscillator for the SoC */
+	oscclk: osc-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24576000>;
+		clock-output-names = "oscclk";
+	};
+
+	/*
+	 * Stub fixed-rate clocks for UFS until google,gs201-cmu-hsi2 driver
+	 * is written.  Rates match what the Android bootloader configures:
+	 *   aclk / core_clk  : 267 MHz
+	 *   unipro mclk      : 333 MHz (HS-G4 mode)
+	 * The UFS controller uses these values for timing calculations only;
+	 * the actual hardware clocks are pre-configured by the bootloader.
+	 */
+	ufs_aclk: ufs-aclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <267000000>;
+	};
+
+	ufs_unipro: ufs-unipro-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <333000000>;
+	};
+
+	/* stub for UFS PHY reference clock (26 MHz from TCXO) */
+	ufs_refclk: ufs-refclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* Interrupt controller                                                 */
+	/* ------------------------------------------------------------------ */
+
+	gic: interrupt-controller@10400000 {
+		compatible = "arm,gic-v3";
+		#interrupt-cells = <3>;
+		interrupt-controller;
+		reg = <0x0 0x10400000 0x10000>,   /* GICD */
+		      <0x0 0x10440000 0x100000>;  /* GICR × 8 */
+		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* Timers                                                               */
+	/* ------------------------------------------------------------------ */
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>;
+		clock-frequency = <24576000>;
+	};
+
+	mct: timer@10050000 {
+		compatible = "samsung,exynos4210-mct";
+		reg = <0x0 0x10050000 0x800>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		interrupt-parent = <&mct_map>;
+		interrupts = <0>, <1>, <2>,  <3>,
+			     <4>, <5>, <6>,  <7>,
+			     <8>, <9>, <10>, <11>;
+		clocks = <&oscclk>, <&oscclk>;
+		clock-names = "fin_pll", "mct";
+
+		mct_map: mct-map {
+			#interrupt-cells = <1>;
+			#address-cells = <0>;
+			#size-cells = <0>;
+			interrupt-map =
+				<0  &gic 0 785 IRQ_TYPE_LEVEL_HIGH>,
+				<1  &gic 0 786 IRQ_TYPE_LEVEL_HIGH>,
+				<2  &gic 0 787 IRQ_TYPE_LEVEL_HIGH>,
+				<3  &gic 0 788 IRQ_TYPE_LEVEL_HIGH>,
+				<4  &gic 0 789 IRQ_TYPE_LEVEL_HIGH>,
+				<5  &gic 0 790 IRQ_TYPE_LEVEL_HIGH>,
+				<6  &gic 0 791 IRQ_TYPE_LEVEL_HIGH>,
+				<7  &gic 0 792 IRQ_TYPE_LEVEL_HIGH>,
+				<8  &gic 0 793 IRQ_TYPE_LEVEL_HIGH>,
+				<9  &gic 0 794 IRQ_TYPE_LEVEL_HIGH>,
+				<10 &gic 0 795 IRQ_TYPE_LEVEL_HIGH>,
+				<11 &gic 0 796 IRQ_TYPE_LEVEL_HIGH>;
+		};
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* ACPM — Always-on Power Management coprocessor                       */
+	/* ------------------------------------------------------------------ */
+
+	/*
+	 * AP-to-APM mailbox — raises a doorbell interrupt to the ACPM
+	 * coprocessor.  The ACPM IPC driver uses this via the mailbox
+	 * framework.  "pclk" is the APM-domain peripheral clock; supply
+	 * the oscclk stub until a GS201 ALIVE-CMU driver exists.
+	 */
+	ap2apm_mailbox: mailbox@18210000 {
+		compatible = "google,gs201-mbox";
+		reg = <0x0 0x18210000 0x1000>;
+		clocks = <&oscclk>;
+		clock-names = "pclk";
+		interrupts = <GIC_SPI 78 IRQ_TYPE_LEVEL_HIGH>;
+		#mbox-cells = <0>;
+	};
+
+	/*
+	 * APM shared SRAM — 288 KiB window visible to both the AP and the
+	 * ACPM coprocessor.  The ACPM IPC driver maps the channel descriptors
+	 * and TX/RX buffers out of this region.
+	 */
+	apm_sram: sram@18500000 {
+		compatible = "mmio-sram";
+		reg = <0x0 0x18500000 0x48000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0 0x0 0x18500000 0x48000>;
+	};
+
+	firmware {
+		/*
+		 * ACPM IPC + DVFS clock provider.
+		 * Exposes all DVFS-managed clocks (GPU, CPU clusters, MIF …)
+		 * as a clock provider with #clock-cells = <1>.  Use the
+		 * GS201_CLK_ACPM_DVFS_* constants from
+		 * <dt-bindings/clock/google,gs201-acpm.h>.
+		 */
+		acpm_ipc: power-management {
+			compatible = "google,gs201-acpm-ipc";
+			#clock-cells = <1>;
+			mboxes = <&ap2apm_mailbox>;
+			shmem = <&apm_sram>;
+		};
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* Pin controllers                                                      */
+	/* ------------------------------------------------------------------ */
+
+	/* 0: GPIO_ALIVE */
+	pinctrl_0: pinctrl@180d0000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x180d0000 0x1000>;
+		interrupts = <GIC_SPI 0  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 1  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 2  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 3  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 4  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 5  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 6  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 7  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 8  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 9  IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 10 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 14 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 15 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 17 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 18 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 19 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 21 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 22 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 23 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 24 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 25 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 26 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 33 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 35 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 38 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 40 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 41 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 43 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		wakeup-interrupt-controller;
+	};
+
+	/* 1: GPIO_FAR_ALIVE */
+	pinctrl_1: pinctrl@180e0000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x180e0000 0x1000>;
+		interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 45 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 46 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		wakeup-interrupt-controller;
+	};
+
+	/* 2: GPIO_GSACORE (no interrupts to AP) */
+	pinctrl_2: pinctrl@17a80000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x17a80000 0x1000>;
+		gpio-controller;
+		#gpio-cells = <2>;
+	};
+
+	/* 3: GPIO_GSACTRL (no interrupts to AP) */
+	pinctrl_3: pinctrl@17940000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x17940000 0x1000>;
+		gpio-controller;
+		#gpio-cells = <2>;
+	};
+
+	/* 4: GPIO_PERIC0 */
+	pinctrl_4: pinctrl@10840000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x10840000 0x1000>;
+		interrupts = <GIC_SPI 664 IRQ_TYPE_LEVEL_HIGH>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	/* 5: GPIO_PERIC1 */
+	pinctrl_5: pinctrl@10c40000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x10c40000 0x1000>;
+		interrupts = <GIC_SPI 683 IRQ_TYPE_LEVEL_HIGH>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	/* 6: GPIO_HSI1 */
+	pinctrl_6: pinctrl@11840000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x11840000 0x1000>;
+		interrupts = <GIC_SPI 387 IRQ_TYPE_LEVEL_HIGH>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	/* 7: GPIO_HSI2 */
+	pinctrl_7: pinctrl@14440000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x14440000 0x1000>;
+		interrupts = <GIC_SPI 421 IRQ_TYPE_LEVEL_HIGH>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	/* 8: GPIO_HSI2UFS — split from HSI2 vs GS101 */
+	pinctrl_8: pinctrl@14460000 {
+		compatible = "google,gs201-pinctrl";
+		reg = <0x0 0x14460000 0x1000>;
+		interrupts = <GIC_SPI 422 IRQ_TYPE_LEVEL_HIGH>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* Serial console (UART0 / USI0_UART, PERIC0)                         */
+	/* ------------------------------------------------------------------ */
+
+	serial_0: serial@10a00000 {
+		compatible = "samsung,exynos850-uart";
+		reg = <0x0 0x10a00000 0x100>;
+		samsung,fifo-size = <256>;
+		interrupts = <GIC_SPI 673 IRQ_TYPE_LEVEL_HIGH>;
+		/*
+		 * TODO: replace with proper gs201-cmu-peric0 clock references
+		 * once the CMU driver is written.  The UART is configured by
+		 * the bootloader at 115200-8n1; earlycon works without clocks.
+		 */
+		clocks = <&oscclk>, <&oscclk>;
+		clock-names = "uart", "clk_uart_baud0";
+		status = "disabled";
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* UFS storage (HSI2 subsystem)                                        */
+	/* ------------------------------------------------------------------ */
+
+	sysreg_hsi2: syscon@14420000 {
+		compatible = "google,gs201-hsi2-sysreg", "syscon";
+		reg = <0x0 0x14420000 0x1000>;
+	};
+
+	ufs_0: ufs@14700000 {
+		compatible = "google,gs201-ufs";
+		reg = <0x0 0x14700000 0x200>,   /* HCI standard  */
+		      <0x0 0x14701100 0x200>,   /* vendor HCI    */
+		      <0x0 0x14780000 0xa000>,  /* UNIPRO        */
+		      <0x0 0x14600000 0x100>;   /* UFS protector */
+		reg-names = "hci", "vs_hci", "unipro", "ufsp";
+		interrupts = <GIC_SPI 453 IRQ_TYPE_LEVEL_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ufs_rst_n &ufs_refclk_out>;
+		/*
+		 * Fixed-rate clock stubs — see top-of-file TODO.
+		 * Replace with <&cmu_hsi2 …> entries when the CMU driver lands.
+		 */
+		clocks = <&ufs_aclk>, <&ufs_unipro>, <&ufs_aclk>,
+			 <&ufs_aclk>, <&ufs_aclk>,   <&ufs_aclk>;
+		clock-names = "core_clk", "sclk_unipro_main", "fmp",
+			      "aclk", "pclk", "sysreg";
+		freq-table-hz = <0 0>, <0 0>, <0 0>, <0 0>, <0 0>, <0 0>;
+		phys = <&ufs_0_phy>;
+		phy-names = "ufs-phy";
+		samsung,sysreg = <&sysreg_hsi2>;
+		ufs,pmd-attr-lane = /bits/ 8 <2>;
+		ufs,pmd-attr-gear = /bits/ 8 <4>;
+		dma-coherent;
+	};
+
+	ufs_0_phy: phy@14704000 {
+		compatible = "google,gs201-ufs-phy";
+		reg = <0x0 0x14704000 0x3000>;
+		reg-names = "phy-pma";
+		clocks = <&ufs_refclk>;
+		clock-names = "ref_clk";
+		samsung,pmu-syscon = <&pmu_alive>;
+		#phy-cells = <0>;
+	};
+
+	/* UFS GPIO pin states (referenced from ufs_0) */
+	ufs_rst_n: ufs-rst-n {
+		samsung,pins = "gph3-1";
+		samsung,pin-function = <1>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	ufs_refclk_out: ufs-refclk-out {
+		samsung,pins = "gph3-0";
+		samsung,pin-function = <2>;
+		samsung,pin-pud = <0>;
+		samsung,pin-drv = <0>;
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* PMU syscon (needed by UFS PHY and power domain drivers)             */
+	/* ------------------------------------------------------------------ */
+
+	pmu_alive: pmu@18060000 {
+		compatible = "google,gs201-pmu", "syscon";
+		reg = <0x0 0x18060000 0x10000>;
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* USB 3.1 (HSI0 subsystem) — type-C port on the Pixel Fold           */
+	/* ------------------------------------------------------------------ */
+
+	usb_0: usb@11100000 {
+		compatible = "samsung,exynos850-dwusb3";
+		clocks = <&oscclk>;
+		clock-names = "bus_early";
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+		status = "disabled";
+
+		dwc3_0: usb@11110000 {
+			compatible = "snps,dwc3";
+			reg = <0x0 0x11110000 0x10000>;
+			interrupts = <GIC_SPI 379 IRQ_TYPE_LEVEL_HIGH>;
+			dr_mode = "host";
+			usb-role-switch;
+			snps,quirk-frame-length-adjustment = <0x20>;
+			snps,parkmode-disable-ss-quirk;
+		};
+	};
+
+	/* ------------------------------------------------------------------ */
+	/* Mali-G710 GPU — Panthor driver (CSF architecture)                   */
+	/*                                                                     */
+	/* The G710 is a Valhall-CSF GPU.  Clocks are ACPM DVFS-managed and   */
+	/* do not require the CMU driver.                                      */
+	/*                                                                     */
+	/* Firmware: place arm/mali/arch10.8/mali_csffw.bin in /lib/firmware  */
+	/* (extract from Android /vendor/firmware/mali_csffw.bin).            */
+	/*                                                                     */
+	/* TODO: add power-domains once a GS201 pmdomain driver exists.       */
+	/* ------------------------------------------------------------------ */
+
+	gpu: gpu@28000000 {
+		compatible = "google,gs201-mali", "arm,mali-valhall-csf";
+		reg = <0x0 0x28000000 0x480000>;
+
+		interrupts = <GIC_SPI 328 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 329 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 330 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "gpu", "job", "mmu";
+
+		/*
+		 * G3D  = shader-core clock  → "core"
+		 * G3DL2 = L2-cache bus clock → "stacks"
+		 * Both are sourced from the ACPM DVFS provider.
+		 */
+		clocks = <&acpm_ipc GS201_CLK_ACPM_DVFS_G3D>,
+			 <&acpm_ipc GS201_CLK_ACPM_DVFS_G3DL2>;
+		clock-names = "core", "stacks";
+
+		operating-points-v2 = <&gpu_opp>;
+		dynamic-power-coefficient = <625>;
+		#cooling-cells = <2>;
+	};
+
+	gpu_opp: opp-table-gpu {
+		compatible = "operating-points-v2";
+		/* G3D (shader core) frequencies in Hz */
+		opp-202000000 { opp-hz = /bits/ 64 <202000000>; };
+		opp-251000000 { opp-hz = /bits/ 64 <251000000>; };
+		opp-302000000 { opp-hz = /bits/ 64 <302000000>; };
+		opp-351000000 { opp-hz = /bits/ 64 <351000000>; };
+		opp-400000000 { opp-hz = /bits/ 64 <400000000>; };
+		opp-434000000 { opp-hz = /bits/ 64 <434000000>; };
+		opp-471000000 { opp-hz = /bits/ 64 <471000000>; };
+		opp-510000000 { opp-hz = /bits/ 64 <510000000>; };
+		opp-572000000 { opp-hz = /bits/ 64 <572000000>; };
+		opp-633000000 { opp-hz = /bits/ 64 <633000000>; };
+		opp-701000000 { opp-hz = /bits/ 64 <701000000>; };
+		opp-762000000 { opp-hz = /bits/ 64 <762000000>; };
+		opp-848000000 { opp-hz = /bits/ 64 <848000000>; };
+	};
+};
