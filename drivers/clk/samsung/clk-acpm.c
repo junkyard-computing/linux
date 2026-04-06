@@ -63,6 +63,16 @@ static const struct acpm_clk_driver_data acpm_clk_gs101 = {
 	.mbox_chan_id = 0,
 };
 
+/*
+ * GS201 (Tensor G2) has the same ACPM DVFS clock sequence as GS101 —
+ * identical channel ordering (MIF=0 … BO=13) and mailbox channel 0.
+ */
+static const struct acpm_clk_driver_data acpm_clk_gs201 = {
+	.clks = gs101_acpm_clks,
+	.nr_clks = ARRAY_SIZE(gs101_acpm_clks),
+	.mbox_chan_id = 0,
+};
+
 static unsigned long acpm_clk_recalc_rate(struct clk_hw *hw,
 					  unsigned long parent_rate)
 {
@@ -126,8 +136,12 @@ static int acpm_clk_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(acpm_handle),
 				     "Failed to get acpm handle\n");
 
-	count = acpm_clk_gs101.nr_clks;
-	mbox_chan_id = acpm_clk_gs101.mbox_chan_id;
+	const struct acpm_clk_driver_data *drv_data =
+		(const struct acpm_clk_driver_data *)
+		platform_get_device_id(pdev)->driver_data;
+
+	count = drv_data->nr_clks;
+	mbox_chan_id = drv_data->mbox_chan_id;
 
 	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, count),
 				GFP_KERNEL);
@@ -155,7 +169,7 @@ static int acpm_clk_probe(struct platform_device *pdev)
 		hws[i] = &aclk->hw;
 
 		err = acpm_clk_register(dev, aclk,
-					acpm_clk_gs101.clks[i].name);
+					drv_data->clks[i].name);
 		if (err)
 			return dev_err_probe(dev, err,
 					     "Failed to register clock\n");
@@ -166,7 +180,8 @@ static int acpm_clk_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id acpm_clk_id[] = {
-	{ "gs101-acpm-clk" },
+	{ "gs101-acpm-clk", (kernel_ulong_t)&acpm_clk_gs101 },
+	{ "gs201-acpm-clk", (kernel_ulong_t)&acpm_clk_gs201 },
 	{}
 };
 MODULE_DEVICE_TABLE(platform, acpm_clk_id);
