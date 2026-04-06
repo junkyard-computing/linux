@@ -2100,6 +2100,167 @@ const struct samsung_pinctrl_of_match_data gs101_of_data __initconst = {
 	.num_ctrl	= ARRAY_SIZE(gs101_pin_ctrl),
 };
 
+/* GS201 (Tensor G2) pin bank data.
+ *
+ * GS201 is close to GS101 but differs in three ways:
+ *  - gpa2 has 4 pins (not 5) and fltcon offsets from gpa2 onwards shift
+ *  - HSI2 loses gph3 (it moves to the new HSI2UFS controller)
+ *  - A ninth pin controller (HSI2UFS) hosts gph3
+ */
+
+/* pin banks of gs201 pin-controller 0 (ALIVE) */
+static const struct samsung_pin_bank_data gs201_pin_alive[] __initconst = {
+	GS101_PIN_BANK_EINTW(8, 0x000, "gpa0",  0x00, 0x00),
+	GS101_PIN_BANK_EINTW(7, 0x020, "gpa1",  0x04, 0x08),
+	GS101_PIN_BANK_EINTW(4, 0x040, "gpa2",  0x08, 0x10),
+	GS101_PIN_BANK_EINTW(4, 0x060, "gpa3",  0x0c, 0x14),
+	GS101_PIN_BANK_EINTW(4, 0x080, "gpa4",  0x10, 0x18),
+	GS101_PIN_BANK_EINTW(7, 0x0a0, "gpa5",  0x14, 0x1c),
+	GS101_PIN_BANK_EINTW(8, 0x0c0, "gpa9",  0x18, 0x24),
+	GS101_PIN_BANK_EINTW(2, 0x0e0, "gpa10", 0x1c, 0x2c),
+};
+
+/* pin banks of gs201 pin-controller 1 (FAR_ALIVE) */
+static const struct samsung_pin_bank_data gs201_pin_far_alive[] __initconst = {
+	GS101_PIN_BANK_EINTW(8, 0x000, "gpa6",  0x00, 0x00),
+	GS101_PIN_BANK_EINTW(4, 0x020, "gpa7",  0x04, 0x08),
+	GS101_PIN_BANK_EINTW(8, 0x040, "gpa8",  0x08, 0x0c),
+	GS101_PIN_BANK_EINTW(2, 0x060, "gpa11", 0x0c, 0x14),
+};
+
+/* pin banks of gs201 pin-controller 2 (GSACORE) */
+static const struct samsung_pin_bank_data gs201_pin_gsacore[] __initconst = {
+	GS101_PIN_BANK_EINTG(2, 0x000, "gps0", 0x00, 0x00),
+	GS101_PIN_BANK_EINTG(8, 0x020, "gps1", 0x04, 0x04),
+	GS101_PIN_BANK_EINTG(3, 0x040, "gps2", 0x08, 0x0c),
+};
+
+/* pin banks of gs201 pin-controller 3 (GSACTRL) */
+static const struct samsung_pin_bank_data gs201_pin_gsactrl[] __initconst = {
+	GS101_PIN_BANK_EINTW(6, 0x000, "gps3", 0x00, 0x00),
+};
+
+/* pin banks of gs201 pin-controller 4 (PERIC0) */
+static const struct samsung_pin_bank_data gs201_pin_peric0[] __initconst = {
+	GS101_PIN_BANK_EINTG(5, 0x000, "gpp0",  0x00, 0x00),
+	GS101_PIN_BANK_EINTG(4, 0x020, "gpp1",  0x04, 0x08),
+	GS101_PIN_BANK_EINTG(4, 0x040, "gpp2",  0x08, 0x0c),
+	GS101_PIN_BANK_EINTG(2, 0x060, "gpp3",  0x0c, 0x10),
+	GS101_PIN_BANK_EINTG(4, 0x080, "gpp4",  0x10, 0x14),
+	GS101_PIN_BANK_EINTG(2, 0x0a0, "gpp5",  0x14, 0x18),
+	GS101_PIN_BANK_EINTG(4, 0x0c0, "gpp6",  0x18, 0x1c),
+	GS101_PIN_BANK_EINTG(2, 0x0e0, "gpp7",  0x1c, 0x20),
+	GS101_PIN_BANK_EINTG(4, 0x100, "gpp8",  0x20, 0x24),
+	GS101_PIN_BANK_EINTG(2, 0x120, "gpp9",  0x24, 0x28),
+	GS101_PIN_BANK_EINTG(4, 0x140, "gpp10", 0x28, 0x2c),
+	GS101_PIN_BANK_EINTG(2, 0x160, "gpp11", 0x2c, 0x30),
+	GS101_PIN_BANK_EINTG(4, 0x180, "gpp12", 0x30, 0x34),
+	GS101_PIN_BANK_EINTG(2, 0x1a0, "gpp13", 0x34, 0x38),
+	GS101_PIN_BANK_EINTG(4, 0x1c0, "gpp14", 0x38, 0x3c),
+	GS101_PIN_BANK_EINTG(2, 0x1e0, "gpp15", 0x3c, 0x40),
+	GS101_PIN_BANK_EINTG(4, 0x200, "gpp16", 0x40, 0x44),
+	GS101_PIN_BANK_EINTG(2, 0x220, "gpp17", 0x44, 0x48),
+	GS101_PIN_BANK_EINTG(4, 0x240, "gpp18", 0x48, 0x4c),
+	GS101_PIN_BANK_EINTG(5, 0x260, "gpp19", 0x4c, 0x50),
+};
+
+/* pin banks of gs201 pin-controller 5 (PERIC1) */
+static const struct samsung_pin_bank_data gs201_pin_peric1[] __initconst = {
+	GS101_PIN_BANK_EINTG(8, 0x000, "gpp20", 0x00, 0x00),
+	GS101_PIN_BANK_EINTG(4, 0x020, "gpp21", 0x04, 0x08),
+	GS101_PIN_BANK_EINTG(2, 0x040, "gpp22", 0x08, 0x0c),
+	GS101_PIN_BANK_EINTG(8, 0x060, "gpp23", 0x0c, 0x10),
+	GS101_PIN_BANK_EINTG(4, 0x080, "gpp24", 0x10, 0x18),
+	GS101_PIN_BANK_EINTG(4, 0x0a0, "gpp25", 0x14, 0x1c),
+	GS101_PIN_BANK_EINTG(5, 0x0c0, "gpp26", 0x18, 0x20),
+	GS101_PIN_BANK_EINTG(4, 0x0e0, "gpp27", 0x1c, 0x28),
+};
+
+/* pin banks of gs201 pin-controller 6 (HSI1) */
+static const struct samsung_pin_bank_data gs201_pin_hsi1[] __initconst = {
+	GS101_PIN_BANK_EINTG(6, 0x000, "gph0", 0x00, 0x00),
+	GS101_PIN_BANK_EINTG(7, 0x020, "gph1", 0x04, 0x08),
+};
+
+/* pin banks of gs201 pin-controller 7 (HSI2) */
+static const struct samsung_pin_bank_data gs201_pin_hsi2[] __initconst = {
+	GS101_PIN_BANK_EINTG(6, 0x000, "gph2", 0x00, 0x00),
+	GS101_PIN_BANK_EINTG(6, 0x020, "gph4", 0x04, 0x08),
+};
+
+/* pin banks of gs201 pin-controller 8 (HSI2UFS) — gph3 split out */
+static const struct samsung_pin_bank_data gs201_pin_hsi2ufs[] __initconst = {
+	GS101_PIN_BANK_EINTG(2, 0x000, "gph3", 0x00, 0x00),
+};
+
+static const struct samsung_pin_ctrl gs201_pin_ctrl[] __initconst = {
+	{
+		/* pin-controller 0 ALIVE */
+		.pin_banks	= gs201_pin_alive,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_alive),
+		.eint_wkup_init	= exynos_eint_wkup_init,
+		.suspend	= gs101_pinctrl_suspend,
+		.resume		= gs101_pinctrl_resume,
+		.retention_data	= &no_retention_data,
+	}, {
+		/* pin-controller 1 FAR_ALIVE */
+		.pin_banks	= gs201_pin_far_alive,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_far_alive),
+		.eint_wkup_init	= exynos_eint_wkup_init,
+		.suspend	= gs101_pinctrl_suspend,
+		.resume		= gs101_pinctrl_resume,
+		.retention_data	= &no_retention_data,
+	}, {
+		/* pin-controller 2 GSACORE */
+		.pin_banks	= gs201_pin_gsacore,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_gsacore),
+	}, {
+		/* pin-controller 3 GSACTRL */
+		.pin_banks	= gs201_pin_gsactrl,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_gsactrl),
+	}, {
+		/* pin-controller 4 PERIC0 */
+		.pin_banks	= gs201_pin_peric0,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_peric0),
+		.eint_gpio_init	= exynos_eint_gpio_init,
+		.suspend	= gs101_pinctrl_suspend,
+		.resume		= gs101_pinctrl_resume,
+	}, {
+		/* pin-controller 5 PERIC1 */
+		.pin_banks	= gs201_pin_peric1,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_peric1),
+		.eint_gpio_init	= exynos_eint_gpio_init,
+		.suspend	= gs101_pinctrl_suspend,
+		.resume		= gs101_pinctrl_resume,
+	}, {
+		/* pin-controller 6 HSI1 */
+		.pin_banks	= gs201_pin_hsi1,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_hsi1),
+		.eint_gpio_init	= exynos_eint_gpio_init,
+		.suspend	= gs101_pinctrl_suspend,
+		.resume		= gs101_pinctrl_resume,
+	}, {
+		/* pin-controller 7 HSI2 */
+		.pin_banks	= gs201_pin_hsi2,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_hsi2),
+		.eint_gpio_init	= exynos_eint_gpio_init,
+		.suspend	= gs101_pinctrl_suspend,
+		.resume		= gs101_pinctrl_resume,
+	}, {
+		/* pin-controller 8 HSI2UFS */
+		.pin_banks	= gs201_pin_hsi2ufs,
+		.nr_banks	= ARRAY_SIZE(gs201_pin_hsi2ufs),
+		.eint_gpio_init	= exynos_eint_gpio_init,
+		.suspend	= gs101_pinctrl_suspend,
+		.resume		= gs101_pinctrl_resume,
+	},
+};
+
+const struct samsung_pinctrl_of_match_data gs201_of_data __initconst = {
+	.ctrl		= gs201_pin_ctrl,
+	.num_ctrl	= ARRAY_SIZE(gs201_pin_ctrl),
+};
+
 /* pin banks of artpec8 pin-controller (FSYS0) */
 static const struct samsung_pin_bank_data artpec8_pin_banks0[] __initconst = {
 	ARTPEC_PIN_BANK_EINTG(5, 0x000, "gpf0", 0x00),
