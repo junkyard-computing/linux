@@ -511,17 +511,26 @@ static int __init exynos4_timer_resources(struct device_node *np)
 	struct clk *mct_clk, *tick_clk;
 
 	reg_base = of_iomap(np, 0);
-	if (!reg_base)
-		panic("%s: unable to ioremap mct address space\n", __func__);
+	if (!reg_base) {
+		pr_err("%s: unable to ioremap mct address space\n", __func__);
+		return -ENOMEM;
+	}
 
 	tick_clk = of_clk_get_by_name(np, "fin_pll");
-	if (IS_ERR(tick_clk))
-		panic("%s: unable to determine tick clock rate\n", __func__);
+	if (IS_ERR(tick_clk)) {
+		pr_err("%s: unable to determine tick clock rate\n", __func__);
+		iounmap(reg_base);
+		return PTR_ERR(tick_clk);
+	}
 	clk_rate = clk_get_rate(tick_clk);
+	clk_put(tick_clk);
 
 	mct_clk = of_clk_get_by_name(np, "mct");
-	if (IS_ERR(mct_clk))
-		panic("%s: unable to retrieve mct clock instance\n", __func__);
+	if (IS_ERR(mct_clk)) {
+		pr_err("%s: unable to retrieve mct clock instance\n", __func__);
+		iounmap(reg_base);
+		return PTR_ERR(mct_clk);
+	}
 	clk_prepare_enable(mct_clk);
 
 	return 0;
