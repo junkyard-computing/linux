@@ -350,6 +350,30 @@
 	};
 
 	/* ------------------------------------------------------------------ */
+	/* Watchdog timers                                                      */
+	/* ------------------------------------------------------------------ */
+
+	watchdog_cl0: watchdog@10060000 {
+		compatible = "google,gs201-wdt";
+		reg = <0x0 0x10060000 0x100>;
+		clocks = <&oscclk>;
+		clock-names = "watchdog";
+		interrupts = <GIC_SPI 797 IRQ_TYPE_LEVEL_HIGH>;
+		samsung,syscon-phandle = <&pmu_alive>;
+		samsung,cluster-index = <0>;
+	};
+
+	watchdog_cl1: watchdog@10070000 {
+		compatible = "google,gs201-wdt";
+		reg = <0x0 0x10070000 0x100>;
+		clocks = <&oscclk>;
+		clock-names = "watchdog";
+		interrupts = <GIC_SPI 798 IRQ_TYPE_LEVEL_HIGH>;
+		samsung,syscon-phandle = <&pmu_alive>;
+		samsung,cluster-index = <1>;
+	};
+
+	/* ------------------------------------------------------------------ */
 	/* ACPM — Always-on Power Management coprocessor                       */
 	/* ------------------------------------------------------------------ */
 
