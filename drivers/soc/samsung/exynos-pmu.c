@@ -124,6 +124,19 @@ static const struct of_device_id exynos_pmu_of_device_ids[] = {
 		.compatible = "google,gs101-pmu",
 		.data = &gs101_pmu_data,
 	}, {
+		/*
+		 * GS201 (Tensor G2) shares the gs101 PMU register layout and
+		 * the TENSOR_SMC_PMU_SEC_REG (0x82000504) interface for
+		 * mediated writes — the SMC firmware allowlist on gs201
+		 * accepts the same offsets gs101 does (verified via SMC probe).
+		 * Reusing gs101_pmu_data routes writes through
+		 * tensor_sec_reg_write/rmw, which is required for the UFS PHY
+		 * isolation register at PMU_ALIVE+0x3ec8 — a direct MMIO write
+		 * triggers a synchronous external abort on this SoC.
+		 */
+		.compatible = "google,gs201-pmu",
+		.data = &gs101_pmu_data,
+	}, {
 		.compatible = "samsung,exynos3250-pmu",
 		.data = exynos_pmu_data_arm_ptr(exynos3250_pmu_data),
 	}, {

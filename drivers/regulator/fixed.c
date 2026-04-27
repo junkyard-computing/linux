@@ -322,6 +322,12 @@ static int reg_fixed_voltage_probe(struct platform_device *pdev)
 	if (IS_ERR(cfg.ena_gpiod))
 		return dev_err_probe(&pdev->dev, PTR_ERR(cfg.ena_gpiod),
 				     "can't get GPIO\n");
+	dev_info(&pdev->dev, "FIXED-DBG: probe name=%s gpiod=%s gflags=0x%x boot_on=%d\n",
+		 drvdata->desc.name, cfg.ena_gpiod ? "present" : "NULL",
+		 gflags, config->enabled_at_boot);
+	if (cfg.ena_gpiod)
+		dev_info(&pdev->dev, "FIXED-DBG: initial gpiod value = %d\n",
+			 gpiod_get_value_cansleep(cfg.ena_gpiod));
 
 	cfg.dev = &pdev->dev;
 	cfg.init_data = config->init_data;
