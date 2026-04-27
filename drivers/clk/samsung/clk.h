@@ -395,6 +395,16 @@ struct samsung_cmu_info {
 	u32 option_offset;
 	u32 drcg_offset;
 	u32 memclk_offset;
+
+	/*
+	 * Optional list of clock IDs to skip during registration. Used on
+	 * gs201 where some CMU_TOP dividers/muxes/gates feed power-gated
+	 * sub-blocks (BO, AUR, G3D, DPU, MFC, etc.); reading their registers
+	 * before the power-domain driver turns the block on triggers an
+	 * asynchronous SError that panics the kernel.
+	 */
+	const unsigned int *skip_ids;
+	unsigned int nr_skip_ids;
 };
 
 struct samsung_clk_provider *samsung_clk_init(struct device *dev,
