@@ -1443,6 +1443,83 @@ static const struct samsung_cmu_info top_cmu_info __initconst = {
 	.option_offset		= CMU_CMU_TOP_CONTROLLER_OPTION,
 };
 
+/*
+ * gs201 CMU_TOP: clocks that feed power-gated sub-blocks must be skipped
+ * during registration, otherwise samsung_clk_register_{mux,div,gate}() will
+ * readl() a register whose target power-domain is off and trigger an
+ * asynchronous SError. AOSP's vendor tree handles this by turning on power
+ * domains via pkvm-s2mpu + exynos-pd pKVM modules before probing CMU; we
+ * don't have those, so we just avoid touching the problem registers.
+ *
+ * Blocks skipped here: BO (boost), AUR (AI unit), CSIS+DNS+G3AA+IPP+MCSC
+ * (camera ISP), DPU (display), G2D, GDC (global distortion correction), G3D
+ * (GPU), MFC (video), TNR (temporal noise reduction), TPU. HSI0/HSI2/MIF/
+ * PERIC0/PERIC1 and other always-on paths stay in the registered set.
+ *
+ * If any of these domains later needs to be managed, power it on first, then
+ * drop the corresponding ID from this list.
+ */
+static const unsigned int gs201_top_skip_ids[] __initconst = {
+	CLK_MOUT_CMU_BO_BUS,     CLK_DOUT_CMU_BO_BUS,     CLK_GOUT_CMU_BO_BUS,
+	CLK_MOUT_CMU_CSIS_BUS,   CLK_DOUT_CMU_CSIS_BUS,   CLK_GOUT_CMU_CSIS_BUS,
+	CLK_MOUT_CMU_DNS_BUS,    CLK_DOUT_CMU_DNS_BUS,    CLK_GOUT_CMU_DNS_BUS,
+	CLK_MOUT_CMU_DPU_BUS,    CLK_DOUT_CMU_DPU_BUS,    CLK_GOUT_CMU_DPU_BUS,
+	CLK_MOUT_CMU_G2D_G2D,    CLK_DOUT_CMU_G2D_G2D,    CLK_GOUT_CMU_G2D_G2D,
+	CLK_MOUT_CMU_G2D_MSCL,   CLK_DOUT_CMU_G2D_MSCL,   CLK_GOUT_CMU_G2D_MSCL,
+	CLK_MOUT_CMU_G3AA_G3AA,  CLK_DOUT_CMU_G3AA_G3AA,  CLK_GOUT_CMU_G3AA_G3AA,
+	CLK_MOUT_CMU_G3D_BUSD,   CLK_DOUT_CMU_G3D_BUSD,   CLK_GOUT_CMU_G3D_BUSD,
+	CLK_MOUT_CMU_G3D_GLB,    CLK_DOUT_CMU_G3D_GLB,    CLK_GOUT_CMU_G3D_GLB,
+	CLK_MOUT_CMU_G3D_SWITCH, CLK_DOUT_CMU_G3D_SWITCH, CLK_GOUT_CMU_G3D_SWITCH,
+	CLK_MOUT_CMU_GDC_GDC0,   CLK_DOUT_CMU_GDC_GDC0,   CLK_GOUT_CMU_GDC_GDC0,
+	CLK_MOUT_CMU_GDC_GDC1,   CLK_DOUT_CMU_GDC_GDC1,   CLK_GOUT_CMU_GDC_GDC1,
+	CLK_MOUT_CMU_GDC_SCSC,   CLK_DOUT_CMU_GDC_SCSC,   CLK_GOUT_CMU_GDC_SCSC,
+	CLK_MOUT_CMU_IPP_BUS,    CLK_DOUT_CMU_IPP_BUS,    CLK_GOUT_CMU_IPP_BUS,
+	CLK_MOUT_CMU_MCSC_ITSC,  CLK_DOUT_CMU_MCSC_ITSC,  CLK_GOUT_CMU_MCSC_ITSC,
+	CLK_MOUT_CMU_MCSC_MCSC,  CLK_DOUT_CMU_MCSC_MCSC,  CLK_GOUT_CMU_MCSC_MCSC,
+	CLK_MOUT_CMU_MFC_MFC,    CLK_DOUT_CMU_MFC_MFC,    CLK_GOUT_CMU_MFC_MFC,
+	CLK_MOUT_CMU_TNR_BUS,    CLK_DOUT_CMU_TNR_BUS,    CLK_GOUT_CMU_TNR_BUS,
+	CLK_MOUT_CMU_TPU_BUS,    CLK_DOUT_CMU_TPU_BUS,    CLK_GOUT_CMU_TPU_BUS,
+	CLK_MOUT_CMU_TPU_TPU,    CLK_DOUT_CMU_TPU_TPU,    CLK_GOUT_CMU_TPU_TPU,
+	CLK_MOUT_CMU_TPU_TPUCTL, CLK_DOUT_CMU_TPU_TPUCTL, CLK_GOUT_CMU_TPU_TPUCTL,
+	CLK_MOUT_CMU_TPU_UART,   CLK_DOUT_CMU_TPU_UART,   CLK_GOUT_CMU_TPU_UART,
+	/*
+	 * Empirically, on gs201 only SHARED0_DIV2 and SHARED0_DIV3 are
+	 * physically present in CMU_TOP — everything from SHARED0_DIV4
+	 * onwards (div4/5, all of shared1/2/3) is a register-hole and
+	 * reading async-aborts the kernel. gs201 has fewer shared-PLL
+	 * fan-out dividers than gs101. No muxes or gates reference these
+	 * IDs, so just dropping the divs is sufficient.
+	 */
+	CLK_DOUT_CMU_SHARED0_DIV4,
+	CLK_DOUT_CMU_SHARED0_DIV5,
+	CLK_DOUT_CMU_SHARED1_DIV2,
+	CLK_DOUT_CMU_SHARED1_DIV3,
+	CLK_DOUT_CMU_SHARED1_DIV4,
+	CLK_DOUT_CMU_SHARED2_DIV2,
+	CLK_DOUT_CMU_SHARED3_DIV2,
+};
+
+static const struct samsung_cmu_info top_cmu_info_gs201 __initconst = {
+	.pll_clks		= cmu_top_pll_clks,
+	.nr_pll_clks		= ARRAY_SIZE(cmu_top_pll_clks),
+	.mux_clks		= cmu_top_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(cmu_top_mux_clks),
+	.div_clks		= cmu_top_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(cmu_top_div_clks),
+	.fixed_factor_clks	= cmu_top_ffactor,
+	.nr_fixed_factor_clks	= ARRAY_SIZE(cmu_top_ffactor),
+	.gate_clks		= cmu_top_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(cmu_top_gate_clks),
+	.nr_clk_ids		= CLKS_NR_TOP,
+	.clk_regs		= cmu_top_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(cmu_top_clk_regs),
+	.auto_clock_gate	= true,
+	.gate_dbg_offset	= GS101_GATE_DBG_OFFSET,
+	.option_offset		= CMU_CMU_TOP_CONTROLLER_OPTION,
+	.skip_ids		= gs201_top_skip_ids,
+	.nr_skip_ids		= ARRAY_SIZE(gs201_top_skip_ids),
+};
+
 static void __init gs101_cmu_top_init(struct device_node *np)
 {
 	exynos_arm64_register_cmu(NULL, np, &top_cmu_info);
@@ -1451,6 +1528,17 @@ static void __init gs101_cmu_top_init(struct device_node *np)
 /* Register CMU_TOP early, as it's a dependency for other early domains */
 CLK_OF_DECLARE(gs101_cmu_top, "google,gs101-cmu-top",
 	       gs101_cmu_top_init);
+
+/*
+ * GS201 (Tensor G2) CMU register bases match GS101 1:1 per the AOSP cal-if
+ * SFR tables, so each gs201-* compat aliases to the gs101 init/info data.
+ *
+ * NOTE: on gs201, CMU access is gated by BL31 until pKVM initializes at EL2
+ * (see memory/project_pkvm_cmu_unlock.md). time_init() runs before KVM init,
+ * so gs201-cmu-top must NOT be declared via CLK_OF_DECLARE — instead it's
+ * registered as a platform device in gs101_cmu_of_match below, which probes
+ * at late_initcall (after KVM has brought up pKVM and opened the CMU gate).
+ */
 
 /* ---- CMU_APM ------------------------------------------------------------- */
 
@@ -3753,6 +3841,9 @@ static void __init gs101_cmu_misc_init(struct device_node *np)
 /* Register CMU_MISC early, as it's needed for MCT timer */
 CLK_OF_DECLARE(gs101_cmu_misc, "google,gs101-cmu-misc",
 	       gs101_cmu_misc_init);
+/* GS201 CMU_MISC shares the GS101 layout (SFR_BLOCK base 0x10010000). */
+CLK_OF_DECLARE(gs201_cmu_misc, "google,gs201-cmu-misc",
+	       gs101_cmu_misc_init);
 
 /* ---- CMU_PERIC0 ---------------------------------------------------------- */
 
@@ -4739,6 +4830,27 @@ static const struct of_device_id gs101_cmu_of_match[] = {
 		.compatible = "google,gs101-cmu-peric1",
 		.data = &peric1_cmu_info,
 	}, {
+		.compatible = "google,gs201-cmu-top",
+		.data = &top_cmu_info_gs201,
+	}, {
+		.compatible = "google,gs201-cmu-apm",
+		.data = &apm_cmu_info,
+	}, {
+		.compatible = "google,gs201-cmu-dpu",
+		.data = &dpu_cmu_info,
+	}, {
+		.compatible = "google,gs201-cmu-hsi0",
+		.data = &hsi0_cmu_info,
+	}, {
+		.compatible = "google,gs201-cmu-hsi2",
+		.data = &hsi2_cmu_info,
+	}, {
+		.compatible = "google,gs201-cmu-peric0",
+		.data = &peric0_cmu_info,
+	}, {
+		.compatible = "google,gs201-cmu-peric1",
+		.data = &peric1_cmu_info,
+	}, {
 	},
 };
 
@@ -4755,4 +4867,9 @@ static int __init gs101_cmu_init(void)
 {
 	return platform_driver_register(&gs101_cmu_driver);
 }
-core_initcall(gs101_cmu_init);
+/*
+ * late_initcall (not core_initcall) because on gs201, BL31 firewalls CMU
+ * access until pKVM initializes at EL2 (module_init level = device_initcall).
+ * Dependent drivers (UFS, UART, etc.) defer-probe until CMU is ready.
+ */
+late_initcall(gs101_cmu_init);
