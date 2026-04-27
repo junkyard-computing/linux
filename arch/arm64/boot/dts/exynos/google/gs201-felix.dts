@@ -27,6 +27,7 @@
 /dts-v1/;
 
 #include "gs201.dtsi"
+#include "gs201-android-handoff.dtsi"
 
 / {
 	model = "Google Pixel Fold";
@@ -35,12 +36,40 @@
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
+
+	/*
+	 * Fixed-regulator stub for the Mali GPU supply. Panthor's probe looks
+	 * up a "mali" regulator via devm_regulator_get() to satisfy OPP voltage
+	 * scaling and the Energy Model; on felix the GPU is actually fed by an
+	 * ACPM-managed rail (BUCK_S2MPG13_3 / VDD_G3D), but there's no driver
+	 * for that in this tree yet. A fixed-voltage regulator-always-on stub
+	 * satisfies the regulator handle lookup and silences the
+	 * "no regulator (mali) found" / "EM: invalid perf. state" errors during
+	 * panthor probe. The GPU rail is already powered by the bootloader so
+	 * nothing actually changes voltage at runtime.
+	 */
+	mali_vreg: regulator-mali {
+		compatible = "regulator-fixed";
+		regulator-name = "mali";
+		regulator-min-microvolt = <900000>;
+		regulator-max-microvolt = <900000>;
+		regulator-always-on;
+	};
 };
 
-/* Enable the debug UART (UART0 / PERIC0 USI0) */
-&serial_0 {
-	status = "okay";
+/* Wire the stub regulator to the GPU node as its mali-supply. */
+&gpu {
+	mali-supply = <&mali_vreg>;
 };
+
+/*
+ * Debug UART (UART0 / PERIC0 USI0) stays disabled at the dtb layer — the
+ * gs201 CMU registers aren't accessible from non-secure EL1 (interconnect
+ * rejects the access regardless of pKVM/AVB state). With &oscclk stubs
+ * samsung_tty would mis-program the divider and garble output. Earlycon
+ * still works on UART0 because it polls the bootloader-configured divider
+ * (cmdline earlycon=exynos4210,mmio32,0x10A00000).
+ */
 
 /*
  * Enable UFS storage.
@@ -54,3 +83,11 @@
 &ufs_0_phy {
 	status = "okay";
 };
+
+/* watchdog_cl1 stays disabled: the s3c2410-wdt of_match table maps
+ * google,gs201-wdt → drv_data_gs101_cl0 only, so cl1 would inherit
+ * cluster-0 PMU register offsets. */
+&watchdog_cl1 {
+	status = "disabled";
+};
+

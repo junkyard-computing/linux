@@ -457,10 +457,60 @@ void samsung_clk_extended_sleep_init(void __iomem *reg_base,
  * @cmu: CMU object with clocks to register
  * @np:  CMU device tree node
  */
+static bool samsung_cmu_skip_id(const struct samsung_cmu_info *cmu,
+				unsigned int id)
+{
+	unsigned int i;
+
+	for (i = 0; i < cmu->nr_skip_ids; i++)
+		if (cmu->skip_ids[i] == id)
+			return true;
+	return false;
+}
+
+/*
+ * Copy `src` into a newly allocated array, dropping entries whose `.id` is in
+ * cmu->skip_ids. Used by samsung_cmu_register_clocks() so each per-clock-type
+ * register helper sees a filtered list without having to be skip-aware itself.
+ *
+ * Each samsung_{mux,div,gate,pll,...}_clock has `.id` at the same position —
+ * the helper macro below works because C allows us to treat the first field
+ * as unsigned int via a cast when all structs follow the same layout.
+ * (Verified: pll/mux/div/gate/fixed_rate/fixed_factor all start with
+ * `unsigned int id`.)
+ */
+#define SAMSUNG_FILTER_CLKS(type_, dst_arr_, dst_cnt_, src_arr_, src_cnt_, cmu_) \
+do {									\
+	unsigned int _i, _n = 0;					\
+	type_ *_out;							\
+	_out = kcalloc((src_cnt_), sizeof(*_out), GFP_KERNEL);		\
+	if (!_out) {							\
+		(dst_arr_) = (src_arr_);				\
+		(dst_cnt_) = (src_cnt_);				\
+		break;							\
+	}								\
+	for (_i = 0; _i < (src_cnt_); _i++) {				\
+		if (samsung_cmu_skip_id((cmu_), (src_arr_)[_i].id))	\
+			continue;					\
+		_out[_n++] = (src_arr_)[_i];				\
+	}								\
+	(dst_arr_) = _out;						\
+	(dst_cnt_) = _n;						\
+} while (0)
+
 void __init samsung_cmu_register_clocks(struct samsung_clk_provider *ctx,
 					const struct samsung_cmu_info *cmu,
 					struct device_node *np)
 {
+	const struct samsung_pll_clock *pll_clks = cmu->pll_clks;
+	const struct samsung_mux_clock *mux_clks = cmu->mux_clks;
+	const struct samsung_div_clock *div_clks = cmu->div_clks;
+	const struct samsung_gate_clock *gate_clks = cmu->gate_clks;
+	unsigned int nr_pll_clks = cmu->nr_pll_clks;
+	unsigned int nr_mux_clks = cmu->nr_mux_clks;
+	unsigned int nr_div_clks = cmu->nr_div_clks;
+	unsigned int nr_gate_clks = cmu->nr_gate_clks;
+
 	if (cmu->auto_clock_gate && samsung_is_auto_capable(np))
 		ctx->auto_clock_gate = cmu->auto_clock_gate;
 
@@ -469,15 +519,37 @@ void __init samsung_cmu_register_clocks(struct samsung_clk_provider *ctx,
 	ctx->drcg_offset = cmu->drcg_offset;
 	ctx->memclk_offset = cmu->memclk_offset;
 
-	if (cmu->pll_clks)
-		samsung_clk_register_pll(ctx, cmu->pll_clks, cmu->nr_pll_clks);
-	if (cmu->mux_clks)
-		samsung_clk_register_mux(ctx, cmu->mux_clks, cmu->nr_mux_clks);
-	if (cmu->div_clks)
-		samsung_clk_register_div(ctx, cmu->div_clks, cmu->nr_div_clks);
-	if (cmu->gate_clks)
-		samsung_clk_register_gate(ctx, cmu->gate_clks,
-					  cmu->nr_gate_clks);
+	if (cmu->nr_skip_ids && cmu->skip_ids) {
+		if (pll_clks)
+			SAMSUNG_FILTER_CLKS(struct samsung_pll_clock,
+					    pll_clks, nr_pll_clks,
+					    cmu->pll_clks, cmu->nr_pll_clks,
+					    cmu);
+		if (mux_clks)
+			SAMSUNG_FILTER_CLKS(struct samsung_mux_clock,
+					    mux_clks, nr_mux_clks,
+					    cmu->mux_clks, cmu->nr_mux_clks,
+					    cmu);
+		if (div_clks)
+			SAMSUNG_FILTER_CLKS(struct samsung_div_clock,
+					    div_clks, nr_div_clks,
+					    cmu->div_clks, cmu->nr_div_clks,
+					    cmu);
+		if (gate_clks)
+			SAMSUNG_FILTER_CLKS(struct samsung_gate_clock,
+					    gate_clks, nr_gate_clks,
+					    cmu->gate_clks, cmu->nr_gate_clks,
+					    cmu);
+	}
+
+	if (pll_clks)
+		samsung_clk_register_pll(ctx, pll_clks, nr_pll_clks);
+	if (mux_clks)
+		samsung_clk_register_mux(ctx, mux_clks, nr_mux_clks);
+	if (div_clks)
+		samsung_clk_register_div(ctx, div_clks, nr_div_clks);
+	if (gate_clks)
+		samsung_clk_register_gate(ctx, gate_clks, nr_gate_clks);
 	if (cmu->fixed_clks)
 		samsung_clk_register_fixed_rate(ctx, cmu->fixed_clks,
 						cmu->nr_fixed_clks);
@@ -486,6 +558,17 @@ void __init samsung_cmu_register_clocks(struct samsung_clk_provider *ctx,
 						  cmu->nr_fixed_factor_clks);
 	if (cmu->cpu_clks)
 		samsung_clk_register_cpu(ctx, cmu->cpu_clks, cmu->nr_cpu_clks);
+
+	if (cmu->nr_skip_ids && cmu->skip_ids) {
+		if (pll_clks != cmu->pll_clks)
+			kfree(pll_clks);
+		if (mux_clks != cmu->mux_clks)
+			kfree(mux_clks);
+		if (div_clks != cmu->div_clks)
+			kfree(div_clks);
+		if (gate_clks != cmu->gate_clks)
+			kfree(gate_clks);
+	}
 }
 
 /* Each bit enable/disables DRCG of a bus component */

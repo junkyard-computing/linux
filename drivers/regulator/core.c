@@ -2910,9 +2910,17 @@ static int regulator_ena_gpio_ctrl(struct regulator_dev *rdev, bool enable)
 	if (enable) {
 		/* Enable GPIO at initial use */
 		if (pin->enable_count == 0) {
+			pr_info("REG-GPIO-DBG: %s ENABLE -> drive 1 (enable_count was 0)\n",
+				rdev_get_name(rdev));
 			ret = gpiod_set_value_cansleep(pin->gpiod, 1);
 			if (ret)
 				return ret;
+			pr_info("REG-GPIO-DBG: %s post-set value=%d\n",
+				rdev_get_name(rdev),
+				gpiod_get_value_cansleep(pin->gpiod));
+		} else {
+			pr_info("REG-GPIO-DBG: %s ENABLE (refcounted, count=%u)\n",
+				rdev_get_name(rdev), pin->enable_count);
 		}
 
 		pin->enable_count++;
@@ -2924,6 +2932,8 @@ static int regulator_ena_gpio_ctrl(struct regulator_dev *rdev, bool enable)
 
 		/* Disable GPIO if not used */
 		if (pin->enable_count <= 1) {
+			pr_info("REG-GPIO-DBG: %s DISABLE -> drive 0\n",
+				rdev_get_name(rdev));
 			ret = gpiod_set_value_cansleep(pin->gpiod, 0);
 			if (ret)
 				return ret;

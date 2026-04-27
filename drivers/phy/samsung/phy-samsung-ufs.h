@@ -145,6 +145,15 @@ static inline struct samsung_ufs_phy *get_samsung_ufs_phy(struct phy *phy)
 static inline void samsung_ufs_phy_ctrl_isol(
 		struct samsung_ufs_phy *phy, u32 isol)
 {
+	/*
+	 * drvdata can opt out of software-controlled isolation by leaving
+	 * phy->isol.mask zero. gs201 (Tensor G2) routes PMU isolation
+	 * through ACPM; a non-secure write to PMU_ALIVE + 0x3ec8 triggers
+	 * an implementation-defined SError on that SoC.
+	 */
+	if (!phy->isol.mask)
+		return;
+
 	regmap_update_bits(phy->reg_pmu, phy->isol.offset,
 			   phy->isol.mask, isol ? 0 : phy->isol.en);
 }
@@ -159,5 +168,6 @@ extern const struct samsung_ufs_phy_drvdata exynosautov9_ufs_phy;
 extern const struct samsung_ufs_phy_drvdata exynosautov920_ufs_phy;
 extern const struct samsung_ufs_phy_drvdata fsd_ufs_phy;
 extern const struct samsung_ufs_phy_drvdata tensor_gs101_ufs_phy;
+extern const struct samsung_ufs_phy_drvdata tensor_gs201_ufs_phy;
 
 #endif /* _PHY_SAMSUNG_UFS_ */

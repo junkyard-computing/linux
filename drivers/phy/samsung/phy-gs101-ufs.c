@@ -208,3 +208,25 @@ const struct samsung_ufs_phy_drvdata tensor_gs101_ufs_phy = {
 	.wait_for_cal = gs101_phy_wait_for_calibration,
 	.wait_for_cdr = gs101_phy_wait_for_cdr_lock,
 };
+
+/*
+ * GS201 (Tensor G2) UFS PHY. Same register layout as GS101. The PMU isolation
+ * register at TENSOR_GS101_PHY_CTRL (PMU_ALIVE+0x3ec8) is direct-MMIO blocked
+ * on gs201 (writes SError) but is on the BL31 SMC allowlist for
+ * TENSOR_SMC_PMU_SEC_REG (verified by smc-probe). With pmu_alive's compat set
+ * to just "google,gs201-pmu" (no "syscon" fallback), exynos-pmu installs an
+ * SMC-routed regmap that handles the write transparently.
+ */
+const struct samsung_ufs_phy_drvdata tensor_gs201_ufs_phy = {
+	.cfgs = tensor_gs101_ufs_phy_cfgs,
+	.cfgs_hibern8 = tensor_gs101_hibern8_cfgs,
+	.isol = {
+		.offset = TENSOR_GS101_PHY_CTRL,
+		.mask = TENSOR_GS101_PHY_CTRL_MASK,
+		.en = TENSOR_GS101_PHY_CTRL_EN,
+	},
+	.clk_list = tensor_gs101_ufs_phy_clks,
+	.num_clks = ARRAY_SIZE(tensor_gs101_ufs_phy_clks),
+	.wait_for_cal = gs101_phy_wait_for_calibration,
+	.wait_for_cdr = gs101_phy_wait_for_cdr_lock,
+};

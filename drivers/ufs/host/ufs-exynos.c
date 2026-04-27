@@ -239,6 +239,175 @@ static int gs101_ufs_drv_init(struct exynos_ufs *ufs)
 	return exynos_ufs_shareability(ufs);
 }
 
+/*
+ * gs201 CMU_HSI2 clock-state probe. Confirms (or rules out) the hypothesis
+ * that the bootloader's "[UFS] shutdown complete" leaves UFS AXI/UNIPRO clocks
+ * gated, while the PHY clock stays running. Mainline gs201.dtsi exposes UFS
+ * clocks as `fixed-clock` stubs (no real gate hooks), so clk_prepare_enable
+ * during probe is a no-op. If bit21 (CG_VAL) of the per-IP gate registers is
+ * 0 here, the controller is running without an AXI clock — explains link
+ * startup PASS + NOP-OUT response slot all-zero (controller "completed" but
+ * DMA never wrote into memory).
+ *
+ * Offsets sourced from AOSP cal-if cmucal-sfr.c (gs201).
+ */
+static void gs201_dump_cmu_hsi2_ufs_gates(struct device *dev)
+{
+	void __iomem *base = ioremap(0x14400000, 0x4000);
+	if (!base) {
+		dev_err(dev, "CMU-HSI2 dump: ioremap failed\n");
+		return;
+	}
+
+#define DUMP(name, off) \
+	do { \
+		u32 v = readl(base + (off)); \
+		dev_info(dev, "CMU-HSI2 %-44s @0x%04x = 0x%08x  CG_VAL=%u  MANUAL=%u\n", \
+			 name, (off), v, !!(v & BIT(21)), !!(v & BIT(20))); \
+	} while (0)
+
+	DUMP("PLL_CON0_MUX_CLKCMU_HSI2_UFS_EMBD_USER", 0x0630);
+	DUMP("PLL_CON1_MUX_CLKCMU_HSI2_UFS_EMBD_USER", 0x0634);
+	DUMP("CLK_CON_GAT_QE_UFS_EMBD_HSI2_ACLK     ", 0x20a4);
+	DUMP("CLK_CON_GAT_QE_UFS_EMBD_HSI2_PCLK     ", 0x20a8);
+	DUMP("CLK_CON_GAT_UFS_EMBD_I_ACLK           ", 0x20e8);
+	DUMP("CLK_CON_GAT_UFS_EMBD_I_CLK_UNIPRO     ", 0x20ec);
+	DUMP("CLK_CON_GAT_UFS_EMBD_I_FMP_CLK        ", 0x20f0);
+#undef DUMP
+
+	iounmap(base);
+}
+
+/*
+ * Dump UFSP (UFS Protector / SMU security-fence) registers. mainline writes
+ * UFSPSBEGIN0/END0/LUN0/CTRL0 in `exynos_ufs_config_smu` to put the fence
+ * in pass-through mode for non-secure DMA. On gs201 these direct MMIO writes
+ * may be silently absorbed by the bus (no SError observed) without actually
+ * programming the fence — leaving it in a default "block all non-secure"
+ * state. That would match our symptom: controller completes UPIU transactions
+ * with no error, but device response never reaches memory because the fence
+ * drops all DMA. Read the UFSP regs and check if our writes took effect.
+ */
+static void gs201_dump_ufsp(struct device *dev, const char *label)
+{
+	/*
+	 * UFSPSBEGIN0/END0/LUN0/CTRL0 live at offset 0x200+, so a 0x100-byte
+	 * ioremap (matching the DT region size) misses them. Map the full page
+	 * to capture all the relevant registers.
+	 */
+	void __iomem *base = ioremap(0x14600000, 0x1000);
+	if (!base) {
+		dev_err(dev, "UFSP dump (%s): ioremap failed\n", label);
+		return;
+	}
+	dev_info(dev, "UFSP %s: SECURITY=0x%08x SBEGIN0=0x%08x SEND0=0x%08x SLUN0=0x%08x SCTRL0=0x%08x\n",
+		 label,
+		 readl(base + 0x010),	/* UFSPRSECURITY */
+		 readl(base + 0x200),	/* UFSPSBEGIN0   */
+		 readl(base + 0x204),	/* UFSPSEND0     */
+		 readl(base + 0x208),	/* UFSPSLUN0     */
+		 readl(base + 0x20c));	/* UFSPSCTRL0    */
+	iounmap(base);
+}
+
+/*
+ * gs201 SMU/UFSP init via SMC. mainline's exynos_ufs_config_smu writes UFSP
+ * registers directly; the UFSP region returns a bus-fault sentinel
+ * (0xffe26492) for every read from EL1, so the writes are silently absorbed
+ * too. The fence stays in whatever state BL31 left it in, which (based on
+ * the symptom — controller fires UTRCS without doing any DMA) is "block all
+ * non-secure DMA".
+ *
+ * AOSP calls BOTH SMC_CMD_FMP_SECURITY and SMC_CMD_SMU(SMU_INIT) to have
+ * BL31 program the fence. The previous attempt called only SMC_CMD_SMU;
+ * try the full pair this time. We use CFG_DESCTYPE_3 like AOSP does — the
+ * existing comment warns BL31 doesn't program DESCTYPE on gs201 anyway,
+ * so it shouldn't matter for our 16-byte PRDT setup.
+ *
+ * SMC IDs from AOSP soc/samsung/exynos-smc.h:
+ *   SMC_CMD_FMP_SECURITY = 0xC2001810
+ *   SMC_CMD_SMU          = 0xC2001850
+ *   SMU_INIT             = 0
+ *   SMU_EMBEDDED         = 0
+ *   CFG_DESCTYPE_3       = 3
+ */
+#define SMC_CMD_FMP_SECURITY	0xC2001810UL
+#define SMC_CMD_SMU		0xC2001850UL
+#define SMC_CMD_FMP_SMU_RESUME	0xC2001860UL
+#define SMC_CMD_FMP_SMU_DUMP	0xC2001870UL
+#define SMU_INIT		0UL
+#define SMU_EMBEDDED		0UL
+#define CFG_DESCTYPE_3		3UL
+
+static int gs201_ufs_smu_init(struct device *dev)
+{
+	struct arm_smccc_res res;
+	unsigned long desctype;
+
+	/* Try each DESCTYPE — see if a non-3 value unlocks writes for our
+	 * mainline 16-byte PRDT setup (we don't enable inline crypto).
+	 */
+	for (desctype = 0; desctype <= 3; desctype++) {
+		arm_smccc_smc(SMC_CMD_FMP_SECURITY, 0, SMU_EMBEDDED, desctype,
+			      0, 0, 0, 0, &res);
+		dev_info(dev, "SMC_CMD_FMP_SECURITY(0, SMU_EMBEDDED, %lu) -> a0=0x%lx a1=0x%lx\n",
+			 desctype, res.a0, res.a1);
+	}
+
+	arm_smccc_smc(SMC_CMD_SMU, SMU_INIT, SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
+	dev_info(dev, "SMC_CMD_SMU(SMU_INIT, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx\n",
+		 res.a0, res.a1);
+
+	/* RESUME — name suggests "re-enable after suspend", might be what
+	 * mainline needs at probe (we're effectively post-suspend from BL).
+	 */
+	arm_smccc_smc(SMC_CMD_FMP_SMU_RESUME, 0, SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
+	dev_info(dev, "SMC_CMD_FMP_SMU_RESUME(0, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx\n",
+		 res.a0, res.a1);
+
+	arm_smccc_smc(SMC_CMD_FMP_SMU_DUMP, 0, SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
+	dev_info(dev, "SMC_CMD_FMP_SMU_DUMP(0, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+		 res.a0, res.a1, res.a2, res.a3);
+
+	return 0;
+}
+
+/*
+ * Read sysreg_hsi2 + 0x710 directly. mainline's exynos_ufs_shareability uses
+ * regmap_update_bits to set the IO-coherency bits there for HSI2 DMA. If
+ * that write is silently absorbed (similar to UFSP), our IOCC setup is a
+ * no-op and the controller's DMA may not be marked as coherent across the
+ * memory hierarchy.
+ *
+ * sysreg_hsi2 base from gs201.dtsi: 0x14420000.
+ */
+static void gs201_dump_sysreg_hsi2_iocc(struct device *dev, const char *label)
+{
+	void __iomem *base = ioremap(0x14420000, 0x1000);
+	if (!base) {
+		dev_err(dev, "sysreg-HSI2 dump (%s): ioremap failed\n", label);
+		return;
+	}
+	dev_info(dev, "sysreg-HSI2 IOCC %s: @0x710 = 0x%08x\n",
+		 label, readl(base + 0x710));
+	iounmap(base);
+}
+
+static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
+{
+	struct device *dev = ufs->hba->dev;
+	int ret;
+
+	gs201_dump_cmu_hsi2_ufs_gates(dev);
+	gs201_dump_ufsp(dev, "before-smc");
+	gs201_dump_sysreg_hsi2_iocc(dev, "before-iocc-write");
+	gs201_ufs_smu_init(dev);
+	gs201_dump_ufsp(dev, "after-smc ");
+	ret = gs101_ufs_drv_init(ufs);   /* this calls exynos_ufs_shareability */
+	gs201_dump_sysreg_hsi2_iocc(dev, "after-iocc-write ");
+	return ret;
+}
+
 static int exynosauto_ufs_drv_init(struct exynos_ufs *ufs)
 {
 	return exynos_ufs_shareability(ufs);
@@ -1991,6 +2160,27 @@ static int gs101_ufs_post_link(struct exynos_ufs *ufs)
 	return 0;
 }
 
+/*
+ * gs201 post-link: gs101 baseline plus the two UniPro T_AdaptLength
+ * writes from AOSP post_init_cfg_evt0/evt1. Pre-link experiment removed
+ * after it broke link startup; the AOSP cal-if writes can't be ported
+ * piecemeal — see project_ufs_bringup_state.md.
+ */
+static int gs201_ufs_post_link(struct exynos_ufs *ufs)
+{
+	int ret = gs101_ufs_post_link(ufs);
+
+	if (ret)
+		return ret;
+
+	unipro_writel(ufs, 0x0, 0x3348);
+	unipro_writel(ufs, 0x0, 0x334C);
+
+	gs201_dump_ufsp(ufs->hba->dev, "after-cfg");
+
+	return 0;
+}
+
 static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 					 struct ufs_pa_layer_attr *pwr)
 {
@@ -2201,11 +2391,55 @@ static const struct exynos_ufs_drv_data gs101_ufs_drvs = {
 	.suspend		= gs101_ufs_suspend,
 };
 
+/*
+ * gs201 (Tensor G2) variant. Same hooks as gs101 EXCEPT:
+ *
+ * - EXYNOS_UFS_OPT_UFSPR_SECURE is dropped. With it set, fmp_init issues
+ *   SMC_CMD_FMP_SECURITY + SMC_CMD_SMU(SMU_INIT) to BL31 to set
+ *   FMPSECURITY0.DESCTYPE=3 (128-byte PRDT entries) and then
+ *   ufshcd_set_sg_entry_size(128). On gs201 those SMCs return 0 (no error
+ *   logged) but BL31 doesn't actually program FMPSECURITY0 — hardware keeps
+ *   reading 16-byte PRDTs while the kernel writes 128-byte entries. Result:
+ *   garbage UTRDs, garbage UPIU responses, NOP OUT failed -22 with the
+ *   response slot still containing the original NOP_OUT (0x00).
+ *
+ *   Without UFSPR_SECURE, fmp_init early-returns (no FMP/inline-crypto), and
+ *   exynos_ufs_config_smu falls through to direct MMIO writes at the UFSP
+ *   base (0x14600000). If gs201 firewalls those, we'll see SError on probe;
+ *   then we'd need a gs201-specific config_smu that routes through SMC.
+ */
+static const struct exynos_ufs_drv_data gs201_ufs_drvs = {
+	.uic_attr		= &gs101_uic_attr,
+	/*
+	 * gs101 sets UFSHCD_QUIRK_PRDT_BYTE_GRAN — gs201 does NOT need it.
+	 * gs201 controller follows UFS spec (UTRD response_upiu_offset and
+	 * response_upiu_length are in DWORDS). With the quirk set, mainline
+	 * writes those fields in BYTES; controller interprets as DWORDS and
+	 * writes the response 4× further into the UCD than mainline reads
+	 * back from. Result: link startup OK, NOP_OUT "completes" with no
+	 * UIC errors, but RSP UPIU appears empty (it's actually at
+	 * UCD+0x800 instead of UCD+0x200, confirmed via dump).
+	 */
+	.quirks			= UFSHCI_QUIRK_SKIP_RESET_INTR_AGGR |
+				  UFSHCI_QUIRK_BROKEN_REQ_LIST_CLR |
+				  UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR |
+				  UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
+				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
+	.opts			= EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
+				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT,
+	.iocc_mask		= UFS_GS101_SHARABLE,
+	.drv_init		= gs201_ufs_drv_init,
+	.pre_link		= gs101_ufs_pre_link,
+	.post_link		= gs201_ufs_post_link,
+	.pre_pwr_change		= gs101_ufs_pre_pwr_change,
+	.suspend		= gs101_ufs_suspend,
+};
+
 static const struct of_device_id exynos_ufs_of_match[] = {
 	{ .compatible = "google,gs101-ufs",
 	  .data	      = &gs101_ufs_drvs },
 	{ .compatible = "google,gs201-ufs",
-	  .data	      = &gs101_ufs_drvs },
+	  .data	      = &gs201_ufs_drvs },
 	{ .compatible = "samsung,exynos7-ufs",
 	  .data	      = &exynos_ufs_drvs },
 	{ .compatible = "samsung,exynosautov9-ufs",

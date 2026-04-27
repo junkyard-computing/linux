@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * GS201 (Tensor G2) bootloader-handoff node stubs.
+ *
+ * These nodes exist purely to satisfy the factory Android bootloader (ABL)
+ * during dtb handoff on Pixel-family gs201 devices. Without them ABL walks
+ * paths it expects to find in a Google-style dtb and dereferences null.
+ * They are intentionally stubs — no drivers in this tree consume them.
+ *
+ * Addresses come from the AOSP gs201 sources
+ * (private/devices/google/felix/dts/gs201/ in a felix android14 OTA build).
+ * Strings lifted from a disassembled abl.img show ABL reads/creates:
+ *   /chosen /memory /aliases /dpm /avf /avf/reference /ect /firmware
+ *   /reserved-memory and various carveouts within it.
+ */
+
+/ {
+	/*
+	 * SoC product id 0x09855 + major rev 0x1 (silicon B0). ABL reads the
+	 * chipid register and picks the matching dtb out of dtb.img by
+	 * comparing against this property.
+	 */
+	soc_id = <0x09855001 0x00000000>;
+
+	/*
+	 * /chosen/bootargs MUST exist as a property (even an empty string).
+	 * ABL calls fdt_getprop(fdt, /chosen, "bootargs", &lenp) and, if the
+	 * property is absent, fdt_getprop returns NULL but writes a negative
+	 * error code into *lenp. ABL's caller checks `if (*lenp == 0)` which
+	 * never matches a negative value, so it falls through and calls
+	 * strlen() on the NULL return — null-deref crash at ABL PC 0xf88d12ac.
+	 * gs201-felix.dts already declares /chosen { stdout-path = "..."; };
+	 * we merge bootargs into it here. Content doesn't matter much — the
+	 * bootloader overwrites it with the boot.img cmdline on handoff — but
+	 * it has to be present and be a valid C-string.
+	 */
+	chosen {
+		bootargs = "";
+	};
+
+	/*
+	 * DRAM stub. ABL updates /memory with the actual DRAM layout on
+	 * handoff; this just needs to exist. Base at 0x80000000 is the
+	 * GS201 DRAM base.
+	 */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x40000000>;
+	};
+
+	/*
+	 * Populated /dpm matching the AOSP "user" variant. ABL writes
+	 * settings into subnodes and reads version/variant strings.
+	 */
+	dpm: dpm {
+		version = <101>;
+		variant = "user";
+
+		security {
+			cp_mem_not_clear = <0>;
+			dbg_mem_enable = <0>;
+			seh_enable = <0>;
+			pm_test_enable = <0>;
+			seclog_enable = <0>;
+			harxlog_enable = <0>;
+			sdm_enable = <0>;
+			ERXPFG_enable = <0>;
+		};
+
+		abl {
+			ramdump_mode = <0>;
+			ramdump2usb = <0>;
+		};
+
+		feature {
+			dump-mode {
+				enabled = <0>;
+				file-support = <0>;
+			};
+		};
+	};
+
+	/*
+	 * Android firmware stub. Pixel ABL writes AVB/boot-state into
+	 * /firmware/android; the android subnode must exist with the
+	 * android,firmware compat even if fstab is empty (we mount our rootfs
+	 * via root=/dev/disk/by-partlabel/super from the kernel cmdline).
+	 */
+	firmware {
+		android {
+			compatible = "android,firmware";
+		};
+	};
+
+	/*
+	 * AVF (Android Virtualization Framework) reference stub. ABL tries to
+	 * write /avf/reference with values pulled from the pvmfw partition's
+	 * VM reference DT. An empty /avf root is enough to prevent a null
+	 * deref on the first fdt_path_offset.
+	 */
+	avf {
+		reference {
+		};
+	};
+
+	/*
+	 * Exynos Common Tree config node. ABL creates /ect and populates it
+	 * with platform config data it loads from the ect_binary reserved
+	 * region. An empty stub lets the create path find an existing node.
+	 */
+	ect {
+	};
+
+	/*
+	 * Bootloader serial log target. Paired reserved-memory region is
+	 * bldr_log_reserved below. No in-tree driver consumes this; ABL
+	 * just checks that the node is present.
+	 */
+	bootloader_log {
+		compatible = "google,bldr_log";
+		reg = <0x0 0xfd800000 0x80000>,
+		      <0x0 0xfd880000 0x80000>;
+		reg-names = "bl_log", "bl_old_log";
+		memory-region = <&bldr_log_reserved>;
+	};
+
+	reserved_memory: reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+
+		/* ECT binary the bootloader loads and parses. */
+		ect_binary: ect_binary {
+			compatible = "exynos,ect_rmem";
+			reg = <0x0 0x90000000 0x0003A000>;
+		};
+
+		/* Google Security Anchor reserved region. */
+		gsa_reserved_protected: gsa@90200000 {
+			reg = <0x0 0x90200000 0x400000>;
+			no-map;
+		};
+
+		/* AoC (Always-on Compute) firmware region. */
+		aoc_reserve: aoc@94000000 {
+			reg = <0x0 0x94000000 0x03000000>;
+			no-map;
+		};
+
+		/* ABL (Android bootloader) runtime region. */
+		abl_reserved: abl@f8800000 {
+			reg = <0x0 0xf8800000 0x02000000>;
+			no-map;
+		};
+
+		/* Debug-snapshot logs region. */
+		dss_log_reserved: dss_log_reserved@fd3f0000 {
+			reg = <0 0xfd3f0000 0x0000e000>;
+			no-map;
+		};
+
+		/* Kernel debug info region (kallsyms pointer handoff). */
+		debug_kinfo_reserved: debug_kinfo_reserved@fd3fe000 {
+			reg = <0 0xfd3fe000 0x00001000>;
+			no-map;
+		};
+
+		/* Ramoops/pstore backing. */
+		ramoops_mem@fd3ff000 {
+			compatible = "ramoops";
+			reg = <0 0xfd3ff000 0x400000>;
+			console-size = <0x200000>;
+			pmsg-size = <0x200000>;
+		};
+
+		/* Bootloader log region (paired with /bootloader_log above). */
+		bldr_log_reserved: bldr_log_reserved@fd800000 {
+			reg = <0 0xfd800000 0x00100000>;
+			no-map;
+		};
+
+		/* Suspend diagnostic log region. */
+		suspend_diag_log_reserved: suspend_diag_log_reserved@fd90c000 {
+			reg = <0 0xfd90c000 0x00001000>;
+			no-map;
+		};
+	};
+};
+
