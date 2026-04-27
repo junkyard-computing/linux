@@ -358,9 +358,14 @@ static const struct of_device_id samsung_ufs_phy_match[] = {
 		.compatible = "google,gs101-ufs-phy",
 		.data = &tensor_gs101_ufs_phy,
 	}, {
-		/* GS201 (Tensor G2) UFS PHY is compatible with GS101 */
+		/*
+		 * GS201 (Tensor G2) shares the PHY register layout with GS101
+		 * but its PMU isolation register is TrustZone-protected — use
+		 * tensor_gs201_ufs_phy (isol zeroed) so the non-secure isol
+		 * write is skipped.
+		 */
 		.compatible = "google,gs201-ufs-phy",
-		.data = &tensor_gs101_ufs_phy,
+		.data = &tensor_gs201_ufs_phy,
 	}, {
 		.compatible = "samsung,exynos7-ufs-phy",
 		.data = &exynos7_ufs_phy,
