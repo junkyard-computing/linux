@@ -557,7 +557,7 @@ static void gs201_dump_cmu_hsi2_ufs_gates(struct device *dev)
 #define DUMP(name, off) \
 	do { \
 		u32 v = readl(base + (off)); \
-		dev_info(dev, "CMU-HSI2 %-44s @0x%04x = 0x%08x  CG_VAL=%u  MANUAL=%u\n", \
+		dev_dbg(dev, "CMU-HSI2 %-44s @0x%04x = 0x%08x  CG_VAL=%u  MANUAL=%u\n", \
 			 name, (off), v, !!(v & BIT(21)), !!(v & BIT(20))); \
 	} while (0)
 
@@ -595,7 +595,7 @@ static void gs201_dump_ufsp(struct device *dev, const char *label)
 		dev_err(dev, "UFSP dump (%s): ioremap failed\n", label);
 		return;
 	}
-	dev_info(dev, "UFSP %s: SECURITY=0x%08x SBEGIN0=0x%08x SEND0=0x%08x SLUN0=0x%08x SCTRL0=0x%08x\n",
+	dev_dbg(dev, "UFSP %s: SECURITY=0x%08x SBEGIN0=0x%08x SEND0=0x%08x SLUN0=0x%08x SCTRL0=0x%08x\n",
 		 label,
 		 readl(base + 0x010),	/* UFSPRSECURITY */
 		 readl(base + 0x200),	/* UFSPSBEGIN0   */
@@ -650,7 +650,7 @@ static void gs201_dump_cmu_hsi2(struct device *dev, const char *tag)
 	 *   bit  28   = ENABLE_AUTOMATIC_CLKGATING
 	 *   bit  30   = OVERRIDE_BY_HCH
 	 */
-	dev_info(dev,
+	dev_dbg(dev,
 		 "CMU probe (%s) TOP: DIV[0x1898]=0x%08x DIV[0x189c]=0x%08x DIV[0x18a0:PCIE]=0x%08x DIV[0x18a4:UFS_EMBD]=0x%08x\n",
 		 tag,
 		 readl(top + 0x1898),
@@ -664,7 +664,7 @@ static void gs201_dump_cmu_hsi2(struct device *dev, const char *tag)
 	 * UFS_EMBD, MMC_CARD). gs101 mainline thinks 0x10a0/4/8/c are
 	 * BUS/MMC/PCIE/UFS_EMBD. Same swap caveat as above.
 	 */
-	dev_info(dev,
+	dev_dbg(dev,
 		 "CMU probe (%s) TOP: MUX[0x10a0]=0x%08x MUX[0x10a4]=0x%08x MUX[0x10a8]=0x%08x MUX[0x10ac]=0x%08x\n",
 		 tag,
 		 readl(top + 0x10a0),
@@ -682,7 +682,7 @@ static void gs201_dump_cmu_hsi2(struct device *dev, const char *tag)
 	 *   0x1800 DIV_CLK_HSI2_NOCP   (NOC/peripheral clock divider)
 	 *   0x1804 DIV_CLK_HSI2_NOC_LH (NOC long-hop divider)
 	 */
-	dev_info(dev,
+	dev_dbg(dev,
 		 "CMU probe (%s) HSI2: NOC_USER=0x%08x UFS_EMBD_USER=0x%08x ACLK_GATE=0x%08x UNIPRO_GATE=0x%08x FMP_GATE=0x%08x NOCP_DIV=0x%08x NOC_LH_DIV=0x%08x\n",
 		 tag,
 		 readl(hsi2 + 0x0600),
@@ -722,7 +722,7 @@ static void gs201_dump_pa_state(struct ufs_hba *hba, const char *tag)
 	e5 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_ACTIVERXDATALANES), &arxlanes);
 	e6 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_PWRMODE), &pwrmode);
 
-	dev_info(hba->dev,
+	dev_dbg(hba->dev,
 		 "S1 PA state (%s): MaxRxHSGear=%u (e=%d) Connected[Tx=%u Rx=%u] (e=%d,%d) Active[Tx=%u Rx=%u] (e=%d,%d) PwrMode=0x%02x (e=%d)\n",
 		 tag,
 		 max_hs_gear, e1,
@@ -780,22 +780,22 @@ static int gs201_ufs_smu_init(struct device *dev)
 	 */
 	arm_smccc_smc(SMC_CMD_FMP_SECURITY, 0, SMU_EMBEDDED, 0,
 		      0, 0, 0, 0, &res);
-	dev_info(dev, "SMC_CMD_FMP_SECURITY(0, SMU_EMBEDDED, DESCTYPE=0) -> a0=0x%lx a1=0x%lx\n",
+	dev_dbg(dev, "SMC_CMD_FMP_SECURITY(0, SMU_EMBEDDED, DESCTYPE=0) -> a0=0x%lx a1=0x%lx\n",
 		 res.a0, res.a1);
 
 	arm_smccc_smc(SMC_CMD_SMU, SMU_INIT, SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
-	dev_info(dev, "SMC_CMD_SMU(SMU_INIT, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx\n",
+	dev_dbg(dev, "SMC_CMD_SMU(SMU_INIT, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx\n",
 		 res.a0, res.a1);
 
 	/* RESUME — name suggests "re-enable after suspend", might be what
 	 * mainline needs at probe (we're effectively post-suspend from BL).
 	 */
 	arm_smccc_smc(SMC_CMD_FMP_SMU_RESUME, 0, SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
-	dev_info(dev, "SMC_CMD_FMP_SMU_RESUME(0, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx\n",
+	dev_dbg(dev, "SMC_CMD_FMP_SMU_RESUME(0, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx\n",
 		 res.a0, res.a1);
 
 	arm_smccc_smc(SMC_CMD_FMP_SMU_DUMP, 0, SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
-	dev_info(dev, "SMC_CMD_FMP_SMU_DUMP(0, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+	dev_dbg(dev, "SMC_CMD_FMP_SMU_DUMP(0, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
 		 res.a0, res.a1, res.a2, res.a3);
 
 	return 0;
@@ -817,7 +817,7 @@ static void gs201_dump_sysreg_hsi2_iocc(struct device *dev, const char *label)
 		dev_err(dev, "sysreg-HSI2 dump (%s): ioremap failed\n", label);
 		return;
 	}
-	dev_info(dev,
+	dev_dbg(dev,
 		 "sysreg-HSI2 %s: @0x710(IOCC) = 0x%08x  @0x400(KDN_CTRL_MON) = 0x%08x\n",
 		 label, readl(base + 0x710), readl(base + 0x400));
 	iounmap(base);
@@ -886,7 +886,7 @@ static int gs201_gsa_kdn_set_op_mode(struct device *dev)
 	sr0 = readl(base + GSA_MBOX_SR(0));
 	sr1 = readl(base + GSA_MBOX_SR(1));
 
-	dev_info(dev,
+	dev_dbg(dev,
 		 "kdn-shim: GSA response SR0=0x%08x SR1=0x%08x (expect 0x%08x, err=0)\n",
 		 sr0, sr1,
 		 GSA_MB_CMD_KDN_SET_OP_MODE | GSA_MB_CMD_RSP_BIT);
@@ -934,7 +934,7 @@ static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
 	 */
 	{
 		int kdn_ret = gs201_gsa_kdn_set_op_mode(dev);
-		dev_info(dev,
+		dev_dbg(dev,
 			 "kdn-shim: gs201_gsa_kdn_set_op_mode -> %d\n", kdn_ret);
 		gs201_dump_sysreg_hsi2_iocc(dev, "after-kdn-mbox-cmd");
 	}
@@ -954,7 +954,7 @@ static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
 		       UFSHCD_CAP_HIBERN8_WITH_CLK_GATING);
 	hba->rpm_lvl = UFS_PM_LVL_0;
 	hba->spm_lvl = UFS_PM_LVL_0;
-	dev_info(dev,
+	dev_dbg(dev,
 		 "gs201 UFS: stripped clk-gating + hibern8-with-clk-gating; PM lvl pinned to LVL_0\n");
 
 	/*
@@ -1644,7 +1644,7 @@ static int exynos_ufs_post_pwr_mode(struct ufs_hba *hba,
 			"SLOW", gear, lanes);
 	}
 
-	dev_info(hba->dev, "Power mode changed to : %s\n", pwr_str);
+	dev_dbg(hba->dev, "Power mode changed to : %s\n", pwr_str);
 
 	return 0;
 }
@@ -2690,7 +2690,7 @@ static int gs101_ufs_pre_link(struct exynos_ufs *ufs)
 	 * (mclk_period_rnd_off, line_reset_period) match what mainline
 	 * writes via the VND_* aliases — only the mechanism differs.
 	 */
-	dev_info(hba->dev, "h13 pre_link: using AOSP __set_pcs mechanism for per-lane PCS writes\n");
+	dev_dbg(hba->dev, "h13 pre_link: using AOSP __set_pcs mechanism for per-lane PCS writes\n");
 
 	for_each_ufs_rx_lane(ufs, i) {
 		u8 lane = EXYNOS_PCS_RX_LANE_0 + i;
@@ -2832,7 +2832,7 @@ static int gs201_ufs_post_link(struct exynos_ufs *ufs)
 		u32 val = PRDT_PREFETCH_EN | (ilog2(DATA_UNIT_SIZE) & 0x1F);
 
 		hci_writel(ufs, val, HCI_TXPRDT_ENTRY_SIZE);
-		dev_info(ufs->hba->dev,
+		dev_dbg(ufs->hba->dev,
 			 "h18 post_link: HCI_TXPRDT_ENTRY_SIZE = 0x%08x (PRDT_PREFETCH_EN | size=12, AOSP parity)\n",
 			 val);
 	}
@@ -2924,7 +2924,7 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 #if GS201_MAINLINE_FORCE_PWM_GEAR
 	if (pwr->pwr_rx == FAST_MODE || pwr->pwr_rx == FASTAUTO_MODE ||
 	    pwr->pwr_tx == FAST_MODE || pwr->pwr_tx == FASTAUTO_MODE) {
-		dev_info(hba->dev,
+		dev_dbg(hba->dev,
 			 "gs101_pre_pwr: forcing PWM gear=%u rx/tx (was rx=%u/%u tx=%u/%u hs_rate=%u) — HS broken on mainline\n",
 			 GS201_MAINLINE_FORCE_PWM_GEAR,
 			 pwr->pwr_rx, pwr->gear_rx,
@@ -2941,7 +2941,7 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 	if ((pwr->pwr_rx == FAST_MODE || pwr->pwr_rx == FASTAUTO_MODE ||
 	     pwr->pwr_tx == FAST_MODE || pwr->pwr_tx == FASTAUTO_MODE) &&
 	    pwr->hs_rate != PA_HS_MODE_A) {
-		dev_info(hba->dev,
+		dev_dbg(hba->dev,
 			 "A2 pre_pwr: forcing hs_rate=A (was %u) — testing whether Rate-A side-steps Rate-B CDR-lock failure\n",
 			 pwr->hs_rate);
 		pwr->hs_rate = PA_HS_MODE_A;
@@ -2953,7 +2953,7 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 	     pwr->pwr_tx == FAST_MODE || pwr->pwr_tx == FASTAUTO_MODE) &&
 	    (pwr->gear_rx > GS201_FORCE_HS_GEAR ||
 	     pwr->gear_tx > GS201_FORCE_HS_GEAR)) {
-		dev_info(hba->dev,
+		dev_dbg(hba->dev,
 			 "A2c pre_pwr: clamping HS gear to %u (was rx=%u tx=%u) — testing if lower symbol rate fixes dl_err 0x80000002\n",
 			 GS201_FORCE_HS_GEAR, pwr->gear_rx, pwr->gear_tx);
 		pwr->gear_rx = GS201_FORCE_HS_GEAR;
@@ -2989,7 +2989,7 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 	dl_err_mask = unipro_readl(ufs, UNIP_DL_ERROR_IRQ_MASK_REG) |
 		      UNIP_DL_PA_ERROR_IND_RECEIVED_BIT;
 	unipro_writel(ufs, dl_err_mask, UNIP_DL_ERROR_IRQ_MASK_REG);
-	dev_info(hba->dev,
+	dev_dbg(hba->dev,
 		 "h11 pre_pmc: masked PA_ERROR_IND_RECEIVED -> 0x%08x (is_hs=%d)\n",
 		 dl_err_mask, is_hs);
 
@@ -2997,7 +2997,7 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 	if (is_hs) {
 		/* AOSP calib_of_hs_rate_b, in original table order */
 		unipro_writel(ufs, 0x1, UNIP_PA_TXHSADAPTTYPE);
-		dev_info(hba->dev,
+		dev_dbg(hba->dev,
 			 "h11 pre_pmc: PA_TxHsAdaptType=1 (sfr 0x3350) written\n");
 	}
 #endif
@@ -3015,7 +3015,7 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 	unipro_writel(ufs, 32000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER1);
 	unipro_writel(ufs, 16000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER2);
 
-	dev_info(hba->dev,
+	dev_dbg(hba->dev,
 		 "h11 pre_pmc: AOSP-style writes applied (is_hs=%d)\n", is_hs);
 #else
 	/*
@@ -3041,11 +3041,11 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 
 		if (ie_before != ie_after) {
 			ufshcd_writel(hba, ie_after, REG_INTERRUPT_ENABLE);
-			dev_info(hba->dev,
+			dev_dbg(hba->dev,
 				 "h9 pre_pwr: masked SBFES in IE: 0x%08x -> 0x%08x (PWM workaround)\n",
 				 ie_before, ie_after);
 		} else {
-			dev_info(hba->dev,
+			dev_dbg(hba->dev,
 				 "h9 pre_pwr: IE = 0x%08x (SBFES already clear, mask was no-op)\n",
 				 ie_before);
 		}
@@ -3073,7 +3073,7 @@ static int gs101_ufs_post_pwr_change(struct exynos_ufs *ufs,
 
 	if (ufshcd_is_hs_mode(pwr_req)) {
 #if GS201_HS_PWR_SETTLE_MS
-		dev_info(hba->dev,
+		dev_dbg(hba->dev,
 			 "A2d post_pwr: HS pwr_change OK, settling for %u ms before allowing first SCSI\n",
 			 (unsigned int)GS201_HS_PWR_SETTLE_MS);
 		msleep(GS201_HS_PWR_SETTLE_MS);
@@ -3083,7 +3083,7 @@ static int gs101_ufs_post_pwr_change(struct exynos_ufs *ufs,
 		return 0;
 	}
 
-	dev_info(hba->dev,
+	dev_dbg(hba->dev,
 		 "h16 post_pwr: forcing PHY calibrate x2 for non-HS gear (advance state machine through PRE/POST_PWR_HS to apply AOSP-equivalent post_calib_of_pwm writes)\n");
 
 	/* Advance: CFG_PRE_PWR_HS → CFG_POST_PWR_HS, runs PRE_PWR_HS table. */
@@ -3110,7 +3110,7 @@ static int exynos_ufs_set_dma_mask(struct ufs_hba *hba)
 
 	if (ufs->drv_data && ufs->drv_data->dma_mask_bits) {
 		bits = ufs->drv_data->dma_mask_bits;
-		dev_info(hba->dev,
+		dev_dbg(hba->dev,
 			 "exynos UFS: forcing %u-bit DMA mask (variant override; controller cap MASK_64_ADDRESSING_SUPPORT may lie)\n",
 			 bits);
 		return dma_set_mask_and_coherent(hba->dev, DMA_BIT_MASK(bits));
@@ -3135,7 +3135,7 @@ static void exynos_ufs_config_scsi_dev(struct scsi_device *sdev,
 
 #if GS201_FORCE_QDEPTH_1
 	scsi_change_queue_depth(sdev, 1);
-	dev_info(hba->dev,
+	dev_dbg(hba->dev,
 		 "h15b: clamped sdev lun=%llu queue_depth=1 (gs201 PWM workaround)\n",
 		 sdev->lun);
 #endif
@@ -3158,7 +3158,7 @@ static void exynos_ufs_config_scsi_dev(struct scsi_device *sdev,
 			lim->max_hw_sectors = max_sectors;
 		if (lim->max_sectors    > max_sectors)
 			lim->max_sectors    = max_sectors;
-		dev_info(hba->dev,
+		dev_dbg(hba->dev,
 			 "h15a: clamped sdev lun=%llu max_hw_sectors=%u (=%uKB) (gs201 PWM workaround)\n",
 			 sdev->lun, max_sectors,
 			 (unsigned int)GS201_MAX_HW_SECTORS_KB);

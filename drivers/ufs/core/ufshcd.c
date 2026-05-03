@@ -3111,15 +3111,15 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 		hwq = ufshcd_mcq_req_to_hwq(hba, scsi_cmd_to_rq(cmd));
 
 	/*
-	 * (h6) Per-submission log to ID who's issuing the SCSI commands that
-	 * hang in PWM mode (~36s SBFES). Logs tag, lun, opcode, transfer len,
-	 * and current task — should reveal whether it's udev/scsi_id, dracut,
-	 * blkid, or something else.
+	 * (h6) Per-submission trace, kept as dev_dbg so it's silent by default
+	 * (115200-baud UART can't keep up with this firehose; it was load-
+	 * bearing only while we were chasing the PWM SBFES wedge and the
+	 * post-CDR-lock READ_10 tag-6 timeout). Re-enable via dynamic_debug.
 	 */
-	dev_info(hba->dev,
-		 "ufs-cmd-issue tag=%d lun=%llu op=0x%02x len=%u by %s[%d]\n",
-		 tag, cmd->device->lun, cmd->cmnd[0],
-		 scsi_bufflen(cmd), current->comm, current->pid);
+	dev_dbg(hba->dev,
+		"ufs-cmd-issue tag=%d lun=%llu op=0x%02x len=%u by %s[%d]\n",
+		tag, cmd->device->lun, cmd->cmnd[0],
+		scsi_bufflen(cmd), current->comm, current->pid);
 
 	ufshcd_send_command(hba, cmd, hwq);
 
