@@ -185,6 +185,33 @@ static inline void __sicd_ctrl(struct exynos_ufs *ufs, bool hold)
 #endif
 }
 
+/*
+ * Path-A IOCC instrumentation: read back the live value at HSI2 sysreg+0x710
+ * (the AXI shareability bits the driver writes in exynos_ufs_config_externals)
+ * and log it with a stage label. Used to localize whether the bits stick
+ * across probe → link-startup → PMC → first device-management command.
+ */
+static void exynos_ufs_log_iocc(struct exynos_ufs *ufs, const char *stage)
+{
+	struct ext_cxt *cxt = &ufs->cxt_iocc;
+	unsigned int val = 0;
+	int ret;
+
+	if (IS_ERR_OR_NULL(ufs->regmap_sys))
+		return;
+
+	ret = regmap_read(ufs->regmap_sys, cxt->offset, &val);
+	if (ret) {
+		dev_info(ufs->dev, "iocc-probe[%s]: regmap_read err %d\n",
+			 stage, ret);
+		return;
+	}
+
+	dev_info(ufs->dev,
+		 "iocc-probe[%s]: offset 0x%x raw 0x%08x masked 0x%08x (want 0x%08x)\n",
+		 stage, cxt->offset, val, val & cxt->mask, cxt->val & cxt->mask);
+}
+
 static void exynos_ufs_update_active_lanes(struct ufs_hba *hba)
 {
 	struct exynos_ufs *ufs = to_exynos_ufs(hba);
@@ -487,6 +514,7 @@ static int exynos_ufs_config_externals(struct exynos_ufs *ufs)
 	exynos_ufs_ctrl_phy_pwr(ufs, true);
 
 	/* Set for UFS iocc */
+	exynos_ufs_log_iocc(ufs, "config_ext_pre");
 	for (i = EXT_SYSREG, p = &ufs->regmap_sys, q = &ufs->cxt_iocc;
 			i < EXT_BLK_MAX; i++, p++, q++) {
 		if (IS_ERR_OR_NULL(*p)) {
@@ -498,6 +526,7 @@ static int exynos_ufs_config_externals(struct exynos_ufs *ufs)
 		}
 		regmap_update_bits(*p, q->offset, q->mask, q->val);
 	}
+	exynos_ufs_log_iocc(ufs, "config_ext_post");
 
 out:
 	return ret;
@@ -832,6 +861,7 @@ static int exynos_ufs_link_startup_notify(struct ufs_hba *hba,
 			dev_info(ufs->dev, "UFS link start-up %s\n",
 				 (!ret) ? res_token[0] : res_token[1]);
 
+		exynos_ufs_log_iocc(ufs, "post_link_startup");
 		ufs->h_state = H_LINK_UP;
 		break;
 	default:
@@ -894,6 +924,7 @@ static int exynos_ufs_pwr_change_notify(struct ufs_hba *hba,
 			dev_info(ufs->dev, "HS mode config %s\n",
 				 (!ret) ? res_token[0] : res_token[1]);
 
+		exynos_ufs_log_iocc(ufs, "post_pmc");
 		ufs->h_state = H_LINK_BOOST;
 
 		break;
@@ -908,6 +939,7 @@ static void exynos_ufs_set_nexus_t_xfer_req(struct ufs_hba *hba,
 					    int tag, bool cmd)
 {
 	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+	static bool first_xfer_logged;
 	u32 type;
 
 	lockdep_assert_held(&hba->outstanding_lock);
@@ -917,6 +949,11 @@ static void exynos_ufs_set_nexus_t_xfer_req(struct ufs_hba *hba,
 	     ufs->h_state != H_LINK_BOOST &&
 	     ufs->h_state != H_REQ_BUSY))
 		PRINT_STATES(ufs);
+
+	if (!first_xfer_logged) {
+		exynos_ufs_log_iocc(ufs, "first_xfer_req");
+		first_xfer_logged = true;
+	}
 
 	type =  hci_readl(&ufs->handle, HCI_UTRL_NEXUS_TYPE);
 
