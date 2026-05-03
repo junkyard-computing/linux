@@ -2667,6 +2667,14 @@ static int gs101_ufs_pre_link(struct exynos_ufs *ufs)
 
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
 
+	/*
+	 * MIB 0x202 = 0x02 — AOSP cal-if init_cfg_evt0 line 83 (38.4 MHz
+	 * branch). gs201 ships USE_UFS_REFCLK == USE_38_4_MHZ. Mainline
+	 * was missing this entirely. Cal-if writes 0x12 for 26 MHz and
+	 * 0x02 for 19.2/38.4 MHz; gs201 = 0x02.
+	 */
+	ufshcd_dme_set(hba, UIC_ARG_MIB(0x202), 0x02);
+
 #if GS201_AOSP_PCS_WRITES
 	/*
 	 * (h13) AOSP `__set_pcs` mechanism: bracket each per-lane raw
@@ -2789,8 +2797,29 @@ static int gs201_ufs_post_link(struct exynos_ufs *ufs)
 	if (ret)
 		return ret;
 
-	unipro_writel(ufs, 0x0, 0x3348);
-	unipro_writel(ufs, 0x0, 0x334C);
+	/*
+	 * AOSP cal-if post_init_cfg_evt0 lines 326-327 mark these
+	 * (MIB 0x15D2/0x15D3 = bytes 0x3348/0x334C) as
+	 * UNIPRO_ADAPT_LENGTH, which is a conditional RMW (cal-if.c:800):
+	 *   if (val & 0x80) and (val & 0x7F) < 2: write 0x82
+	 *   else if ((val + 1) & 0x3): write val | 0x3
+	 * For the typical reset value of 0x0, branch 2 fires and
+	 * writes 0x3 (not 0x0). Mainline previously wrote raw 0x0 here
+	 * which is a different value. Encode the RMW directly.
+	 */
+	{
+		u32 v;
+		v = unipro_readl(ufs, 0x3348);
+		if ((v & 0x80) && (v & 0x7F) < 2)
+			unipro_writel(ufs, 0x82, 0x3348);
+		else if ((v + 1) & 0x3)
+			unipro_writel(ufs, v | 0x3, 0x3348);
+		v = unipro_readl(ufs, 0x334C);
+		if ((v & 0x80) && (v & 0x7F) < 2)
+			unipro_writel(ufs, 0x82, 0x334C);
+		else if ((v + 1) & 0x3)
+			unipro_writel(ufs, v | 0x3, 0x334C);
+	}
 
 #if GS201_PRDT_PREFETCH
 	{
