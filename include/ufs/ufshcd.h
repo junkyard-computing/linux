@@ -466,7 +466,8 @@ struct ufs_hba_variant_ops {
 	int	(*get_outstanding_cqs)(struct ufs_hba *hba,
 				       unsigned long *ocqs);
 	int	(*config_esi)(struct ufs_hba *hba);
-	void	(*config_scsi_dev)(struct scsi_device *sdev);
+	void	(*config_scsi_dev)(struct scsi_device *sdev,
+				   struct queue_limits *lim);
 	u32	(*freq_to_gear_speed)(struct ufs_hba *hba, unsigned long freq);
 	int	(*get_rx_fom)(struct ufs_hba *hba,
 			      struct ufs_pa_layer_attr *pwr_mode,
