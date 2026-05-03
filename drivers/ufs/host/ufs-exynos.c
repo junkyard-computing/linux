@@ -770,17 +770,22 @@ static inline void gs201_dump_pa_state(struct ufs_hba *hba, const char *tag) {}
 static int gs201_ufs_smu_init(struct device *dev)
 {
 	struct arm_smccc_res res;
-	unsigned long desctype;
 
-	/* Try each DESCTYPE — see if a non-3 value unlocks writes for our
-	 * mainline 16-byte PRDT setup (we don't enable inline crypto).
+	/*
+	 * Set FMPSECURITY0.DESCTYPE=0 (16-byte standard PRDT entries) to match
+	 * the mainline ufshcd default sg_entry_size. AOSP uses DESCTYPE=3 with
+	 * 128-byte fmp_sg_entry for inline crypto; we don't enable FMP, so
+	 * DESCTYPE must be 0. An earlier probe loop here ended at DESCTYPE=3,
+	 * leaving the controller expecting 128-byte stride while we wrote
+	 * 16-byte entries — single-entry PRDTs (INQUIRY) succeeded but the
+	 * first multi-entry transfer (READ_10 32 KB = 8 PRDs) hung at
+	 * tag 6 with OCS=0xf because entries 1..7 were read from beyond the
+	 * 128-byte software PRDT region (zero/garbage DBA).
 	 */
-	for (desctype = 0; desctype <= 3; desctype++) {
-		arm_smccc_smc(SMC_CMD_FMP_SECURITY, 0, SMU_EMBEDDED, desctype,
-			      0, 0, 0, 0, &res);
-		dev_info(dev, "SMC_CMD_FMP_SECURITY(0, SMU_EMBEDDED, %lu) -> a0=0x%lx a1=0x%lx\n",
-			 desctype, res.a0, res.a1);
-	}
+	arm_smccc_smc(SMC_CMD_FMP_SECURITY, 0, SMU_EMBEDDED, 0,
+		      0, 0, 0, 0, &res);
+	dev_info(dev, "SMC_CMD_FMP_SECURITY(0, SMU_EMBEDDED, DESCTYPE=0) -> a0=0x%lx a1=0x%lx\n",
+		 res.a0, res.a1);
 
 	arm_smccc_smc(SMC_CMD_SMU, SMU_INIT, SMU_EMBEDDED, 0, 0, 0, 0, 0, &res);
 	dev_info(dev, "SMC_CMD_SMU(SMU_INIT, SMU_EMBEDDED) -> a0=0x%lx a1=0x%lx\n",
