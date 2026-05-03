@@ -13,6 +13,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -20,6 +21,8 @@
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+
+#include <scsi/scsi_device.h>
 
 #include <ufs/ufshcd.h>
 #include "ufshcd-pltfrm.h"
@@ -164,6 +167,298 @@ enum {
 #define UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER0	0x78B8
 #define UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER1	0x78BC
 #define UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER2	0x78C0
+
+/*
+ * (h11) Direct UNIPRO sfr offsets used by AOSP gs201 ufs-cal-if's
+ * `ufs_cal_pre_pmc` / `calib_of_hs_rate_b` table, addressed via
+ * `unipro_writel` (i.e. raw shadow writes, not DME_SET commands).
+ * Names mirror the MIB attribute they shadow.
+ */
+#define UNIP_DL_ERROR_IRQ_MASK_REG		0x4844	/* shadow of DL error mask */
+#define UNIP_DL_PA_ERROR_IND_RECEIVED_BIT	BIT(15)
+#define UNIP_PA_TXHSADAPTTYPE			0x3350	/* MIB 0x15D4 */
+#define UNIP_DL_FC0PROTTIMEOUTVAL		0x4104	/* MIB 0x2041 */
+#define UNIP_DL_TC0REPLAYTIMEOUTVAL		0x4108	/* MIB 0x2042 */
+#define UNIP_DL_AFC0REQTIMEOUTVAL		0x410C	/* MIB 0x2043 */
+#define UNIP_PA_PWRMODEUSERDATA0_REG		0x32C0	/* MIB 0x15B0 */
+#define UNIP_PA_PWRMODEUSERDATA1_REG		0x32C4	/* MIB 0x15B1 */
+#define UNIP_PA_PWRMODEUSERDATA2_REG		0x32C8	/* MIB 0x15B2 */
+
+/*
+ * (h13) AOSP `__set_pcs` mechanism for per-lane PHY_PCS_RX/TX writes.
+ * AOSP brackets the actual register write with a lane-selector gate
+ * via `UNIP_COMP_AXI_AUX_FIELD = __WSTRB | __SEL_IDX(lane)`, then
+ * resets the gate after the write. Mainline does
+ * `ufshcd_dme_set(UIC_ARG_MIB_SEL(addr, lane), val)` instead, which
+ * goes through the controller's DME state machine. Plausible the DME
+ * path silently no-ops for some PCS attributes on gs201 silicon.
+ *
+ *   AOSP:  unipro_writel(__WSTRB | __SEL_IDX(lane), UNIP_COMP_AXI_AUX_FIELD)
+ *          unipro_writel(val, sfr)
+ *          unipro_writel(__WSTRB,                   UNIP_COMP_AXI_AUX_FIELD)
+ *
+ * Lane encoding (from cal-if):  TX_LANE_0 = 0, TX_LANE_1 = 1,
+ *                                RX_LANE_0 = 4, RX_LANE_1 = 5.
+ * SFR offset for MIB n in the PCS region: 0x2000 + (n << 2).
+ */
+#define UNIP_COMP_AXI_AUX_FIELD		0x040
+#define EXYNOS_PCS_AUX_WSTRB		(0xF << 24)
+#define EXYNOS_PCS_TX_LANE_0		0
+#define EXYNOS_PCS_RX_LANE_0		4
+#define EXYNOS_PCS_SFR(mib)		(0x2000 + ((mib) << 2))
+
+/*
+ * gs201 bring-up experiment switches. These need to be defined HERE
+ * (above the functions that use them) — the C preprocessor scans
+ * top-to-bottom and `#if` against an undefined macro silently
+ * evaluates to 0. Caught one of these the hard way: GS201_AOSP_PCS_WRITES
+ * was originally placed in the comment block before
+ * `gs101_ufs_pre_pwr_change`, AFTER `gs101_ufs_pre_link` where it's
+ * used, so the AOSP __set_pcs path was being silently skipped.
+ *
+ *  GS201_MAINLINE_FORCE_PWM_GEAR : if non-zero, force pwr_change to
+ *      SLOWAUTO_MODE × that gear. Workaround for HS-Rate-B not
+ *      working on mainline gs201 (CDR lock fails post-pwr-change).
+ *      Set to 0 to test HS-Rate-B for real.
+ *  GS201_AOSP_PRE_PMC : port AOSP `ufs_cal_pre_pmc` semantics into
+ *      `gs101_ufs_pre_pwr_change` — mask PA_ERROR_IND_RECEIVED, write
+ *      UserData/L2 timers via raw unipro_writel in AOSP order.
+ *  GS201_AOSP_PRE_PMC_ADAPT : within the AOSP pre_pmc port, also write
+ *      PA_TxHsAdaptType=1 for HS modes. Confirmed (h11a/h11b) to break
+ *      pwr_change with upmcrs:0x5 — leave at 0 until we identify the
+ *      missing precondition.
+ *  GS201_AOSP_PCS_WRITES : (h13) Convert per-lane PHY_PCS_RX/TX writes
+ *      in `gs101_ufs_pre_link` from `ufshcd_dme_set(UIC_ARG_MIB_SEL,...)`
+ *      to AOSP's `__set_pcs` mechanism (raw unipro_writel bracketed by
+ *      UNIP_COMP_AXI_AUX_FIELD lane-selector gate).
+ */
+/*
+ * (A1-A4) Tested HS at both rates and multiple gears with the FULL fork
+ * stack. Result: dl_err 0x80000002 (TCx_REPLAY_TIMER_EXPIRED) on the
+ * first frame after pwr_change, regardless of rate or gear. CDR-lock
+ * outcome does NOT correlate with link-layer success. PWM force back
+ * on so the device at least enumerates and boots through pre-udev.
+ */
+#define GS201_MAINLINE_FORCE_PWM_GEAR	4	/* HS still wedges; PWM-G4 keeps rootfs reachable */
+#define GS201_AOSP_PRE_PMC		1
+/*
+ * (A2b) Confirmed via UART log `2026-05-02_152349.log` that ADAPT at
+ * Rate-A breaks pwr_change identically to Rate-B (`upmcrs:0x5`, link
+ * broken). ADAPT is broken on this PHY at any rate — left at 0.
+ */
+#define GS201_AOSP_PRE_PMC_ADAPT	0
+#define GS201_AOSP_PCS_WRITES		1
+/*
+ * (h9) Mask SYSTEM_BUS_FATAL_ERROR (IS bit 17) in REG_INTERRUPT_ENABLE
+ * after link startup. While stuck in PWM (HS-Rate-B unresolved), the
+ * (h6) SBFES wedge fires deterministically ~38s into boot when udev's
+ * coldplug burst hits the controller with 4 parallel scsi_id INQUIRYs
+ * + 2x 64KB READ_10s. With SBFES masked the IRQ never escalates the
+ * controller to eh_fatal — best-case the command path drains and we
+ * boot to login; worst-case the controller's bus state really is
+ * broken and we see SCSI commands silently time out (kernel 30s
+ * timeout) instead of the immediate eh_fatal cascade. Either way is
+ * informative. Fork-only workaround — AOSP doesn't do this because
+ * AOSP runs at HS speed and never trips SBFES.
+ */
+#define GS201_MASK_SBFES_IRQ		1
+
+/*
+ * (h15b) Force per-LU SCSI queue depth = 1 on gs201. After (h14)
+ * (rd.udev.children-max=1) confirmed serializing udev workers does NOT
+ * stop the wedge — even ONE udev-worker issuing two back-to-back 64KB
+ * READ_10s at PWM gear hangs the controller (saved_err=0x0 with the
+ * (h9) mask, command times out at 30s, full host reset). The previous
+ * (h7) attempt to clamp via host->can_queue / cmd_per_lun in drv_init
+ * failed because ufshcd overwrites those after vops->init returns.
+ * The vops `config_scsi_dev` callback runs from ufshcd_sdev_configure
+ * AFTER ufshcd_lu_init has set the per-LU depth from bLUQueueDepth, so
+ * a scsi_change_queue_depth(sdev, 1) here actually sticks per device.
+ * If h15b lets boot survive past 38s, the trigger is back-to-back
+ * commands queued at the controller, not the 64KB transfer length.
+ */
+#define GS201_FORCE_QDEPTH_1		1
+
+/*
+ * (h15a) Clamp per-LU max_hw_sectors to GS201_MAX_HW_SECTORS_KB at PWM
+ * gear on gs201. h15b confirmed queue depth = 1 doesn't help: with strict
+ * one-cmd-at-a-time serialization, the SECOND back-to-back 64KB READ_10
+ * to a high-LBA region (~end of disk, blkid backup-GPT probe) still hangs
+ * with zero error indication ("No record of pa_err/dl_err/...", saved_err=0).
+ * This clamp splits that 64KB udev probe into smaller chunks. If the wedge
+ * disappears, the trigger is the 64KB transfer length itself at PWM. If
+ * it persists, the trigger is reading near end-of-device at PWM, regardless
+ * of length. Set to 0 to disable; set to 64 (=32KB) or 32 (=16KB) to test.
+ */
+#define GS201_MAX_HW_SECTORS_KB		32
+
+/*
+ * (h16) Port AOSP `ufs_cal_post_pmc` semantics for forced-PWM. Mainline
+ * gates `phy_calibrate(CFG_POST_PWR_HS)` behind `ufshcd_is_hs_mode()`
+ * (see exynos_ufs_pre_pwr_mode + exynos_ufs_post_pwr_mode), so when we
+ * force PWM via GS201_MAINLINE_FORCE_PWM_GEAR the PHY state machine
+ * never advances past CFG_PRE_PWR_HS. As a result,
+ * `tensor_gs101_pre_pwr_hs_config` AND `tensor_gs101_post_pwr_hs_config`
+ * never run, even though their PWR_MODE_PWM_ANY entries are exactly
+ * AOSP's `post_calib_of_pwm` (3 PMA writes: 0x20=0x60 COMN,
+ * 0x222=0x08 TRSV (= byte 0x888), 0x246=0x01 TRSV (= byte 0x918)).
+ * Those writes might be the missing piece for the (h6/h14/h15)
+ * back-to-back-READ_10 wedge at PWM gear.
+ *
+ * When set, gs101_ufs_post_pwr_change calls phy_calibrate() twice for
+ * PWM mode to drive the state machine through PRE_PWR_HS → POST_PWR_HS,
+ * applying both tables. wait_for_cdr will run on the 2nd call and
+ * return -ETIMEDOUT (no CDR lock at PWM); samsung_ufs_phy_calibrate
+ * propagates the error but ufs-exynos's exynos_ufs_post_pwr_mode does
+ * not check the return value of phy_calibrate, so this is benign.
+ */
+#define GS201_AOSP_POST_PMC		1
+
+/*
+ * (h18) Force PRDT_PREFETCH_EN on HCI_TXPRDT_ENTRY_SIZE for gs201.
+ * AOSP's exynos_ufs_config_host writes
+ *   `hci_writel(PRDT_PREFECT_EN | PRDT_SET_SIZE(12), HCI_TXPRDT_ENTRY_SIZE)`
+ * unconditionally for the gs201 path. Mainline's exynos_ufs_post_link
+ * only sets PRDT_PREFETCH_EN when `hba->caps & UFSHCD_CAP_CRYPTO`. We
+ * dropped UFSHCD_CAP_CRYPTO on gs201 (via the EXYNOS_UFS_OPT_UFSPR_SECURE
+ * gating change in gs201_ufs_drvs), so mainline ships gs201 with TX-PRDT
+ * prefetch DISABLED — the controller fetches PRDT entries on demand,
+ * one-at-a-time. Strong candidate for the (h6/h14/h15) PWM back-to-back
+ * READ_10 wedge: without prefetch, the second back-to-back command
+ * arrives while the AXI master is still in some transient on-demand
+ * fetch state from the first command. h16 ruled out the missing
+ * post-PMC PMA writes; this is the next mainline-vs-AOSP HCI-level
+ * difference our gs201 path actually hits.
+ */
+#define GS201_PRDT_PREFETCH		1
+
+/*
+ * (A2) Force HS-Rate-A instead of the negotiated HS-Rate-B at pwr_change.
+ * AOSP supports both rates; mainline negotiates and ends up at Rate-B.
+ * Rate-A is slower (~1.4 Gbps/lane vs ~2.9 for B) but the per-rate cal
+ * tables differ (post_calib_of_hs_rate_a vs post_calib_of_hs_rate_b
+ * are nearly identical, but maybe Rate-A side-steps whatever's broken
+ * in the Rate-B CDR-lock path).
+ *
+ * Set to 0 to use the negotiated rate (default = Rate-B for our device).
+ * Set to PA_HS_MODE_A (= 1) to override `pwr->hs_rate` in the
+ * pre_pwr_change hook. Only effective when GS201_MAINLINE_FORCE_PWM_GEAR
+ * is also 0 (otherwise we force PWM and never reach HS).
+ */
+#define GS201_FORCE_HS_RATE_A		0	/* A4: test Rate-B at G1 */
+
+/*
+ * (A2c) Clamp HS gear after rate selection. A2 confirmed Rate-A G4
+ * locks CDR cleanly but the device never ACKs the first SCSI frame
+ * (`dl_err 0x80000002 = TCx_REPLAY_TIMER_EXPIRED`). Lower symbol rates
+ * may side-step whatever timing/integrity issue prevents the device
+ * from ACKing at G4. Gear values: 1, 2, 3, or 4. Set to 0 to keep
+ * the negotiated gear. Only effective for HS modes (PWM gear is
+ * controlled by GS201_MAINLINE_FORCE_PWM_GEAR).
+ */
+#define GS201_FORCE_HS_GEAR		0	/* not the lever */
+
+/*
+ * (A2d) Settle delay (in ms) after a successful HS pwr_change before
+ * returning from post_pwr_change. A2/A2c confirmed that at HS-Rate-A
+ * any gear the device never ACKs the first SCSI frame
+ * (`dl_err 0x80000002 = TCx_REPLAY_TIMER_EXPIRED`). The dl_err fires
+ * within 30 ms of pwr_change — too tight to be a normal command-flow
+ * issue. Hypothesis: the device-side pwr_change is not fully settled
+ * when the host starts sending commands. AOSP may have an implicit
+ * delay (clk_gating, runtime PM, dev_quirks) we don't replicate.
+ *
+ * Set non-zero to msleep that many ms after pwr_change before
+ * proceeding. 100 ms is a guess; bisect down/up if it helps.
+ * Set to 0 to disable.
+ */
+#define GS201_HS_PWR_SETTLE_MS		0	/* A2d shifted timing only */
+
+/*
+ * (C1) Probe HSI2 CMU divider/mux/gate state at strategic points around
+ * pwr_change. Hypothesis from the AOSP-vs-mainline audit:
+ *
+ *   - mainline gs201.dtsi wires ufs_aclk and ufs_unipro as fixed-clocks
+ *     because no cmu-hsi2 node is instantiated for gs201 (mainline's
+ *     clk-gs101.c HAS a google,gs201-cmu-hsi2 probe handler at line
+ *     ~4845 but no DT node ever hits it);
+ *   - so ufshcd_setup_clocks/ufshcd_set_clk_freq don't reprogram any
+ *     HSI2 divider when the kernel transitions gears;
+ *   - and the BUS/MMC_CARD divider offsets are swapped between gs101
+ *     and gs201 (gs101: 0x1898=BUS, 0x189c=MMC; gs201: 0x1898=MMC,
+ *     0x189c=NOC/BUS) so even if it did try, the BUS write would hit
+ *     the wrong divider.
+ *
+ * If true, this would explain: PWM works (lowest gear has forgiving
+ * timing), HS-A and HS-B both wedge with dl_err 0x80000002 on the
+ * first frame after PMC (controller's perceived unipro_clk doesn't
+ * match the PHY's SYMBOL_CLK divisor for the new gear).
+ *
+ * To test the hypothesis without porting CCF infrastructure: ioremap
+ * CMU_TOP and CMU_HSI2 directly, dump the relevant dividers/muxes/
+ * gates at:
+ *   - end of gs201_ufs_post_link        (baseline at link-up)
+ *   - start of gs101_ufs_pre_pwr_change (before PMC writes)
+ *   - end of gs101_ufs_post_pwr_change  (after PMC and PHY calibrate)
+ *
+ * If hardware values are identical at all three points, the kernel
+ * really is doing nothing — and we can move to manual divider writes
+ * in pre_pwr_change to test whether changing the rate fixes HS.
+ *
+ * Read-only probe; does not modify any register. Safe to leave on.
+ *
+ * NOTE: requires pKVM (kvm-arm.mode=protected) so EL1 CMU access is
+ * unlocked by BL31. See memory/project_pkvm_cmu_unlock.md.
+ *
+ * RESULT (C1+C2 runs, 2026-05-02): bytes-identical at all three call sites
+ * for both PWM-G4 and HS-Rate-B G4. HSI2 CMU is untouched across PMC. UFS_EMBD
+ * divider DIV[0x18a4]=0x02 → /3 → 532.992MHz/3 = 177.664 MHz exactly matches
+ * mainline's `ufs_unipro` fixed-clock stub claim. NOC divider DIV[0x189c]=0x01
+ * → /2 → SHARED0_DIV4 (532.992 MHz) /2 = 266.5 MHz exactly matches `ufs_aclk`
+ * stub claim of 267 MHz. So both rates are real, the clock framework not
+ * touching HSI2 at PMC matches AOSP's behavior, and "wrong-rate-at-HS" is
+ * fully ruled out as a cause of the dl_err 0x80000002 wedge. Switch left at
+ * 1 so future bring-up work can re-enable trivially; the prints are short.
+ */
+#define GS201_PROBE_CMU_DIVIDERS	0
+
+/*
+ * (S1) Diagnostic: dump PA-layer device-reported / negotiated / active
+ * attributes via DME_GET at strategic points around pwr_change. Ports
+ * AOSP's `exynos_ufs_get_caps_after_link` + `exynos_ufs_update_active_lanes`
+ * (private/google-modules/soc/gs/drivers/ufs/ufs-exynos.c:188,217) but uses
+ * mainline's standard `ufshcd_dme_get(UIC_ARG_MIB(PA_*))` instead of AOSP's
+ * raw `unipro_readl(handle, UNIP_PA_*)` shortcut. Same target attributes,
+ * different mechanism — DME_GET goes through the controller's DME state
+ * machine instead of reading a vendor-specific shadow MMIO.
+ *
+ * Attributes dumped:
+ *   PA_MAXRXHSGEAR        — device-reported max HS gear (host learned at link)
+ *   PA_CONNECTEDTXDATALANES, PA_CONNECTEDRXDATALANES — negotiated lane count
+ *   PA_ACTIVETXDATALANES,    PA_ACTIVERXDATALANES    — active lanes post-PMC
+ *   PA_PWRMODE                                      — active power mode
+ *
+ * Hypothesis: if `PA_ACTIVE*` differs from what mainline thinks (e.g. host
+ * thinks 2 lanes but device actually entered 1 lane), that's a smoking gun
+ * for "device entered a different mode than host expects" — which exactly
+ * matches the dl_err 0x80000002 / device-never-ACKs-first-frame symptom.
+ *
+ * Read-only, no register writes. Safe to leave on. Default 1 — turn off
+ * once the diagnostic question is answered.
+ *
+ * RESULT (S1 run, 2026-05-02): PA-layer state on host MATCHES what was
+ * requested at HS PMC. post_link: MaxRxHSGear=4, Connected[2,2], Active[1,1],
+ * PwrMode=0x55 (SLOWAUTO,SLOWAUTO). post_pwr_HS (HS-Rate-B G4 attempt,
+ * after PMC reports success, before first frame fails): MaxRxHSGear=4,
+ * Connected[2,2], Active[2,2], PwrMode=0x11 (FAST,FAST). Device fully
+ * acknowledged the mode change. First frame STILL fails with dl_err
+ * 0x80000002. Bug is below the PA layer (M-PHY signaling or controller-
+ * internal handshake), not in mode-negotiation. Default flipped to 0.
+ */
+#define GS201_PROBE_PA_STATE	0
+
+#define GS201_CMU_TOP_BASE		0x1e080000
+#define GS201_CMU_HSI2_BASE		0x14400000
 
 /*
  * UFS Protector registers
@@ -314,6 +609,135 @@ static void gs201_dump_ufsp(struct device *dev, const char *label)
 	iounmap(base);
 }
 
+#if GS201_PROBE_CMU_DIVIDERS
+/*
+ * (C1) Read-only probe of HSI2 clock-controller state from CMU_TOP and
+ * CMU_HSI2. Dumps four CMU_TOP HSI2 dividers (0x1898/0x189c/0x18a0/0x18a4)
+ * and the corresponding CMU_HSI2 USER muxes / IPCLKPORT gates. The four
+ * TOP dividers cover the range [BUS, MMC_CARD, PCIE, UFS_EMBD] under both
+ * the gs101 (mainline) and gs201 (AOSP cal-if) interpretations:
+ *
+ *   gs101:  0x1898=BUS    0x189c=MMC_CARD  0x18a0=PCIE  0x18a4=UFS_EMBD
+ *   gs201:  0x1898=MMC    0x189c=NOC/BUS   0x18a0=PCIE  0x18a4=UFS_EMBD
+ *
+ * UFS_EMBD divider is at the same offset on both, so the value at 0x18a4
+ * is unambiguous. The other three offsets are dumped raw; interpret per
+ * the table above. PCIE divider at 0x18a0 is unaffected by the swap.
+ *
+ * If the values are byte-identical between the three call sites
+ * (post_link, pre_pwr_change, post_pwr_change) — and they should be,
+ * with mainline's fixed-clock stubs — the kernel really is doing nothing
+ * to HSI2 dividers across PMC. That confirms the C1 hypothesis and
+ * justifies a follow-up experiment that manually programs the divider.
+ */
+static void gs201_dump_cmu_hsi2(struct device *dev, const char *tag)
+{
+	void __iomem *top, *hsi2;
+
+	top = ioremap(GS201_CMU_TOP_BASE, 0x10000);
+	if (!top) {
+		dev_warn(dev, "CMU probe (%s): CMU_TOP ioremap failed\n", tag);
+		return;
+	}
+	hsi2 = ioremap(GS201_CMU_HSI2_BASE, 0x10000);
+	if (!hsi2) {
+		dev_warn(dev, "CMU probe (%s): CMU_HSI2 ioremap failed\n", tag);
+		iounmap(top);
+		return;
+	}
+
+	/*
+	 * CMU_TOP HSI2 dividers (raw — see the swap note above).
+	 * Layout per Samsung CMU divider register:
+	 *   bits  3:0 = DIVRATIO   (actual divider = DIVRATIO + 1)
+	 *   bit  16   = BUSY (transient; 0 == idle)
+	 *   bit  28   = ENABLE_AUTOMATIC_CLKGATING
+	 *   bit  30   = OVERRIDE_BY_HCH
+	 */
+	dev_info(dev,
+		 "CMU probe (%s) TOP: DIV[0x1898]=0x%08x DIV[0x189c]=0x%08x DIV[0x18a0:PCIE]=0x%08x DIV[0x18a4:UFS_EMBD]=0x%08x\n",
+		 tag,
+		 readl(top + 0x1898),
+		 readl(top + 0x189c),
+		 readl(top + 0x18a0),
+		 readl(top + 0x18a4));
+
+	/*
+	 * CMU_TOP HSI2 muxes (which input PLL feeds each divider). gs201
+	 * cal-if mux offsets are 0x10a0/0x10a4/0x10a8/0x109c (NOC, PCIE,
+	 * UFS_EMBD, MMC_CARD). gs101 mainline thinks 0x10a0/4/8/c are
+	 * BUS/MMC/PCIE/UFS_EMBD. Same swap caveat as above.
+	 */
+	dev_info(dev,
+		 "CMU probe (%s) TOP: MUX[0x10a0]=0x%08x MUX[0x10a4]=0x%08x MUX[0x10a8]=0x%08x MUX[0x10ac]=0x%08x\n",
+		 tag,
+		 readl(top + 0x10a0),
+		 readl(top + 0x10a4),
+		 readl(top + 0x10a8),
+		 readl(top + 0x10ac));
+
+	/*
+	 * CMU_HSI2 USER muxes and IPCLKPORT gates for UFS:
+	 *   0x0600 PLL_CON0_MUX_CLKCMU_HSI2_NOC_USER       (BUS user mux)
+	 *   0x0630 PLL_CON0_MUX_CLKCMU_HSI2_UFS_EMBD_USER  (UFS_EMBD user mux)
+	 *   0x20e8 GAT_GOUT_BLK_HSI2_UID_UFS_EMBD_IPCLKPORT_I_ACLK
+	 *   0x20ec GAT_GOUT_BLK_HSI2_UID_UFS_EMBD_IPCLKPORT_I_CLK_UNIPRO
+	 *   0x20f0 GAT_GOUT_BLK_HSI2_UID_UFS_EMBD_IPCLKPORT_I_FMP_CLK
+	 *   0x1800 DIV_CLK_HSI2_NOCP   (NOC/peripheral clock divider)
+	 *   0x1804 DIV_CLK_HSI2_NOC_LH (NOC long-hop divider)
+	 */
+	dev_info(dev,
+		 "CMU probe (%s) HSI2: NOC_USER=0x%08x UFS_EMBD_USER=0x%08x ACLK_GATE=0x%08x UNIPRO_GATE=0x%08x FMP_GATE=0x%08x NOCP_DIV=0x%08x NOC_LH_DIV=0x%08x\n",
+		 tag,
+		 readl(hsi2 + 0x0600),
+		 readl(hsi2 + 0x0630),
+		 readl(hsi2 + 0x20e8),
+		 readl(hsi2 + 0x20ec),
+		 readl(hsi2 + 0x20f0),
+		 readl(hsi2 + 0x1800),
+		 readl(hsi2 + 0x1804));
+
+	iounmap(hsi2);
+	iounmap(top);
+}
+#else
+static inline void gs201_dump_cmu_hsi2(struct device *dev, const char *tag) {}
+#endif
+
+#if GS201_PROBE_PA_STATE
+/*
+ * (S1) Read-only DME_GET dump of PA-layer attributes. See block comment near
+ * GS201_PROBE_PA_STATE define for the hypothesis being tested.
+ *
+ * DME_GET is allowed before link startup (returns garbage) and after, but is
+ * really only meaningful after link startup completes. Don't call from
+ * pre_link or earlier.
+ */
+static void gs201_dump_pa_state(struct ufs_hba *hba, const char *tag)
+{
+	u32 max_hs_gear = 0, ctxlanes = 0, crxlanes = 0;
+	u32 atxlanes = 0, arxlanes = 0, pwrmode = 0;
+	int e1, e2, e3, e4, e5, e6;
+
+	e1 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_MAXRXHSGEAR), &max_hs_gear);
+	e2 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_CONNECTEDTXDATALANES), &ctxlanes);
+	e3 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_CONNECTEDRXDATALANES), &crxlanes);
+	e4 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_ACTIVETXDATALANES), &atxlanes);
+	e5 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_ACTIVERXDATALANES), &arxlanes);
+	e6 = ufshcd_dme_get(hba, UIC_ARG_MIB(PA_PWRMODE), &pwrmode);
+
+	dev_info(hba->dev,
+		 "S1 PA state (%s): MaxRxHSGear=%u (e=%d) Connected[Tx=%u Rx=%u] (e=%d,%d) Active[Tx=%u Rx=%u] (e=%d,%d) PwrMode=0x%02x (e=%d)\n",
+		 tag,
+		 max_hs_gear, e1,
+		 ctxlanes, crxlanes, e2, e3,
+		 atxlanes, arxlanes, e4, e5,
+		 pwrmode, e6);
+}
+#else
+static inline void gs201_dump_pa_state(struct ufs_hba *hba, const char *tag) {}
+#endif
+
 /*
  * gs201 SMU/UFSP init via SMC. mainline's exynos_ufs_config_smu writes UFSP
  * registers directly; the UFSP region returns a bus-fault sentinel
@@ -400,6 +824,7 @@ static void gs201_dump_sysreg_hsi2_iocc(struct device *dev, const char *label)
 static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
 {
 	struct device *dev = ufs->hba->dev;
+	struct ufs_hba *hba = ufs->hba;
 	int ret;
 
 	gs201_dump_cmu_hsi2_ufs_gates(dev);
@@ -409,6 +834,44 @@ static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
 	gs201_dump_ufsp(dev, "after-smc ");
 	ret = gs101_ufs_drv_init(ufs);   /* this calls exynos_ufs_shareability */
 	gs201_dump_sysreg_hsi2_iocc(dev, "after-iocc-write ");
+
+	/*
+	 * (g4) Manual DME_HIBER_ENTER/EXIT cycles (driven by clock-gating-on-idle
+	 * and runtime PM autosuspend) trigger HOST_BUS_FATAL_ERROR (IS BIT(17),
+	 * saved_err=0x20000) ~36s into operation under the (g2) PWM workaround.
+	 * The (g3) UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8 quirk only suppresses the
+	 * controller's auto-hibern8 timer, not these driver-initiated cycles.
+	 * Strip the gating caps inherited from gs101_ufs_drv_init and pin both
+	 * PM levels to ACTIVE/ACTIVE-LINK so the link never enters hibern8.
+	 * Costs power but avoids the bus-fatal trip; remove once HS-Rate-B
+	 * works and the H8-exit path is properly tested.
+	 */
+	hba->caps &= ~(UFSHCD_CAP_CLK_GATING |
+		       UFSHCD_CAP_HIBERN8_WITH_CLK_GATING);
+	hba->rpm_lvl = UFS_PM_LVL_0;
+	hba->spm_lvl = UFS_PM_LVL_0;
+	dev_info(dev,
+		 "gs201 UFS: stripped clk-gating + hibern8-with-clk-gating; PM lvl pinned to LVL_0\n");
+
+	/*
+	 * (h7) Tried several ways to clamp SCSI queue depth to 1 to dodge the
+	 * concurrent-command-triggered SBFES at ~38s in PWM mode. NONE took
+	 * effect because the vops API doesn't expose a hook at the right
+	 * point in the init flow:
+	 *   - host->can_queue / cmd_per_lun in drv_init: overwritten at
+	 *     ufshcd.c:11061 after vops->init returns.
+	 *   - host->can_queue / cmd_per_lun in post_link: too late;
+	 *     scsi_add_host (line 11158) already snapshotted the tag-set
+	 *     size into the SCSI midlayer.
+	 *   - hba->nutrs = 2 in drv_init: overwritten at ufshcd.c:2487 by
+	 *     ufshcd_hba_capabilities reading the cap reg (which itself
+	 *     runs AFTER vops->init).
+	 *   - cmd_per_lun resets again in ufs_get_device_desc (line 8782)
+	 *     to (nutrs, bqueuedepth) - reserved, well after probe.
+	 * The only remaining clean fix is upstream: either add a vops hook
+	 * between caps-read and scsi_add_host, or have ufshcd respect a
+	 * per-variant max-can-queue.
+	 */
 	return ret;
 }
 
@@ -2194,6 +2657,56 @@ static int gs101_ufs_pre_link(struct exynos_ufs *ufs)
 
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
 
+#if GS201_AOSP_PCS_WRITES
+	/*
+	 * (h13) AOSP `__set_pcs` mechanism: bracket each per-lane raw
+	 * unipro_writel with a UNIP_COMP_AXI_AUX_FIELD lane-selector
+	 * gate. Lane encoding: TX 0..1, RX 4..5. SFR offset is
+	 * EXYNOS_PCS_SFR(mib) = 0x2000 + (mib << 2). Computed values
+	 * (mclk_period_rnd_off, line_reset_period) match what mainline
+	 * writes via the VND_* aliases — only the mechanism differs.
+	 */
+	dev_info(hba->dev, "h13 pre_link: using AOSP __set_pcs mechanism for per-lane PCS writes\n");
+
+	for_each_ufs_rx_lane(ufs, i) {
+		u8 lane = EXYNOS_PCS_RX_LANE_0 + i;
+		u32 mclk_per = DIV_ROUND_UP(NSEC_PER_SEC, ufs->mclk_rate);
+
+		unipro_writel(ufs, EXYNOS_PCS_AUX_WSTRB | (lane & 0xFFFF),
+			      UNIP_COMP_AXI_AUX_FIELD);
+		unipro_writel(ufs, mclk_per, EXYNOS_PCS_SFR(VND_RX_CLK_PRD));
+		unipro_writel(ufs, 0x0, EXYNOS_PCS_SFR(VND_RX_CLK_PRD_EN));
+		unipro_writel(ufs, (rx_line_reset_period >> 16) & 0xFF,
+			      EXYNOS_PCS_SFR(VND_RX_LINERESET_VALUE2));
+		unipro_writel(ufs, (rx_line_reset_period >> 8) & 0xFF,
+			      EXYNOS_PCS_SFR(VND_RX_LINERESET_VALUE1));
+		unipro_writel(ufs, rx_line_reset_period & 0xFF,
+			      EXYNOS_PCS_SFR(VND_RX_LINERESET_VALUE0));
+		unipro_writel(ufs, 0x69, EXYNOS_PCS_SFR(0x2f));
+		unipro_writel(ufs, 0x1,  EXYNOS_PCS_SFR(0x84));
+		unipro_writel(ufs, 0xf6, EXYNOS_PCS_SFR(0x25));
+		unipro_writel(ufs, EXYNOS_PCS_AUX_WSTRB, UNIP_COMP_AXI_AUX_FIELD);
+	}
+
+	for_each_ufs_tx_lane(ufs, i) {
+		u8 lane = EXYNOS_PCS_TX_LANE_0 + i;
+		u32 mclk_per = DIV_ROUND_UP(NSEC_PER_SEC, ufs->mclk_rate);
+
+		unipro_writel(ufs, EXYNOS_PCS_AUX_WSTRB | (lane & 0xFFFF),
+			      UNIP_COMP_AXI_AUX_FIELD);
+		unipro_writel(ufs, mclk_per, EXYNOS_PCS_SFR(VND_TX_CLK_PRD));
+		unipro_writel(ufs, 0x02, EXYNOS_PCS_SFR(VND_TX_CLK_PRD_EN));
+		unipro_writel(ufs, (tx_line_reset_period >> 16) & 0xFF,
+			      EXYNOS_PCS_SFR(VND_TX_LINERESET_PVALUE2));
+		unipro_writel(ufs, (tx_line_reset_period >> 8) & 0xFF,
+			      EXYNOS_PCS_SFR(VND_TX_LINERESET_PVALUE1));
+		unipro_writel(ufs, tx_line_reset_period & 0xFF,
+			      EXYNOS_PCS_SFR(VND_TX_LINERESET_PVALUE0));
+		unipro_writel(ufs, 1, EXYNOS_PCS_SFR(0x04));
+		unipro_writel(ufs, 0, EXYNOS_PCS_SFR(0x7F));
+		unipro_writel(ufs, EXYNOS_PCS_AUX_WSTRB, UNIP_COMP_AXI_AUX_FIELD);
+	}
+#else
 	for_each_ufs_rx_lane(ufs, i) {
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_CLK_PRD, i),
 			       DIV_ROUND_UP(NSEC_PER_SEC, ufs->mclk_rate));
@@ -2223,6 +2736,7 @@ static int gs101_ufs_pre_link(struct exynos_ufs *ufs)
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x04, i), 1);
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x7F, i), 0);
 	}
+#endif
 
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x0);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0x0);
@@ -2268,16 +2782,202 @@ static int gs201_ufs_post_link(struct exynos_ufs *ufs)
 	unipro_writel(ufs, 0x0, 0x3348);
 	unipro_writel(ufs, 0x0, 0x334C);
 
+#if GS201_PRDT_PREFETCH
+	{
+		u32 val = PRDT_PREFETCH_EN | (ilog2(DATA_UNIT_SIZE) & 0x1F);
+
+		hci_writel(ufs, val, HCI_TXPRDT_ENTRY_SIZE);
+		dev_info(ufs->hba->dev,
+			 "h18 post_link: HCI_TXPRDT_ENTRY_SIZE = 0x%08x (PRDT_PREFETCH_EN | size=12, AOSP parity)\n",
+			 val);
+	}
+#endif
+
 	gs201_dump_ufsp(ufs->hba->dev, "after-cfg");
+	gs201_dump_cmu_hsi2(ufs->hba->dev, "post_link");
+	gs201_dump_pa_state(ufs->hba, "post_link ");
 
 	return 0;
 }
+
+/* (g2) gs201 mainline can't yet survive any HS-Rate-B mode — even after
+ * (g) capped at G3 the link reached "FAST series_B G_3 L_2" but immediately
+ * hit dl_err 0x80000002 on the first SCSI command, exactly like G4. The
+ * CDR lock check (gs101_phy_wait_for_cdr_lock / TRSV_REG339 bit 3) also
+ * fails identically at G3 and G4. Conclusion: the PHY isn't producing
+ * usable HS data at any gear, not just G4. Force PWM mode so SCSI works
+ * and rootfs is reachable while HS is debugged. PWM_G4 × 2L ≈ 5–10 MB/s
+ * — slow but functional. Remove once HS-Rate-B is fixed.
+ *
+ * (h10) Tried disabling this with the phy-gs101-ufs.c PMA transcription-bug
+ * fixes (0x25D->0x27D, 0x29E->0x2BE) in place. CDR lock still failed —
+ * R338 calibration state DID change (0x9d -> 0x9f) and R33B reached 0
+ * earlier, so the typo fix moved something in the PHY, but TRSV_REG339
+ * bit 3 still never set. Same dl_err 0x80000002 / scsi_eh_scmd_add WARN
+ * as h5. Re-enabled PWM clamp so the device keeps booting; typo fixes
+ * remain in tree as a separate (correct-but-not-sufficient) patch.
+ *
+ * (h11) AOSP `ufs_cal_pre_pmc` port test: when GS201_AOSP_PRE_PMC=1
+ * the function below replaces the original DME_SET-based UserData
+ * setup with raw unipro_writel matching AOSP's calib_of_hs_rate_b
+ * table mechanism+order, masks PA_ERROR_IND_RECEIVED, and writes
+ * PA_TxHsAdaptType=1 for HS modes. Disable PWM force at the same
+ * time so HS is actually attempted.
+ */
+/*
+ * (h11/h11b) Bisect of the AOSP `ufs_cal_pre_pmc` port:
+ *  - h11a (PRE_PMC=1, ADAPT=1): mask + unipro_writel UserData/L2 in AOSP order
+ *    + PA_TxHsAdaptType=1. pwr_change fails with upmcrs:0x5, all UIC error
+ *    counters zero. Same fatal as m2/m4/m5.
+ *  - h11b (PRE_PMC=1, ADAPT=0): same as h11a but skip the adapt write.
+ *    pwr_change reaches FAST series_B G_4 L_2 cleanly. CDR lock still fails
+ *    identically (TRSV_REG339=0, dl_err 0x80000002). Confirms two things:
+ *      1) PA_TxHsAdaptType=1 is the SOLE trigger of upmcrs:0x5 — independent
+ *         of write mechanism, mask, or AOSP order.
+ *      2) CDR lock failure is independent of pre_pmc semantics — happens
+ *         even with AOSP-faithful pre_pmc. Bug is in PHY/PCS state, not PA.
+ *
+ * Default reverted: PWM force on, AOSP pre_pmc on (no harm at PWM, slightly
+ * better matches AOSP), adapt off (would break pwr_change). Re-enable adapt
+ * only if you've found whatever AOSP-only precondition makes it safe.
+ */
+/*
+ * (h12) Tested HS-Rate-B with the buggy (h4) PCS clobber-writes REMOVED.
+ * Result: same CDR-lock failure. TRSV_REG339=0, dl_err 0x80000002,
+ * scsi_eh_scmd_add WARN. So the (h4) writes were destructive bugs of
+ * my own making, but they were NOT the cause of HS-Rate-B failure —
+ * removing them gets the PHY init clean but CDR lock still doesn't
+ * advance.
+ *
+ * (h13) Test the AOSP `__set_pcs` mechanism for per-lane PHY_PCS_RX/TX
+ * writes. Mainline uses ufshcd_dme_set(UIC_ARG_MIB_SEL(addr, lane), val)
+ * for these, going through the controller's DME state machine. AOSP
+ * uses raw unipro_writel bracketed by UNIP_COMP_AXI_AUX_FIELD lane
+ * selector. Plausible the DME path silently no-ops for some PCS
+ * attributes on gs201. With GS201_AOSP_PCS_WRITES=1, gs101_ufs_pre_link
+ * uses the AOSP mechanism for the per-lane writes; everything else
+ * (PHY_PCS_COMN, UNIPRO_STD_MIB) stays on dme_set for now.
+ *
+ * NOTE: the GS201_* switch defines themselves live near the top of
+ * this file (above gs101_ufs_pre_link), not here — the preprocessor
+ * scans top-to-bottom and undefined-macro `#if` silently evaluates
+ * to 0, so any switch used above its definition gets silently
+ * skipped. Learned the hard way during h13.
+ */
 
 static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 					 struct ufs_pa_layer_attr *pwr)
 {
 	struct ufs_hba *hba = ufs->hba;
+#if GS201_AOSP_PRE_PMC
+	bool is_hs;
+	u32 dl_err_mask;
+#endif
 
+	gs201_dump_cmu_hsi2(hba->dev, "pre_pwr ");
+
+#if GS201_MAINLINE_FORCE_PWM_GEAR
+	if (pwr->pwr_rx == FAST_MODE || pwr->pwr_rx == FASTAUTO_MODE ||
+	    pwr->pwr_tx == FAST_MODE || pwr->pwr_tx == FASTAUTO_MODE) {
+		dev_info(hba->dev,
+			 "gs101_pre_pwr: forcing PWM gear=%u rx/tx (was rx=%u/%u tx=%u/%u hs_rate=%u) — HS broken on mainline\n",
+			 GS201_MAINLINE_FORCE_PWM_GEAR,
+			 pwr->pwr_rx, pwr->gear_rx,
+			 pwr->pwr_tx, pwr->gear_tx, pwr->hs_rate);
+		pwr->pwr_rx = SLOWAUTO_MODE;
+		pwr->pwr_tx = SLOWAUTO_MODE;
+		pwr->gear_rx = GS201_MAINLINE_FORCE_PWM_GEAR;
+		pwr->gear_tx = GS201_MAINLINE_FORCE_PWM_GEAR;
+		pwr->hs_rate = 0;
+	}
+#endif
+
+#if GS201_FORCE_HS_RATE_A
+	if ((pwr->pwr_rx == FAST_MODE || pwr->pwr_rx == FASTAUTO_MODE ||
+	     pwr->pwr_tx == FAST_MODE || pwr->pwr_tx == FASTAUTO_MODE) &&
+	    pwr->hs_rate != PA_HS_MODE_A) {
+		dev_info(hba->dev,
+			 "A2 pre_pwr: forcing hs_rate=A (was %u) — testing whether Rate-A side-steps Rate-B CDR-lock failure\n",
+			 pwr->hs_rate);
+		pwr->hs_rate = PA_HS_MODE_A;
+	}
+#endif
+
+#if GS201_FORCE_HS_GEAR
+	if ((pwr->pwr_rx == FAST_MODE || pwr->pwr_rx == FASTAUTO_MODE ||
+	     pwr->pwr_tx == FAST_MODE || pwr->pwr_tx == FASTAUTO_MODE) &&
+	    (pwr->gear_rx > GS201_FORCE_HS_GEAR ||
+	     pwr->gear_tx > GS201_FORCE_HS_GEAR)) {
+		dev_info(hba->dev,
+			 "A2c pre_pwr: clamping HS gear to %u (was rx=%u tx=%u) — testing if lower symbol rate fixes dl_err 0x80000002\n",
+			 GS201_FORCE_HS_GEAR, pwr->gear_rx, pwr->gear_tx);
+		pwr->gear_rx = GS201_FORCE_HS_GEAR;
+		pwr->gear_tx = GS201_FORCE_HS_GEAR;
+	}
+#endif
+
+#if GS201_AOSP_PRE_PMC
+	/*
+	 * (h11) Port AOSP gs201 ufs_cal_pre_pmc semantics into mainline.
+	 *
+	 * AOSP's pre_pmc does, in this order:
+	 *   1. read-modify-write UNIP_DL_ERROR_IRQ_MASK |= PA_ERROR_IND_RECEIVED
+	 *   2. iterate `calib_of_hs_rate_b` (HS) or `calib_of_pwm` (PWM/SLOW),
+	 *      where every entry is `unipro_writel(val, sfr)` — the UNIPRO_STD_MIB
+	 *      type goes through `unipro_writel`, NOT `ufshcd_dme_set`, and there
+	 *      is no DME state-machine command issued.
+	 *   3. The PHY_PMA_TRSV writes (0xDA4=0x11, 0x918=0x03) come last in
+	 *      the cal table; mainline does these via phy_calibrate(CFG_PRE_PWR_HS)
+	 *      after this vop returns, which is functionally equivalent.
+	 *
+	 * The earlier (m2/m4/m5) attempts only added a single piece (PA_TxHsAdaptType
+	 * via various write mechanisms ± mask) on top of the original DME_SET
+	 * UserData writes. This port replaces ALL the local-PA writes with raw
+	 * unipro_writel and reorders to match AOSP exactly. Hypothesis: DME_SET
+	 * for UserData triggers DME state-machine side-effects that interact
+	 * badly with a subsequent adapt-enabled pwr_change. AOSP avoids them by
+	 * never issuing DME_SET commands for these attributes.
+	 */
+	is_hs = (pwr->pwr_rx == FAST_MODE || pwr->pwr_rx == FASTAUTO_MODE ||
+		 pwr->pwr_tx == FAST_MODE || pwr->pwr_tx == FASTAUTO_MODE);
+
+	dl_err_mask = unipro_readl(ufs, UNIP_DL_ERROR_IRQ_MASK_REG) |
+		      UNIP_DL_PA_ERROR_IND_RECEIVED_BIT;
+	unipro_writel(ufs, dl_err_mask, UNIP_DL_ERROR_IRQ_MASK_REG);
+	dev_info(hba->dev,
+		 "h11 pre_pmc: masked PA_ERROR_IND_RECEIVED -> 0x%08x (is_hs=%d)\n",
+		 dl_err_mask, is_hs);
+
+#if GS201_AOSP_PRE_PMC_ADAPT
+	if (is_hs) {
+		/* AOSP calib_of_hs_rate_b, in original table order */
+		unipro_writel(ufs, 0x1, UNIP_PA_TXHSADAPTTYPE);
+		dev_info(hba->dev,
+			 "h11 pre_pmc: PA_TxHsAdaptType=1 (sfr 0x3350) written\n");
+	}
+#endif
+
+	unipro_writel(ufs, 8064, UNIP_DL_FC0PROTTIMEOUTVAL);
+	unipro_writel(ufs, 28224, UNIP_DL_TC0REPLAYTIMEOUTVAL);
+	unipro_writel(ufs, 20160, UNIP_DL_AFC0REQTIMEOUTVAL);
+	unipro_writel(ufs, 12000, UNIP_PA_PWRMODEUSERDATA0_REG);
+	unipro_writel(ufs, 32000, UNIP_PA_PWRMODEUSERDATA1_REG);
+	unipro_writel(ufs, 16000, UNIP_PA_PWRMODEUSERDATA2_REG);
+	unipro_writel(ufs, 8064, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER0);
+	unipro_writel(ufs, 28224, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER1);
+	unipro_writel(ufs, 20160, UNIPRO_DME_POWERMODE_REQ_LOCALL2TIMER2);
+	unipro_writel(ufs, 12000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER0);
+	unipro_writel(ufs, 32000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER1);
+	unipro_writel(ufs, 16000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER2);
+
+	dev_info(hba->dev,
+		 "h11 pre_pmc: AOSP-style writes applied (is_hs=%d)\n", is_hs);
+#else
+	/*
+	 * Original mainline pre_pwr_change. (m2/m4/m5) tried adding adapt here
+	 * piecemeal and broke pwr_change with upmcrs:0x5 every time. The h11
+	 * AOSP port above replaces this whole block when enabled.
+	 */
 	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA0), 12000);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA1), 32000);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_PWRMODEUSERDATA2), 16000);
@@ -2287,8 +2987,138 @@ static int gs101_ufs_pre_pwr_change(struct exynos_ufs *ufs,
 	unipro_writel(ufs, 12000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER0);
 	unipro_writel(ufs, 32000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER1);
 	unipro_writel(ufs, 16000, UNIPRO_DME_POWERMODE_REQ_REMOTEL2TIMER2);
+#endif
+
+#if GS201_MASK_SBFES_IRQ
+	{
+		u32 ie_before = ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+		u32 ie_after  = ie_before & ~SYSTEM_BUS_FATAL_ERROR;
+
+		if (ie_before != ie_after) {
+			ufshcd_writel(hba, ie_after, REG_INTERRUPT_ENABLE);
+			dev_info(hba->dev,
+				 "h9 pre_pwr: masked SBFES in IE: 0x%08x -> 0x%08x (PWM workaround)\n",
+				 ie_before, ie_after);
+		} else {
+			dev_info(hba->dev,
+				 "h9 pre_pwr: IE = 0x%08x (SBFES already clear, mask was no-op)\n",
+				 ie_before);
+		}
+	}
+#endif
 
 	return 0;
+}
+
+#if GS201_AOSP_POST_PMC
+/*
+ * gs101/gs201 post-PMC hook. For PWM mode, drives the Samsung PHY state
+ * machine through CFG_PRE_PWR_HS → CFG_POST_PWR_HS → CFG_PRE_INIT to apply
+ * the tensor_gs101_pre_pwr_hs_config and tensor_gs101_post_pwr_hs_config
+ * tables (which mainline otherwise skips for PWM, see exynos_ufs_pre_pwr_mode
+ * + exynos_ufs_post_pwr_mode HS-only gating). For HS modes, those calibrate
+ * calls already happen in the surrounding exynos_ufs_*_pwr_mode paths, so
+ * this hook does nothing.
+ */
+static int gs101_ufs_post_pwr_change(struct exynos_ufs *ufs,
+				     const struct ufs_pa_layer_attr *pwr_req)
+{
+	struct ufs_hba *hba = ufs->hba;
+	struct phy *generic_phy = ufs->phy;
+
+	if (ufshcd_is_hs_mode(pwr_req)) {
+#if GS201_HS_PWR_SETTLE_MS
+		dev_info(hba->dev,
+			 "A2d post_pwr: HS pwr_change OK, settling for %u ms before allowing first SCSI\n",
+			 (unsigned int)GS201_HS_PWR_SETTLE_MS);
+		msleep(GS201_HS_PWR_SETTLE_MS);
+#endif
+		gs201_dump_cmu_hsi2(hba->dev, "post_pwr_HS ");
+		gs201_dump_pa_state(hba, "post_pwr_HS ");
+		return 0;
+	}
+
+	dev_info(hba->dev,
+		 "h16 post_pwr: forcing PHY calibrate x2 for non-HS gear (advance state machine through PRE/POST_PWR_HS to apply AOSP-equivalent post_calib_of_pwm writes)\n");
+
+	/* Advance: CFG_PRE_PWR_HS → CFG_POST_PWR_HS, runs PRE_PWR_HS table. */
+	phy_calibrate(generic_phy);
+	/*
+	 * Advance: CFG_POST_PWR_HS → CFG_PRE_INIT, runs POST_PWR_HS table
+	 * including the PWM-gated PMA writes. Also calls drvdata->wait_for_cdr
+	 * which times out for PWM (no CDR lock); samsung_ufs_phy_calibrate
+	 * returns -ETIMEDOUT but exynos_ufs_post_pwr_mode discards the rc.
+	 */
+	phy_calibrate(generic_phy);
+
+	gs201_dump_cmu_hsi2(hba->dev, "post_pwr_PWM");
+	gs201_dump_pa_state(hba, "post_pwr_PWM");
+
+	return 0;
+}
+#endif
+
+static int exynos_ufs_set_dma_mask(struct ufs_hba *hba)
+{
+	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+	u8 bits;
+
+	if (ufs->drv_data && ufs->drv_data->dma_mask_bits) {
+		bits = ufs->drv_data->dma_mask_bits;
+		dev_info(hba->dev,
+			 "exynos UFS: forcing %u-bit DMA mask (variant override; controller cap MASK_64_ADDRESSING_SUPPORT may lie)\n",
+			 bits);
+		return dma_set_mask_and_coherent(hba->dev, DMA_BIT_MASK(bits));
+	}
+	if (hba->capabilities & MASK_64_ADDRESSING_SUPPORT) {
+		if (!dma_set_mask_and_coherent(hba->dev, DMA_BIT_MASK(64)))
+			return 0;
+	}
+	return dma_set_mask_and_coherent(hba->dev, DMA_BIT_MASK(32));
+}
+
+static const struct exynos_ufs_drv_data gs201_ufs_drvs;
+
+static void exynos_ufs_config_scsi_dev(struct scsi_device *sdev,
+				       struct queue_limits *lim)
+{
+	struct ufs_hba *hba = shost_priv(sdev->host);
+	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+
+	if (ufs->drv_data != &gs201_ufs_drvs)
+		return;
+
+#if GS201_FORCE_QDEPTH_1
+	scsi_change_queue_depth(sdev, 1);
+	dev_info(hba->dev,
+		 "h15b: clamped sdev lun=%llu queue_depth=1 (gs201 PWM workaround)\n",
+		 sdev->lun);
+#endif
+
+#if GS201_MAX_HW_SECTORS_KB
+	{
+		/*
+		 * Mutate the `lim` snapshot the SCSI core passes in — that's
+		 * the source of truth, applied to q->limits via
+		 * queue_limits_commit_update() right after this hook returns
+		 * (drivers/scsi/scsi_scan.c). Direct writes to q->limits here
+		 * are silently overwritten by that commit, which is what the
+		 * h15a v3 attempt hit. The vops signature was extended to
+		 * include `lim` specifically to make this clamp possible.
+		 */
+		unsigned int max_sectors =
+			(GS201_MAX_HW_SECTORS_KB * 1024) >> SECTOR_SHIFT;
+
+		if (lim->max_hw_sectors > max_sectors)
+			lim->max_hw_sectors = max_sectors;
+		if (lim->max_sectors    > max_sectors)
+			lim->max_sectors    = max_sectors;
+		dev_info(hba->dev,
+			 "h15a: clamped sdev lun=%llu max_hw_sectors=%u (=%uKB) (gs201 PWM workaround)\n",
+			 sdev->lun, max_sectors,
+			 (unsigned int)GS201_MAX_HW_SECTORS_KB);
+	}
+#endif
 }
 
 static const struct ufs_hba_variant_ops ufs_hba_exynos_ops = {
@@ -2306,6 +3136,8 @@ static const struct ufs_hba_variant_ops ufs_hba_exynos_ops = {
 	.suspend			= exynos_ufs_suspend,
 	.resume				= exynos_ufs_resume,
 	.fill_crypto_prdt		= exynos_ufs_fmp_fill_prdt,
+	.set_dma_mask			= exynos_ufs_set_dma_mask,
+	.config_scsi_dev		= exynos_ufs_config_scsi_dev,
 };
 
 static struct ufs_hba_variant_ops ufs_hba_exynosauto_vh_ops = {
@@ -2481,6 +3313,9 @@ static const struct exynos_ufs_drv_data gs101_ufs_drvs = {
 	.pre_link		= gs101_ufs_pre_link,
 	.post_link		= gs101_ufs_post_link,
 	.pre_pwr_change		= gs101_ufs_pre_pwr_change,
+#if GS201_AOSP_POST_PMC
+	.post_pwr_change	= gs101_ufs_post_pwr_change,
+#endif
 	.suspend		= gs101_ufs_suspend,
 };
 
@@ -2532,14 +3367,35 @@ static const struct exynos_ufs_drv_data gs201_ufs_drvs = {
 				  UFSHCI_QUIRK_BROKEN_REQ_LIST_CLR |
 				  UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR |
 				  UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
-				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
+				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING |
+				  /* (g3) Auto-hibern8 exit triggers HOST_BUS_FATAL_ERROR
+				   * (IS BIT(17), saved_err=0x20000) ~36s into operation
+				   * with the (g2) PWM workaround. Disable until either
+				   * HS-Rate-B works (and we re-test H8 there) or the H8
+				   * exit path on gs201 mainline is fully wired up. */
+				  UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8,
 	.opts			= EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
 				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT,
 	.iocc_mask		= UFS_GS101_SHARABLE,
+	/*
+	 * (h2/h3) gs201 controller advertises MASK_64_ADDRESSING_SUPPORT in
+	 * caps reg (cap=0x1303ff1f, bit 24 set), but high-memory DMA writes
+	 * trip SYSTEM_BUS_FATAL_ERROR (IS BIT(17), saved_err=0x20000) the
+	 * moment the kernel hands out a >4GB buffer. Confirmed with the (h2)
+	 * OCS_INVALID dump showing PRD addr 0x899fbd000 immediately before
+	 * the bus fault. AOSP's ufs-exynos.c hard-codes
+	 * `static u64 exynos_ufs_dma_mask = DMA_BIT_MASK(32)` for the entire
+	 * exynos UFS family, suggesting this is a long-standing controller
+	 * issue across the Tensor SoCs.
+	 */
+	.dma_mask_bits		= 32,
 	.drv_init		= gs201_ufs_drv_init,
 	.pre_link		= gs101_ufs_pre_link,
 	.post_link		= gs201_ufs_post_link,
 	.pre_pwr_change		= gs101_ufs_pre_pwr_change,
+#if GS201_AOSP_POST_PMC
+	.post_pwr_change	= gs101_ufs_post_pwr_change,
+#endif
 	.suspend		= gs101_ufs_suspend,
 };
 
