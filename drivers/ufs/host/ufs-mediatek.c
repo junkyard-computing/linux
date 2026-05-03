@@ -2295,7 +2295,8 @@ static int ufs_mtk_config_esi(struct ufs_hba *hba)
 	return ufs_mtk_config_mcq(hba, true);
 }
 
-static void ufs_mtk_config_scsi_dev(struct scsi_device *sdev)
+static void ufs_mtk_config_scsi_dev(struct scsi_device *sdev,
+				    struct queue_limits *lim)
 {
 	struct ufs_hba *hba = shost_priv(sdev->host);
 
