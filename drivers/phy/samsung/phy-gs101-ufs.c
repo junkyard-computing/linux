@@ -114,10 +114,25 @@ static const struct samsung_ufs_phy_cfg tensor_gs101_pre_pwr_hs_config[] = {
 	END_UFS_PHY_CFG,
 };
 
-/* Calibration for HS mode series A/B */
+/*
+ * Calibration for HS mode series A/B post-PMC.
+ *
+ * Match AOSP cal-if post_calib_of_hs_rate_{a,b}: only the 0x918=0x01
+ * write (= reg 0x246 = 0x01) plus the CDR-lock-done poll. The 0x8=0x60
+ * and 0x222=0x08 writes that used to be here (tagged PWR_MODE_PWM_ANY,
+ * but firing on HS too because samsung_ufs_phy_config doesn't honor
+ * cfg->desc) are AOSP's H8-entry writes, not post-PMC writes — see
+ * tensor_gs101_post_h8_enter below. Putting them here was running them
+ * ~milliseconds before CDR-lock polling, configuring the analog block
+ * for hibernation state right when CDR was supposed to be acquiring
+ * lock. That kept R339(LN0_MON_RX_CDR_FLD_CK_MODE_DONE) at 0x00 across
+ * the 8ms poll window and produced dl_err 0x80000002 ~1.9s after PMC.
+ *
+ * Comparison data (live AOSP HS-G4-L2 vs mainline at this same stage):
+ *   AOSP: R339=0x18 R33B=0x04 R337=0xa0 (CDR locked)
+ *   ours: R339=0x00 R33B=0x00 R337=0xa1 (CDR not locked, wedge)
+ */
 static const struct samsung_ufs_phy_cfg tensor_gs101_post_pwr_hs_config[] = {
-	PHY_COMN_REG_CFG(0x8, 0x60, PWR_MODE_PWM_ANY),
-	PHY_TRSV_REG_CFG_GS101(0x222, 0x08, PWR_MODE_PWM_ANY),
 	PHY_TRSV_REG_CFG_GS101(0x246, 0x01, PWR_MODE_ANY),
 	END_UFS_PHY_CFG,
 };
