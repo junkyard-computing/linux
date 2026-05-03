@@ -28,6 +28,16 @@
 
 /* Calibration for phy initialization */
 static const struct samsung_ufs_phy_cfg tensor_gs101_pre_init_cfg[] = {
+	/*
+	 * COMN reg 0x29 = 0x22 — gs201's 38.4 MHz refclk-conditional
+	 * write (AOSP cal-if line 84, gated by USE_UFS_REFCLK == USE_38_4_MHZ
+	 * which is gs201's setting per ufs-cal.h:77). Cal-if places it in
+	 * the PCS section between MIB 0x200 = 0x40 (open) and the per-lane
+	 * PCS writes; mainline's split phy/controller architecture means
+	 * the closest semantic match is to land it in the PMA pre_init
+	 * pass (here), before the rest of the COMN setup.
+	 */
+	PHY_COMN_REG_CFG(0x29, 0x22,  PWR_MODE_ANY),
 	PHY_COMN_REG_CFG(0x43, 0x10,  PWR_MODE_ANY),
 	PHY_COMN_REG_CFG(0x3C, 0x14,  PWR_MODE_ANY),
 	PHY_COMN_REG_CFG(0x46, 0x48,  PWR_MODE_ANY),
