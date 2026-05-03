@@ -239,7 +239,7 @@ enum {
  * outcome does NOT correlate with link-layer success. PWM force back
  * on so the device at least enumerates and boots through pre-udev.
  */
-#define GS201_MAINLINE_FORCE_PWM_GEAR	4	/* HS still wedges; PWM-G4 keeps rootfs reachable */
+#define GS201_MAINLINE_FORCE_PWM_GEAR	0	/* 0 = HS verification (terminator fix); 4 = PWM-G4 fallback */
 #define GS201_AOSP_PRE_PMC		1
 /*
  * (A2b) Confirmed via UART log `2026-05-02_152349.log` that ADAPT at
@@ -816,9 +816,91 @@ static void gs201_dump_sysreg_hsi2_iocc(struct device *dev, const char *label)
 		dev_err(dev, "sysreg-HSI2 dump (%s): ioremap failed\n", label);
 		return;
 	}
-	dev_info(dev, "sysreg-HSI2 IOCC %s: @0x710 = 0x%08x\n",
-		 label, readl(base + 0x710));
+	dev_info(dev,
+		 "sysreg-HSI2 %s: @0x710(IOCC) = 0x%08x  @0x400(KDN_CTRL_MON) = 0x%08x\n",
+		 label, readl(base + 0x710), readl(base + 0x400));
 	iounmap(base);
+}
+
+/*
+ * GSA mailbox shim for KDN_SET_OP_MODE(MKE=1, DT=0) — the only delta we
+ * observed between AOSP-kernel (KDN_CTRL_MON=0x5, UFS works) and mainline
+ * (KDN_CTRL_MON=0x4, dl_err wedge). Without porting the full GSA driver,
+ * we issue the same mailbox command inline; polling instead of using the
+ * GIC SPI 363 IRQ. Wire protocol mirrors AOSP's exec_mbox_cmd_sync_locked
+ * (gsa_mbox.c:255). Mailbox base 0x17c90000 (gs201-gsa.dtsi:9). One-shot
+ * at probe before UFS link startup. Refactor out of this driver into
+ * a proper drivers/soc/samsung/exynos-gsa-mbox.c if it works.
+ */
+#define GSA_MBOX_BASE_PHYS		0x17c90000
+#define GSA_MBOX_SIZE			0x1000
+#define GSA_MBOX_INTCR0			0x0024
+#define GSA_MBOX_INTMSR0		0x0030
+#define GSA_MBOX_INTGR1			0x0040
+#define GSA_MBOX_SR(n)			(0x0080 + (n) * 4)
+#define GSA_MB_CMD_KDN_SET_OP_MODE	75
+#define GSA_MB_KDN_SW_KDF_MODE		2
+#define GSA_MB_KDN_UFS_DESCR_PRDT	0
+#define GSA_MB_CMD_RSP_BIT		(1U << 31)
+
+static int gs201_gsa_kdn_set_op_mode(struct device *dev)
+{
+	void __iomem *base;
+	u32 sr0, sr1;
+	int i;
+	int ret = -ETIMEDOUT;
+
+	base = ioremap(GSA_MBOX_BASE_PHYS, GSA_MBOX_SIZE);
+	if (!base) {
+		dev_err(dev, "kdn-shim: ioremap of GSA mailbox failed\n");
+		return -ENOMEM;
+	}
+
+	/* Clear any stale response IRQ. */
+	writel(0x1, base + GSA_MBOX_INTCR0);
+
+	/* KDN_SET_OP_MODE: cmd=75, argc=2, args[0]=mode=2, args[1]=descr=0. */
+	writel(GSA_MB_CMD_KDN_SET_OP_MODE, base + GSA_MBOX_SR(0));
+	writel(2,                          base + GSA_MBOX_SR(1));
+	writel(GSA_MB_KDN_SW_KDF_MODE,     base + GSA_MBOX_SR(2));
+	writel(GSA_MB_KDN_UFS_DESCR_PRDT,  base + GSA_MBOX_SR(3));
+
+	/* Doorbell — raises the request IRQ to GSA. */
+	writel(0x1, base + GSA_MBOX_INTGR1);
+
+	/* Poll for response (~10ms ceiling). */
+	for (i = 0; i < 1000; i++) {
+		if (readl(base + GSA_MBOX_INTMSR0) & 0x1) {
+			ret = 0;
+			break;
+		}
+		udelay(10);
+	}
+
+	if (ret) {
+		dev_err(dev, "kdn-shim: timeout waiting for GSA response (10ms)\n");
+		goto out;
+	}
+
+	sr0 = readl(base + GSA_MBOX_SR(0));
+	sr1 = readl(base + GSA_MBOX_SR(1));
+
+	dev_info(dev,
+		 "kdn-shim: GSA response SR0=0x%08x SR1=0x%08x (expect 0x%08x, err=0)\n",
+		 sr0, sr1,
+		 GSA_MB_CMD_KDN_SET_OP_MODE | GSA_MB_CMD_RSP_BIT);
+
+	if (sr0 != (GSA_MB_CMD_KDN_SET_OP_MODE | GSA_MB_CMD_RSP_BIT))
+		ret = -EIO;
+	else if (sr1 != 0)
+		ret = -EIO;
+
+	/* Clear so the IRQ can fire on the next call. */
+	writel(0x1, base + GSA_MBOX_INTCR0);
+
+out:
+	iounmap(base);
+	return ret;
 }
 
 static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
@@ -832,8 +914,29 @@ static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
 	gs201_dump_sysreg_hsi2_iocc(dev, "before-iocc-write");
 	gs201_ufs_smu_init(dev);
 	gs201_dump_ufsp(dev, "after-smc ");
+	/*
+	 * Falsification probe result (2026-05-03): with iocc_val=0 the wedge
+	 * fires ~6s earlier (abort at 2.05s vs baseline 8.07s), no
+	 * dl_err 0x80000002, but UPIU RSP still stamped 0xab. Conclusion:
+	 * sysreg+0x710 is necessary-not-sufficient. KDN_CTRL_MON @ +0x400
+	 * read as 0x4 at probe (vs AOSP's MKE=1 programmed state).
+	 */
 	ret = gs101_ufs_drv_init(ufs);   /* this calls exynos_ufs_shareability */
 	gs201_dump_sysreg_hsi2_iocc(dev, "after-iocc-write ");
+
+	/*
+	 * Direct write to KDN_CTRL_MON @ +0x400 NOP'd (verified
+	 * 2026-05-03 — GSA-owned register). Live AOSP read showed MKE=1
+	 * (KDN_CTRL_MON=0x5) vs our mainline KDN_CTRL_MON=0x4. So we issue
+	 * the actual mailbox command to the GSA processor at 0x17c90000
+	 * via gs201_gsa_kdn_set_op_mode and re-dump KDN_CTRL_MON.
+	 */
+	{
+		int kdn_ret = gs201_gsa_kdn_set_op_mode(dev);
+		dev_info(dev,
+			 "kdn-shim: gs201_gsa_kdn_set_op_mode -> %d\n", kdn_ret);
+		gs201_dump_sysreg_hsi2_iocc(dev, "after-kdn-mbox-cmd");
+	}
 
 	/*
 	 * (g4) Manual DME_HIBER_ENTER/EXIT cycles (driven by clock-gating-on-idle
