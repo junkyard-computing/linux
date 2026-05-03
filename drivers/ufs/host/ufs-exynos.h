@@ -182,6 +182,13 @@ struct exynos_ufs_drv_data {
 	unsigned int quirks;
 	unsigned int opts;
 	u32 iocc_mask;
+	/*
+	 * If non-zero, force `dev->dma_mask` to this width even when
+	 * MASK_64_ADDRESSING_SUPPORT is set in the controller capabilities.
+	 * Workaround for SoCs whose UFS controller advertises 64-bit DMA but
+	 * actually faults the AXI master on >4GB addresses (gs201 confirmed).
+	 */
+	u8 dma_mask_bits;
 	/* SoC's specific operations */
 	int (*drv_init)(struct exynos_ufs *ufs);
 	int (*pre_link)(struct exynos_ufs *ufs);
