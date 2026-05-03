@@ -3151,6 +3151,17 @@ static enum scsi_qc_status ufshcd_queuecommand(struct Scsi_Host *host,
 	if (hba->mcq_enabled)
 		hwq = ufshcd_mcq_req_to_hwq(hba, scsi_cmd_to_rq(cmd));
 
+	/*
+	 * (h6) Per-submission log to ID who's issuing the SCSI commands that
+	 * hang in PWM mode (~36s SBFES). Logs tag, lun, opcode, transfer len,
+	 * and current task — should reveal whether it's udev/scsi_id, dracut,
+	 * blkid, or something else.
+	 */
+	dev_info(hba->dev,
+		 "ufs-cmd-issue tag=%d lun=%llu op=0x%02x len=%u by %s[%d]\n",
+		 tag, cmd->device->lun, cmd->cmnd[0],
+		 scsi_bufflen(cmd), current->comm, current->pid);
+
 	ufshcd_send_command(hba, cmd, hwq);
 
 out:
@@ -5558,7 +5569,7 @@ static int ufshcd_sdev_configure(struct scsi_device *sdev,
 	sdev->silence_suspend = 1;
 
 	if (hba->vops && hba->vops->config_scsi_dev)
-		hba->vops->config_scsi_dev(sdev);
+		hba->vops->config_scsi_dev(sdev, lim);
 
 	ufshcd_crypto_register(hba, q);
 
@@ -5723,6 +5734,59 @@ static inline int ufshcd_transfer_rsp_status(struct ufs_hba *hba,
 		result |= DID_REQUEUE << 16;
 		dev_warn(hba->dev, "OCS %s from controller for tag %d\n",
 			 ocs == OCS_ABORTED ? "aborted" : "invalid", tag);
+		/*
+		 * (h2) Dump UTRD + UCD layout when OCS is reported invalid.
+		 * Mirrors the magic-stamp diagnostic that found the
+		 * UFSHCD_QUIRK_PRDT_BYTE_GRAN bug for NOP_OUT — checks if
+		 * the response UPIU landed somewhere unexpected within the
+		 * UCD (cache coherency, BYTE/DWORD encoding mismatch, etc).
+		 */
+		if (ocs == OCS_INVALID_COMMAND_STATUS && lrbp->utr_descriptor_ptr &&
+		    lrbp->ucd_req_ptr && cmd && cmd->cmnd) {
+			struct utp_transfer_req_desc *utrd = lrbp->utr_descriptor_ptr;
+			u8 *ucd = (u8 *)lrbp->ucd_req_ptr;
+			u8 *rsp = (u8 *)lrbp->ucd_rsp_ptr;
+			u8 op = cmd->cmnd[0];
+			u64 lba = 0;
+			if (cmd->cmnd[0] == READ_10 || cmd->cmnd[0] == WRITE_10)
+				lba = ((u32)cmd->cmnd[2] << 24) |
+				      ((u32)cmd->cmnd[3] << 16) |
+				      ((u32)cmd->cmnd[4] << 8)  |
+				       (u32)cmd->cmnd[5];
+			else if (cmd->cmnd[0] == READ_16 || cmd->cmnd[0] == WRITE_16)
+				lba = ((u64)cmd->cmnd[2] << 56) |
+				      ((u64)cmd->cmnd[3] << 48) |
+				      ((u64)cmd->cmnd[4] << 40) |
+				      ((u64)cmd->cmnd[5] << 32) |
+				      ((u64)cmd->cmnd[6] << 24) |
+				      ((u64)cmd->cmnd[7] << 16) |
+				      ((u64)cmd->cmnd[8] << 8)  |
+				       (u64)cmd->cmnd[9];
+			dev_warn(hba->dev,
+				"  ocs-instr tag=%d lun=%u op=0x%02x lba=0x%llx\n",
+				tag, lrbp->lun, op, lba);
+			dev_warn(hba->dev,
+				"  ocs-instr UTRD ocs=0x%x rsp_off=0x%x rsp_len=0x%x prd_off=0x%x prd_len=0x%x\n",
+				utrd->header.ocs,
+				le16_to_cpu(utrd->response_upiu_offset),
+				le16_to_cpu(utrd->response_upiu_length),
+				le16_to_cpu(utrd->prd_table_offset),
+				le16_to_cpu(utrd->prd_table_length));
+			dev_warn(hba->dev,
+				"  ocs-instr UCD virt=%px req_dma=0x%llx rsp_dma=0x%llx prdt_dma=0x%llx\n",
+				ucd,
+				(u64)lrbp->ucd_req_dma_addr,
+				(u64)lrbp->ucd_rsp_dma_addr,
+				(u64)lrbp->ucd_prdt_dma_addr);
+			print_hex_dump(KERN_WARNING, "  ocs-instr RSP@0x200: ",
+				DUMP_PREFIX_OFFSET, 16, 1, rsp, 16, false);
+			print_hex_dump(KERN_WARNING, "  ocs-instr UCD+0x400: ",
+				DUMP_PREFIX_OFFSET, 16, 1, ucd + 0x400, 16, false);
+			print_hex_dump(KERN_WARNING, "  ocs-instr UCD+0x600: ",
+				DUMP_PREFIX_OFFSET, 16, 1, ucd + 0x600, 16, false);
+			print_hex_dump(KERN_WARNING, "  ocs-instr UCD+0x800: ",
+				DUMP_PREFIX_OFFSET, 16, 1, ucd + 0x800, 16, false);
+		}
 		break;
 	case OCS_INVALID_CMD_TABLE_ATTR:
 	case OCS_INVALID_PRDT_ATTR:
