@@ -251,10 +251,10 @@ static int gs101_phy_wait_for_cdr_lock(struct phy *phy, u8 lane)
 	reg33a_in = readl(ufs_phy->reg_pma + PHY_PMA_TRSV_ADDR(0x33A, lane));
 	reg33b_in = readl(ufs_phy->reg_pma + PHY_PMA_TRSV_ADDR(0x33B, lane));
 
-	dev_info(ufs_phy->dev,
-		 "cdr-instr lane=%u entry: R338(CAL_DONE)=0x%08x R222(OVRD)=0x%08x R336=0x%08x R337=0x%08x R33A=0x%08x R33B=0x%08x\n",
-		 lane, cal_done_338, cdr_ovrd_222_in,
-		 reg336_in, reg337_in, reg33a_in, reg33b_in);
+	dev_dbg(ufs_phy->dev,
+		"cdr-instr lane=%u entry: R338(CAL_DONE)=0x%08x R222(OVRD)=0x%08x R336=0x%08x R337=0x%08x R33A=0x%08x R33B=0x%08x\n",
+		lane, cal_done_338, cdr_ovrd_222_in,
+		reg336_in, reg337_in, reg33a_in, reg33b_in);
 
 	for (i = 0; i < RETRY_CNT; i++) {
 		udelay(DELAY_IN_US);
@@ -284,9 +284,9 @@ static int gs101_phy_wait_for_cdr_lock(struct phy *phy, u8 lane)
 		}
 
 		if (val & LN0_MON_RX_CDR_FLD_CK_MODE_DONE) {
-			dev_info(ufs_phy->dev,
-				 "cdr lock OK lane=%u after %d iters first=0x%08x last=0x%08x\n",
-				 lane, i + 1, val_first, val);
+			dev_dbg(ufs_phy->dev,
+				"cdr lock OK lane=%u after %d iters first=0x%08x last=0x%08x\n",
+				lane, i + 1, val_first, val);
 			return 0;
 		}
 
