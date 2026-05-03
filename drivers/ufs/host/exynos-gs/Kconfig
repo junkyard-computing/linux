@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config SCSI_UFS_EXYNOS_GS
+	tristate "EXYNOS UFS Host Controller Driver for Google Tensor (GS) SoCs"
+	depends on SCSI_UFSHCD && SCSI_UFSHCD_PLATFORM
+	depends on (ARCH_EXYNOS || COMPILE_TEST)
+	help
+	  Vendor UFS host controller driver for Google Tensor (Tensor G1/gs101,
+	  Tensor G2/gs201, Tensor G3/zuma) SoCs, ported from the AOSP downstream
+	  Pixel kernel. Use this in preference to SCSI_UFS_EXYNOS for those SoCs:
+	  the AOSP driver has working support for HS-Rate-A and HS-Rate-B link
+	  startup, while mainline's drivers/ufs/host/ufs-exynos.c gs101 path
+	  wedges with dl_err 0x80000002 immediately after PMC.
+
+	  Runtime selection is by DT compatible string. The two drivers cannot
+	  bind to the same node simultaneously; ensure your DT uses
+	  "google,gs101-ufs" / "google,gs201-ufs" / "google,zuma-ufs" only when
+	  this driver is present.
+
+	  If unsure, say N.

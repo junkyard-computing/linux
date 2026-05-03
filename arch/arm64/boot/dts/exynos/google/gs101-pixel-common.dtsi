@@ -335,7 +335,16 @@
 };
 
 &ufs_0_phy {
-	status = "okay";
+	/*
+	 * Left disabled: the AOSP vendor UFS driver
+	 * (drivers/ufs/host/exynos-gs/) ioremaps the PHY MMIO directly via
+	 * the "phy" entry in ufs@14700000's reg list. With both this node
+	 * and the UFS node trying to claim 0x14704000-0x14706fff, the UFS
+	 * probe fails with -EBUSY on the PHY region. The override here
+	 * (originally re-enabling the node above gs201.dtsi's default
+	 * status = "disabled") is therefore commented out.
+	 */
+	/* status = "okay"; */
 };
 
 &usbdrd31 {

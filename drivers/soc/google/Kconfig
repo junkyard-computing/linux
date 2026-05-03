@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Google SoC drivers, ported from AOSP private/google-modules/soc/gs/.
+# Only the subset needed by the AOSP UFS vendor driver
+# (drivers/ufs/host/exynos-gs/) is enabled here; the rest of AOSP's
+# soc/gs/drivers/soc/google/ stays in the backup tree until something
+# pulls it in.
+
+config SOC_GOOGLE
+	bool "Google Tensor (gs/zuma) SoC support"
+	help
+	  Enables build of Google Tensor SoC vendor drivers ported from
+	  AOSP. Selects the per-SoC Kconfig symbols used by AOSP's gs
+	  source tree to gate per-chip behavior.
+
+config SOC_GS101
+	bool "Google GS101 (Tensor G1, Pixel 6)"
+	depends on SOC_GOOGLE
+
+config SOC_GS201
+	bool "Google GS201 (Tensor G2, Pixel 7 / Fold)"
+	depends on SOC_GOOGLE
+
+config SOC_ZUMA
+	bool "Google Zuma (Tensor G3, Pixel 8)"
+	depends on SOC_GOOGLE
+
+config EXYNOS_PMU_IF
+	tristate "Exynos PMU controller interface (AOSP)"
+	help
+	  PMU register API used by AOSP gs SoC drivers. Required by the
+	  vendor UFS driver (drivers/ufs/host/exynos-gs/).
+
+config EXYNOS_PM_QOS
+	tristate "Exynos PM QoS (AOSP)"
+	help
+	  AOSP's PM QoS framework wrapper. Required by the vendor UFS driver
+	  for L2 hibernation enable/disable PM-QoS requests around link
+	  startup.
+
+config EXYNOS_CPUPM
+	tristate "Exynos CPU Power Management (AOSP)"
+	help
+	  AOSP's CPU power management. Required by the vendor UFS driver
+	  for disable_c2_during_pmc / enable_c2_during_pmc gating around
+	  power-mode-change.

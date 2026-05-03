@@ -714,8 +714,22 @@
 		reg = <0x0 0x14700000 0x200>,   /* HCI standard  */
 		      <0x0 0x14701100 0x200>,   /* vendor HCI    */
 		      <0x0 0x14780000 0xa000>,  /* UNIPRO        */
-		      <0x0 0x14600000 0x100>;   /* UFS protector */
-		reg-names = "hci", "vs_hci", "unipro", "ufsp";
+		      <0x0 0x14600000 0x100>,   /* UFS protector */
+		      <0x0 0x14704000 0x3000>,  /* PHY (PMA)     */
+		      <0x0 0x14708000 0x804>;   /* CPORT         */
+		/*
+		 * The AOSP vendor UFS driver (drivers/ufs/host/exynos-gs/) iterates
+		 * platform_get_resource(IORESOURCE_MEM, i) for i=1..5 to ioremap
+		 * vs_hci, unipro, ufsp, phy, cport in that order. Mainline-style DT
+		 * keeps the PHY in a separate phy@ node and references it via the
+		 * `phys` phandle, but the AOSP driver doesn't use that path; it
+		 * expects the PHY MMIO directly in the UFS node's reg list.
+		 * Overlapping with the &ufs_0_phy node's reg is harmless — DT regs
+		 * are just MMIO ranges, and only one driver claims each region at
+		 * runtime (the PHY node has its own driver if anything binds; if
+		 * not, the AOSP UFS driver gets the mapping cleanly).
+		 */
+		reg-names = "hci", "vs_hci", "unipro", "ufsp", "phy", "cport";
 		interrupts = <GIC_SPI 453 IRQ_TYPE_LEVEL_HIGH>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&ufs_rst_n &ufs_refclk_out>;
@@ -745,6 +759,31 @@
 		 */
 		dma-coherent;
 		samsung,sysreg = <&sysreg_hsi2 0x710>;
+		/*
+		 * AOSP vendor UFS driver requirements (drivers/ufs/host/exynos-gs/):
+		 * - samsung,sysreg-phandle: bare phandle to HSI2 syscon (the
+		 *   driver pulls the offset from the ufs-iocc sub-node, not the
+		 *   2-cell mainline-shape "samsung,sysreg" property above).
+		 * - ufs-phy-iso sub-node: PMU register sequence the driver writes
+		 *   via exynos_pmu_update / exynos_pmu_read to release PHY isolation
+		 *   before link startup. Values from AOSP's gs201-ufs.dtsi.
+		 * - ufs-iocc sub-node: IO-coherency register sequence written into
+		 *   the HSI2 sysreg to enable cacheable AXI shareability bits.
+		 *   Mirrors the dma-coherent property above (offset 0x710 with
+		 *   mask 0x3 / val 0x3 = both RD and WR Sharable bits set, which
+		 *   matches the bootloader handoff state).
+		 */
+		samsung,sysreg-phandle = <&sysreg_hsi2>;
+		ufs-phy-iso {
+			offset = <0x3ec8>;
+			mask = <0x1>;
+			val = <0x1>;
+		};
+		ufs-iocc {
+			offset = <0x710>;
+			mask = <0x3>;
+			val = <0x3>;
+		};
 	};
 
 	/* UFS PHY ref_clk is the 24.576 MHz SoC oscillator (gs101 uses the
@@ -758,6 +797,18 @@
 		clock-names = "ref_clk";
 		samsung,pmu-syscon = <&pmu_alive>;
 		#phy-cells = <0>;
+		/*
+		 * Disabled because the AOSP vendor UFS driver
+		 * (drivers/ufs/host/exynos-gs/) ioremaps the PHY MMIO directly
+		 * via the "phy" entry in ufs@14700000's reg list. With both
+		 * nodes claiming 0x14704000-0x14706fff, the standalone PHY
+		 * driver gets EBUSY and the UFS probe fails with -EINVAL.
+		 * The label `ufs_0_phy` is kept so the `phys = <&ufs_0_phy>`
+		 * reference in the UFS node still resolves at DT level (it's
+		 * unused at runtime since the AOSP driver doesn't use the
+		 * generic phy framework lookup path).
+		 */
+		status = "disabled";
 	};
 
 	/* UFS pin-mux states (ufs_rst_n, ufs_refclk_out) live inside pinctrl_8

@@ -168,3 +168,5 @@ config SCSI_UFS_AMD_VERSAL2
 
 	  Select this if you have UFS controller on AMD Versal Gen 2 SoC.
 	  If unsure, say N.
+
+source "drivers/ufs/host/exynos-gs/Kconfig"

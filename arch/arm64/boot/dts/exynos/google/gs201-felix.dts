@@ -81,7 +81,14 @@
 };
 
 &ufs_0_phy {
-	status = "okay";
+	/*
+	 * Disabled because the AOSP vendor UFS driver (drivers/ufs/host/exynos-gs/)
+	 * ioremaps the PHY MMIO directly via the "phy" entry in ufs@14700000's
+	 * reg list. Both nodes claiming 0x14704000-0x14706fff produces -EBUSY on
+	 * the UFS probe's PHY region request and the driver crashes later in
+	 * ufs_cal_pre_link dereferencing the resulting error pointer.
+	 */
+	/* status = "okay"; */
 };
 
 /* watchdog_cl1 stays disabled: the s3c2410-wdt of_match table maps
