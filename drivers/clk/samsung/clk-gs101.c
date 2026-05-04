@@ -4442,6 +4442,129 @@ static const struct samsung_cmu_info peric0_cmu_info __initconst = {
 	.drcg_offset		= GS101_DRCG_EN_OFFSET,
 };
 
+/*
+ * gs201 CMU_PERIC0 — minimal info struct for ttySAC0 bring-up.
+ *
+ * gs201's PERIC0 register layout differs from gs101's substantively:
+ * - The PERIC0_TOP1 cluster (gs101's IPCLK_0/PCLK_0/IPCLK_2/PCLK_2 sub-
+ *   bridges feeding the USI peripherals) doesn't exist on gs201; each
+ *   peripheral gates from RSTNSYNC directly.
+ * - The "BUS" path is renamed "NOC" throughout, with corresponding
+ *   offset shifts in CMU_TOP (e.g. DIV_CLKCMU_PERIC0_BUS at 0x18d4 →
+ *   DIV_CLKCMU_PERIC0_NOC at 0x18e8 on gs201).
+ * - DIV_CLK_PERIC0_USI0_UART moved 0x1804 → 0x1808 (+4).
+ * - GAT_GOUT_…RSTNSYNC_CLK_PERIC0_USI0_UART_IPCLKPORT_CLK moved 0x20bc
+ *   → 0x20c0 (+4).
+ * - GAT_GOUT_…SYSREG_PERIC0_IPCLKPORT_PCLK moved (gs101 had several
+ *   sysreg gates; gs201 collapses to 0x20e8).
+ *
+ * Because of the topology shift, the gs101 peric0_cmu_info doesn't
+ * apply: registering any of the gs101 PERIC0_TOP1 gates at gs201's
+ * register base reads addresses that hold different (or no) registers,
+ * and at least one of those reads triggers an asynchronous SError on
+ * gs201 hardware (kernel panic in clk_divider_recalc_rate on probe).
+ *
+ * Rather than fork the entire gs101 PERIC0 table, we register only the
+ * USI0_UART clock chain (mux_user → div → gate) plus PCLK gates for
+ * sysreg/gpio so any consumer that depends on those doesn't EPROBE_DEFER
+ * forever. Other PERIC0 peripherals (USI1..14, I2C, I3C, SPI) are not
+ * exposed by this minimal driver — adding them is straightforward
+ * mechanical work but not boot-critical.
+ *
+ * Parent clocks "oscclk", "bus", "ip" come from DTS via clock-names —
+ * because gs201 cmu_top isn't supported by mainline yet, gs201.dtsi
+ * supplies them as fixed-clocks at the rates AOSP cal-if reports for
+ * felix at runtime (cmucal-vclklut.c: VCLK_DIV_CLK_PERIC0_USI0_UART
+ * = 200 MHz with divisor 1, so the user-mux output is 400 MHz).
+ */
+#define GS201_PERIC0_PLL_CON0_MUX_CLKCMU_PERIC0_USI0_UART_USER	0x0620
+#define GS201_PERIC0_PLL_CON1_MUX_CLKCMU_PERIC0_USI0_UART_USER	0x0624
+#define GS201_PERIC0_CLK_CON_DIV_DIV_CLK_PERIC0_USI0_UART	0x1808
+#define GS201_PERIC0_CLK_CON_GAT_GOUT_USI0_UART_CLK		0x20c0
+#define GS201_PERIC0_CLK_CON_GAT_GOUT_GPIO_PERIC0_PCLK		0x20b0
+#define GS201_PERIC0_CLK_CON_GAT_GOUT_SYSREG_PERIC0_PCLK	0x20e8
+
+static const unsigned long peric0_clk_regs_gs201[] __initconst = {
+	GS201_PERIC0_PLL_CON0_MUX_CLKCMU_PERIC0_USI0_UART_USER,
+	GS201_PERIC0_PLL_CON1_MUX_CLKCMU_PERIC0_USI0_UART_USER,
+	GS201_PERIC0_CLK_CON_DIV_DIV_CLK_PERIC0_USI0_UART,
+	GS201_PERIC0_CLK_CON_GAT_GOUT_USI0_UART_CLK,
+	GS201_PERIC0_CLK_CON_GAT_GOUT_GPIO_PERIC0_PCLK,
+	GS201_PERIC0_CLK_CON_GAT_GOUT_SYSREG_PERIC0_PCLK,
+};
+
+/*
+ * Parent names in PNAME (and the parent strings in MUX/DIV/GATE entries
+ * below) are *global* clock-output-names — that's how the common clk
+ * framework looks them up at register time. They must match either:
+ *   - a clock registered earlier in this same CMU's mux/div/gate tables
+ *     (e.g. "gs201_mout_peric0_usi0_uart_user" feeds the dout below), or
+ *   - a clock-output-name exposed by an external provider, looked up
+ *     via the gs201.dtsi DTS topology. The cmu_peric0 DT node lists
+ *     three input clocks via clock-names "oscclk", "bus", "ip" — those
+ *     phandles point at fixed-clocks whose clock-output-names are
+ *     "oscclk", "peric0_bus", "peric0_ip" respectively.
+ *
+ * So this PNAME uses "peric0_ip" (the 400 MHz fixed-clock that
+ * gs201.dtsi declares) as the non-oscclk parent — NOT "ip", which is
+ * only the local DT clock-name and isn't in the global namespace.
+ */
+PNAME(gs201_peric0_usi0_uart_user_p)	= { "oscclk", "peric0_ip" };
+
+static const struct samsung_mux_clock peric0_mux_clks_gs201[] __initconst = {
+	MUX(CLK_MOUT_PERIC0_USI0_UART_USER,
+	    "gs201_mout_peric0_usi0_uart_user", gs201_peric0_usi0_uart_user_p,
+	    GS201_PERIC0_PLL_CON0_MUX_CLKCMU_PERIC0_USI0_UART_USER, 4, 1),
+};
+
+static const struct samsung_div_clock peric0_div_clks_gs201[] __initconst = {
+	DIV(CLK_DOUT_PERIC0_USI0_UART,
+	    "gs201_dout_peric0_usi0_uart", "gs201_mout_peric0_usi0_uart_user",
+	    GS201_PERIC0_CLK_CON_DIV_DIV_CLK_PERIC0_USI0_UART, 0, 4),
+};
+
+static const struct samsung_gate_clock peric0_gate_clks_gs201[] __initconst = {
+	GATE(CLK_GOUT_PERIC0_CLK_PERIC0_USI0_UART_CLK,
+	     "gs201_gout_peric0_usi0_uart_clk", "gs201_dout_peric0_usi0_uart",
+	     GS201_PERIC0_CLK_CON_GAT_GOUT_USI0_UART_CLK,
+	     21, 0, 0),
+	GATE(CLK_GOUT_PERIC0_GPIO_PERIC0_PCLK,
+	     "gs201_gout_peric0_gpio_pclk", "peric0_ip",
+	     GS201_PERIC0_CLK_CON_GAT_GOUT_GPIO_PERIC0_PCLK,
+	     21, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_PERIC0_SYSREG_PERIC0_PCLK,
+	     "gs201_gout_peric0_sysreg_pclk", "peric0_ip",
+	     GS201_PERIC0_CLK_CON_GAT_GOUT_SYSREG_PERIC0_PCLK,
+	     21, CLK_IGNORE_UNUSED, 0),
+};
+
+static const struct samsung_cmu_info peric0_cmu_info_gs201 __initconst = {
+	.mux_clks		= peric0_mux_clks_gs201,
+	.nr_mux_clks		= ARRAY_SIZE(peric0_mux_clks_gs201),
+	.div_clks		= peric0_div_clks_gs201,
+	.nr_div_clks		= ARRAY_SIZE(peric0_div_clks_gs201),
+	.gate_clks		= peric0_gate_clks_gs201,
+	.nr_gate_clks		= ARRAY_SIZE(peric0_gate_clks_gs201),
+	.nr_clk_ids		= CLKS_NR_PERIC0,
+	.clk_regs		= peric0_clk_regs_gs201,
+	.nr_clk_regs		= ARRAY_SIZE(peric0_clk_regs_gs201),
+	.clk_name		= "bus",
+	/*
+	 * auto_clock_gate=false on purpose. With auto mode,
+	 * samsung_register_auto_gate(...) tells the framework to access
+	 * each gate at base+0x4000 (the DBG mirror) instead of base, and
+	 * .is_enabled then readl()'s 0x60c0 for the USI0_UART gate. gs201
+	 * doesn't have DBG mirrors for gates in the 0x6xxx range — only
+	 * mux DBGs at 0x4xxx and div DBGs at 0x5xxx (per AOSP cmucal-sfr-
+	 * gs201.c). Reading 0x60c0 raises an asynchronous SError that the
+	 * kernel ultimately panics on inside console_unlock(). Manual
+	 * gating writes to base directly (offset 0x20c0 here) which is
+	 * the actual mapped register.
+	 */
+	.auto_clock_gate	= false,
+	.option_offset		= PERIC0_CMU_PERIC0_CONTROLLER_OPTION,
+};
+
 /* ---- CMU_PERIC1 ---------------------------------------------------------- */
 
 /* Register Offset definitions for CMU_PERIC1 (0x10c00000) */
@@ -4845,7 +4968,7 @@ static const struct of_device_id gs101_cmu_of_match[] = {
 		.data = &hsi2_cmu_info,
 	}, {
 		.compatible = "google,gs201-cmu-peric0",
-		.data = &peric0_cmu_info,
+		.data = &peric0_cmu_info_gs201,
 	}, {
 		.compatible = "google,gs201-cmu-peric1",
 		.data = &peric1_cmu_info,
