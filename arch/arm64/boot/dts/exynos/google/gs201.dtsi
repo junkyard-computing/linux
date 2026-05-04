@@ -301,6 +301,41 @@
 		clock-frequency = <177664000>;
 	};
 
+	/*
+	 * cmu_peric0 input-clock stubs. The mainline clk-gs101.c CMU_TOP
+	 * driver isn't validated for gs201 yet (cmu_top is left disabled
+	 * below), so cmu_peric0 can't get its bus/ip parents from there.
+	 * Provide them as fixed-clocks at the rates AOSP cal-if reports
+	 * for felix at runtime:
+	 *
+	 *   peric0_bus_clk @ 200 MHz — VDOUT_CMU_PERIC0_NOC target rate
+	 *                              from cmucal-vclk.c.
+	 *   peric0_ip_clk  @ 400 MHz — back-derived: AOSP says
+	 *                              VCLK_DIV_CLK_PERIC0_USI0_UART
+	 *                              = 200 MHz with the cmu_peric0
+	 *                              divider at value 1 (divide by 2),
+	 *                              so the user-mux output (= IP) is
+	 *                              400 MHz.
+	 *
+	 * If samsung_tty later reports a base_baud that doesn't match
+	 * 115200 cleanly, the actual IP rate is the first thing to recheck
+	 * (read the cmu_peric0 USI0_UART divider register at offset 0x1808
+	 * over /dev/mem, divide 400 MHz by (DIV+1) and compare to AOSP).
+	 */
+	peric0_bus_clk: peric0-bus-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+		clock-output-names = "peric0_bus";
+	};
+
+	peric0_ip_clk: peric0-ip-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <400000000>;
+		clock-output-names = "peric0_ip";
+	};
+
 	/* ------------------------------------------------------------------ */
 	/* CMU clock controllers                                                */
 	/* ------------------------------------------------------------------ */
@@ -345,21 +380,15 @@
 		compatible = "google,gs201-cmu-peric0";
 		reg = <0x0 0x10800000 0x10000>;
 		#clock-cells = <1>;
-		clocks = <&oscclk>,
-			 <&cmu_top CLK_DOUT_CMU_PERIC0_BUS>,
-			 <&cmu_top CLK_DOUT_CMU_PERIC0_IP>;
+		clocks = <&oscclk>, <&peric0_bus_clk>, <&peric0_ip_clk>;
 		clock-names = "oscclk", "bus", "ip";
 		samsung,sysreg = <&sysreg_peric0>;
-		/* Disabled — depends on cmu_top, see its comment for why. */
-		status = "disabled";
 	};
 
 	sysreg_peric0: syscon@10820000 {
 		compatible = "google,gs201-peric0-sysreg", "syscon";
 		reg = <0x0 0x10820000 0x10000>;
 		clocks = <&cmu_peric0 CLK_GOUT_PERIC0_SYSREG_PERIC0_PCLK>;
-		/* Disabled — clock supplier (cmu_peric0) is disabled. */
-		status = "disabled";
 	};
 
 	/* ------------------------------------------------------------------ */
@@ -733,12 +762,32 @@
 	/* ------------------------------------------------------------------ */
 
 	serial_0: serial@10a00000 {
-		compatible = "samsung,exynos850-uart";
+		/*
+		 * google,gs101-uart (NOT samsung,exynos850-uart) so the
+		 * driver picks up gs101_serial_drv_data with iotype =
+		 * UPIO_MEM32. gs201's UART register block requires
+		 * 32-bit-aligned access — a byte write to UTXH (which
+		 * is what samsung_tty's wr_reg() does under UPIO_MEM)
+		 * raises an asynchronous SError that the kernel ultimately
+		 * panics on inside console_unlock(). Earlycon already
+		 * uses 32-bit access (cmdline: earlycon=exynos4210,
+		 * mmio32,...), so it works regardless. Empirically
+		 * verified on felix 2026-05-03.
+		 */
+		compatible = "google,gs101-uart";
 		reg = <0x0 0x10a00000 0x100>;
 		samsung,fifo-size = <256>;
 		interrupts = <GIC_SPI 673 IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&cmu_peric0 CLK_GOUT_PERIC0_PERIC0_TOP1_PCLK_0>,
-			 <&cmu_peric0 CLK_GOUT_PERIC0_PERIC0_TOP1_IPCLK_0>;
+		/*
+		 * gs201 has no PERIC0_TOP1 cluster (gs101's TOP1 IPCLK_0 /
+		 * PCLK_0 gates don't exist on gs201 hardware). Wire directly
+		 * to the per-peripheral USI0_UART gate (CLK_GOUT_PERIC0_CLK_
+		 * PERIC0_USI0_UART_CLK) and the cmu_peric0 USI0_UART divider
+		 * (CLK_DOUT_PERIC0_USI0_UART) — both register at gs201's
+		 * shifted offsets in peric0_cmu_info_gs201 (clk-gs101.c).
+		 */
+		clocks = <&cmu_peric0 CLK_GOUT_PERIC0_CLK_PERIC0_USI0_UART_CLK>,
+			 <&cmu_peric0 CLK_DOUT_PERIC0_USI0_UART>;
 		clock-names = "uart", "clk_uart_baud0";
 		pinctrl-0 = <&uart0_bus>;
 		pinctrl-names = "default";
