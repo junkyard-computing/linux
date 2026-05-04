@@ -302,6 +302,67 @@
 	};
 
 	/* ------------------------------------------------------------------ */
+	/* CMU clock controllers                                                */
+	/* ------------------------------------------------------------------ */
+
+	/*
+	 * Top-level CMU. clk-gs101.c declares `google,gs201-cmu-top` and uses
+	 * the gs201-specific `top_cmu_info_gs201` rate table (gs201's PLL/MUX
+	 * register offsets aren't byte-identical to gs101's — see gs201.dtsi
+	 * top-of-file note). Probed via late_initcall so the EL1 reads happen
+	 * after pKVM unlocks BL31's CMU firewall (project_pkvm_cmu_unlock.md).
+	 */
+	cmu_top: clock-controller@1e080000 {
+		compatible = "google,gs201-cmu-top";
+		reg = <0x0 0x1e080000 0x10000>;
+		#clock-cells = <1>;
+		clocks = <&oscclk>;
+		clock-names = "oscclk";
+		/*
+		 * Disabled. Mainline clk-gs101.c advertises a
+		 * `google,gs201-cmu-top` compat but reuses the gs101 register
+		 * map. Empirically (2026-05-03 boot test) that map has at
+		 * least one divider register at an offset gs201 doesn't
+		 * implement: probe panics with `Asynchronous SError Interrupt`
+		 * inside `clk_divider_recalc_rate` shortly after a benign
+		 * "Unable to get CMU sysreg" warning. Re-enabling requires
+		 * either a gs201-specific divider/mux table in clk-gs101.c
+		 * (cross-referenced against AOSP cal-if cmucal-sfr.c offsets)
+		 * or a brand new clk-gs201.c sibling driver.
+		 */
+		status = "disabled";
+	};
+
+	/*
+	 * PERIC0 CMU — supplies clocks to USI0 UART (ttySAC0), I2C/SPI/I3C
+	 * masters in the PERIC0 domain, GPIO/sysreg PCLKs, etc. Driver shares
+	 * `peric0_cmu_info` with the gs101 variant; if a future investigation
+	 * shows gs201's PERIC0 register layout differs from gs101's, this
+	 * node will need to fall back to a fixed-clock stub for clk_uart_baud0
+	 * until a gs201-specific rate table is written.
+	 */
+	cmu_peric0: clock-controller@10800000 {
+		compatible = "google,gs201-cmu-peric0";
+		reg = <0x0 0x10800000 0x10000>;
+		#clock-cells = <1>;
+		clocks = <&oscclk>,
+			 <&cmu_top CLK_DOUT_CMU_PERIC0_BUS>,
+			 <&cmu_top CLK_DOUT_CMU_PERIC0_IP>;
+		clock-names = "oscclk", "bus", "ip";
+		samsung,sysreg = <&sysreg_peric0>;
+		/* Disabled — depends on cmu_top, see its comment for why. */
+		status = "disabled";
+	};
+
+	sysreg_peric0: syscon@10820000 {
+		compatible = "google,gs201-peric0-sysreg", "syscon";
+		reg = <0x0 0x10820000 0x10000>;
+		clocks = <&cmu_peric0 CLK_GOUT_PERIC0_SYSREG_PERIC0_PCLK>;
+		/* Disabled — clock supplier (cmu_peric0) is disabled. */
+		status = "disabled";
+	};
+
+	/* ------------------------------------------------------------------ */
 	/* Interrupt controller                                                 */
 	/* ------------------------------------------------------------------ */
 
@@ -558,6 +619,22 @@
 			samsung,pin-function = <0>;
 			samsung,pin-pud = <0>;
 		};
+
+		/*
+		 * UART0 / USI0_UART pin function. Same pins, function, and
+		 * pud setting as gs101 (gs101-pinctrl.dtsi:524) — felix's
+		 * uart0 lives on gpp1-2/gpp1-3 with alt-function 2. The
+		 * bootloader has typically already programmed these (UART
+		 * works from earlycon without pinctrl), but declaring the
+		 * state here lets samsung_tty's probe call pinctrl_select
+		 * cleanly and survives any GPIO consumer that might toggle
+		 * the bank.
+		 */
+		uart0_bus: uart0-bus-pins {
+			samsung,pins = "gpp1-2", "gpp1-3";
+			samsung,pin-function = <2>;
+			samsung,pin-pud = <0>;
+		};
 	};
 
 	/* 5: GPIO_PERIC1 */
@@ -660,8 +737,11 @@
 		reg = <0x0 0x10a00000 0x100>;
 		samsung,fifo-size = <256>;
 		interrupts = <GIC_SPI 673 IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&oscclk>, <&oscclk>;
+		clocks = <&cmu_peric0 CLK_GOUT_PERIC0_PERIC0_TOP1_PCLK_0>,
+			 <&cmu_peric0 CLK_GOUT_PERIC0_PERIC0_TOP1_IPCLK_0>;
 		clock-names = "uart", "clk_uart_baud0";
+		pinctrl-0 = <&uart0_bus>;
+		pinctrl-names = "default";
 		status = "disabled";
 	};
 
