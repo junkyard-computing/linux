@@ -63,31 +63,37 @@
 };
 
 /*
- * Debug UART (UART0 / PERIC0 USI0). Disabled.
+ * Debug UART (UART0 / PERIC0 USI0). Enabled (4th attempt).
  *
- * Three approaches tried, all blocked:
- *   1. status="okay" + console=ttySAC0,115200 + 200 MHz fixed-clock
- *      stub: APC-early-watchdog bootloop (samsung_tty took over as
- *      console then went silent).
- *   2. status="okay" + earlycon-only cmdline + 200 MHz fixed-clock
- *      stub: UART output garbled at [1.25] when samsung_tty's
- *      probe path reprogrammed UBRDIV — the 200 MHz cal-if value
- *      doesn't match the real PERIC0 USI0 UART clock.
- *   3. status="okay" + real cmu_top/cmu_peric0 nodes wired to
- *      clk-gs101.c's `google,gs201-cmu-top`/`-cmu-peric0` compats:
- *      kernel panic at [1.68] with `Asynchronous SError Interrupt`
- *      inside clk_divider_recalc_rate. Mainline driver advertises
- *      gs201 compats but uses gs101 register offsets, and gs201
- *      has at least one divider register at a different address.
+ * Prior attempts (recorded so the failure modes are easy to spot
+ * if any of them recur):
+ *   1. samsung_tty as kernel console + fixed-clock stub →
+ *      APC-early-watchdog bootloop, kernel hung silently.
+ *   2. samsung_tty as platform driver only + 200 MHz fixed-clock
+ *      stub → UART garbled at [1.25] when samsung_tty reprogrammed
+ *      UBRDIV against a wrong rate.
+ *   3. samsung_tty + real cmu_top/cmu_peric0 reusing gs101 driver
+ *      data → kernel panic in clk_divider_recalc_rate (mainline
+ *      reuses gs101 register offsets which don't all exist on gs201).
  *
- * Path forward: write gs201-specific cal data for clk-gs101.c
- * (cross-reference against AOSP `private/google-modules/soc/gs/
- * drivers/soc/google/cal-if/gs201/cmucal-sfr.c`) — moderate kernel
- * patch, multiple-day effort. Not a boot-critical blocker; the
- * device boots and reaches multi-user.target with serial_0
- * disabled (BEACON-only diagnostics, no interactive shell over
- * UART until display or USB ethernet is brought up).
+ * What's different this time: clk-gs101.c now contains a minimal
+ * gs201-specific peric0_cmu_info struct (peric0_cmu_info_gs201)
+ * with the gs201 USI0_UART register offsets (DIV at 0x1808 instead
+ * of 0x1804, GATE at 0x20c0 instead of 0x20bc). cmu_top stays
+ * disabled — cmu_peric0's bus/ip parents come from fixed-clock
+ * stubs at the rates AOSP cal-if reports for felix.
+ *
+ * Safety net: kernel cmdline still keeps `keep_bootcon` and does
+ * NOT specify `console=ttySAC0,115200`, so kernel printk continues
+ * via earlycon even if samsung_tty's setup against the new
+ * cmu_peric0 path goes wrong. /dev/ttySAC0 surfaces only as a
+ * platform-driver-bound port (not a kernel console), and
+ * serial-getty@ttySAC0 (overlay symlink) opens it for an
+ * interactive RX-IRQ-driven shell.
  */
+&serial_0 {
+	status = "okay";
+};
 
 /*
  * Enable UFS storage.
