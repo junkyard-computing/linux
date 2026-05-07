@@ -257,6 +257,22 @@
 #define EXYNOS850_DRD_HSP_TEST			0x5c
 #define HSP_TEST_SIDDQ				BIT(24)
 
+/*
+ * gs201-only: SS combo (G2 USB+DP) PHY power-stable handshake registers.
+ * Mainline gs101 driver doesn't know these — they live in the same MMIO
+ * window but at offsets above the gs101 register set. Bit definitions
+ * sourced from AOSP private/google-modules/soc/gs/drivers/phy/samsung/
+ * phy-exynos-usb3p1-reg.h.
+ */
+#define EXYNOS850_DRD_G2PHY_CNTL0		0x8c
+#define G2PHY_CNTL0_UPCS_PWR_STABLE		BIT(12)
+#define G2PHY_CNTL0_TEST_POWERDOWN		BIT(4)
+
+#define EXYNOS850_DRD_G2PHY_CNTL1		0x90
+#define G2PHY_CNTL1_PMA_PWR_STABLE		BIT(2)
+#define G2PHY_CNTL1_PCS_PWR_STABLE		BIT(1)
+#define G2PHY_CNTL1_ANA_PWR_EN			BIT(0)
+
 #define EXYNOSAUTOV920_DRD_HSP_CLKRST		0x100
 #define HSPCLKRST_PHY20_SW_PORTRESET		BIT(3)
 #define HSPCLKRST_PHY20_SW_POR			BIT(1)
@@ -2710,6 +2726,106 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_gs101[] = {
 	},
 };
 
+/*
+ * gs201-specific phy_init: same shape as exynos5_usbdrd_gs101_pipe3_init
+ * but skips the apply_phy_tunes calls. The PIPE3 control sequence
+ * (ctrl_pma_ready, AUX-off, lane mux, SECPMACTL reset release) IS
+ * needed even when the gadget will only run at high-speed — those
+ * writes touch LINKCTRL bits (FORCE_PIPE_EN, APB_SW_RST etc.) that
+ * gate the PIPE interface between dwc3 and the PHY. Without them
+ * the controller stays in a half-configured state where HS bus reset
+ * succeeds (host sees "default" speed) but EP0 never responds to
+ * GET_DESCRIPTOR (host: "device descriptor read/64, error -71").
+ *
+ * The apply_phy_tunes calls are skipped because the gs101 tune offsets
+ * (gs101_tunes_pipe3_*) write to PMA register offsets that on gs201
+ * either land at non-existent hardware or misconfigure the SS PHY,
+ * causing PIPE3 PLL lock to time out and (we hypothesize) dwc3 to
+ * fail ep0out enable downstream. Leaving the SS PHY tune values at
+ * the bootloader-programmed defaults is the safer choice for Phase A
+ * (HS-only peripheral). When SuperSpeed is needed the gs201 tune
+ * tables would have to come from the AOSP gs PHY driver at
+ * source.aosp-backup/private/google-modules/soc/gs/drivers/phy/samsung/.
+ */
+static void exynos5_usbdrd_gs201_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
+{
+	/*
+	 * Empirical: any subset of the gs101 PIPE3 init that includes the
+	 * ctrl_pma_ready / SECPMACTL writes — AND even setting just
+	 * CLKRST_LINK_PCLK_SEL on its own — causes dwc3_gadget_start's ep0out
+	 * DEPCFG to fail (-EPROTO). The link's pipe_pclk source has no working
+	 * provider until the SS PMA is fully programmed, which we don't do on
+	 * gs201 (the gs101 PMA register layout differs).
+	 *
+	 * With this no-op, ep0out enables cleanly and the UDC reaches
+	 * "default" state. HS RX bring-up happens entirely in
+	 * exynos5_usbdrd_gs201_utmi_init below.
+	 */
+}
+
+/*
+ * gs201-specific HS PHY init.  Mainline's exynos850_usbdrd_utmi_init does the
+ * full HS bring-up that works on gs101, but gs201 silicon additionally
+ * requires the SS combo (G2) PHY's analog blocks to be powered up and signal
+ * "stable" — even when we only care about HS — because the HS RX analog path
+ * shares calibration handshakes with the SS combo PHY.  Without these
+ * G2PHY_CNTL0/CNTL1 writes the HS path completes RESET / chirp / CONNECT_DONE
+ * but never delivers SETUP packets to dwc3's EP0 OUT TRB (host side: device
+ * descriptor read times out with -EPROTO).
+ *
+ * Mirrors the ss_cap branches of phy_exynos_usb_v3p1_enable() and
+ * phy_power_en() in AOSP private/google-modules/soc/gs/drivers/phy/samsung/
+ * phy-exynos-usb3p1.c.  The writes are sticky across the POR cycle that
+ * exynos850_usbdrd_utmi_init runs internally, so doing them up front rather
+ * than weaving into the gs101 sequence works.
+ */
+static void exynos5_usbdrd_gs201_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
+{
+	void __iomem *regs_base = phy_drd->reg_phy;
+	u32 reg;
+
+	reg = readl(regs_base + EXYNOS850_DRD_G2PHY_CNTL1);
+	reg |= G2PHY_CNTL1_ANA_PWR_EN | G2PHY_CNTL1_PCS_PWR_STABLE |
+	       G2PHY_CNTL1_PMA_PWR_STABLE;
+	writel(reg, regs_base + EXYNOS850_DRD_G2PHY_CNTL1);
+
+	reg = readl(regs_base + EXYNOS850_DRD_G2PHY_CNTL0);
+	reg |= G2PHY_CNTL0_UPCS_PWR_STABLE;
+	reg &= ~G2PHY_CNTL0_TEST_POWERDOWN;
+	writel(reg, regs_base + EXYNOS850_DRD_G2PHY_CNTL0);
+
+	exynos850_usbdrd_utmi_init(phy_drd);
+
+	/*
+	 * AOSP felix gets common_block_disable=0 from DT, which makes its
+	 * phy_exynos_usb_v3p1_enable() skip HSP_EN_UTMISUSPEND entirely and
+	 * actively clear HSP_COMMONONN. Mainline's gs101 path always sets
+	 * both. With HSP_EN_UTMISUSPEND set, the UTMI interface is allowed
+	 * to suspend on bus inactivity — and on gs201 it appears to suspend
+	 * during the gap between CONNECT_DONE and the host's first SETUP,
+	 * eating the SETUP packet before it reaches dwc3's EP0 OUT TRB.
+	 *
+	 * Symptom this clears: dwc3 fires N RESET + N CONNECT_DONE events
+	 * but ep0_inspect_setup never runs (host: -EPROTO on descriptor read).
+	 */
+	reg = readl(regs_base + EXYNOS850_DRD_HSP);
+	reg &= ~(HSP_EN_UTMISUSPEND | HSP_COMMONONN);
+	writel(reg, regs_base + EXYNOS850_DRD_HSP);
+}
+
+static const struct exynos5_usbdrd_phy_config phy_cfg_gs201[] = {
+	{
+		.id		= EXYNOS5_DRDPHY_UTMI,
+		.phy_isol	= exynos5_usbdrd_phy_isol,
+		.phy_init	= exynos5_usbdrd_gs201_utmi_init,
+	},
+	{
+		.id		= EXYNOS5_DRDPHY_PIPE3,
+		.phy_isol	= exynos5_usbdrd_phy_isol,
+		.phy_init	= exynos5_usbdrd_gs201_pipe3_init,
+	},
+};
+
 static const struct exynos5_usbdrd_phy_tuning gs101_tunes_utmi_postinit[] = {
 	PHY_TUNING_ENTRY_PHY(EXYNOS850_DRD_HSPPARACON,
 			     (HSPPARACON_TXVREF | HSPPARACON_TXRES |
@@ -2851,6 +2967,51 @@ static const struct exynos5_usbdrd_phy_tuning *gs101_tunes[PTS_MAX] = {
 	[PTS_PIPE3_POSTLOCK] = gs101_tunes_pipe3_postlock,
 };
 
+/*
+ * gs201 (Pixel Fold "felix") needs different HS PHY tuning than gs101.
+ * Values sourced from AOSP private/devices/google/felix/dts/gs201-felix-usb.dtsi
+ * (the &usb_hs_tune block; AOSP applies these via a vendor extension to
+ * the AOSP exynos-usbdrd-phy driver).
+ *
+ *                        gs101 mainline      AOSP felix (gs201)
+ *   TXVREF                 6                 8        TX voltage reference
+ *   TXRES                  1                 3        TX resistance trim
+ *   TXPREEMPAMP            3                 1        TX pre-emphasis amp
+ *   SQRX                   5                 2        RX squelch threshold *** (the killer)
+ *   COMPDIS                7                 7
+ *
+ * SQRX is the receiver's squelch threshold — the analog level below which
+ * incoming differential pair activity is treated as bus-idle. Setting it
+ * to 5 (high) on gs201 silicon makes valid host transmissions look like
+ * noise and they get dropped before reaching dwc3's EP0 OUT TRB. Symptom:
+ * dwc3 fires RESET + CONNECT_DONE events, sets EP0 max-packet to 64 for
+ * HS, primes EP0 SETUP TRB — and then the host's GET_DESCRIPTOR(8) request
+ * never completes because dwc3 doesn't see the SETUP packet on the wire.
+ * Host side: "device descriptor read/64, error -71" / "Device not
+ * responding to setup address." Lowering SQRX to 2 matches felix's
+ * silicon-level RX sensitivity and lets SETUP packets through.
+ */
+static const struct exynos5_usbdrd_phy_tuning gs201_tunes_utmi_postinit[] = {
+	PHY_TUNING_ENTRY_PHY(EXYNOS850_DRD_HSPPARACON,
+			     (HSPPARACON_TXVREF | HSPPARACON_TXRES |
+			      HSPPARACON_TXPREEMPAMP | HSPPARACON_SQRX |
+			      HSPPARACON_COMPDIS),
+			     (FIELD_PREP_CONST(HSPPARACON_TXVREF, 8) |
+			      FIELD_PREP_CONST(HSPPARACON_TXRES, 3) |
+			      FIELD_PREP_CONST(HSPPARACON_TXPREEMPAMP, 1) |
+			      FIELD_PREP_CONST(HSPPARACON_SQRX, 2) |
+			      FIELD_PREP_CONST(HSPPARACON_COMPDIS, 7))),
+	PHY_TUNING_ENTRY_LAST
+};
+
+static const struct exynos5_usbdrd_phy_tuning *gs201_tunes[PTS_MAX] = {
+	[PTS_UTMI_POSTINIT] = gs201_tunes_utmi_postinit,
+	/* No PIPE3 tunes on gs201 — gs201_pipe3_init is a no-op (Phase A
+	 * peripheral runs HS-only; SS PHY tunes need gs201-specific PMA
+	 * register offsets we don't have).
+	 */
+};
+
 static const char * const gs101_clk_names[] = {
 	"phy", "ctrl_aclk", "ctrl_pclk", "scl_pclk",
 };
@@ -2875,10 +3036,35 @@ static const struct exynos5_usbdrd_phy_drvdata gs101_usbd31rd_phy = {
 	.n_regulators			= ARRAY_SIZE(gs101_regulator_names),
 };
 
+/*
+ * gs201 reuses the gs101 driver scaffolding except for phy_cfg, which has
+ * a no-op PIPE3 init (see phy_cfg_gs201 above for the rationale). All
+ * other ops, register offsets, clocks, and regulators are shared with
+ * gs101 — gs201's HSI0 register layout matches gs101 closely enough at
+ * the "phy" / "pcs" / "pma" level (with the address-shift handled in DT)
+ * for the gs101 UTMI init path to drive the HS PHY successfully.
+ */
+static const struct exynos5_usbdrd_phy_drvdata gs201_usbd31rd_phy = {
+	.phy_cfg			= phy_cfg_gs201,
+	.phy_tunes			= gs201_tunes,
+	.phy_ops			= &gs101_usbdrd_phy_ops,
+	.pmu_offset_usbdrd0_phy		= GS101_PHY_CTRL_USB20,
+	.pmu_offset_usbdrd0_phy_ss	= GS101_PHY_CTRL_USBDP,
+	.clk_names			= gs101_clk_names,
+	.n_clks				= ARRAY_SIZE(gs101_clk_names),
+	.core_clk_names			= exynos5_core_clk_names,
+	.n_core_clks			= ARRAY_SIZE(exynos5_core_clk_names),
+	.regulator_names		= gs101_regulator_names,
+	.n_regulators			= ARRAY_SIZE(gs101_regulator_names),
+};
+
 static const struct of_device_id exynos5_usbdrd_phy_of_match[] = {
 	{
 		.compatible = "google,gs101-usb31drd-phy",
 		.data = &gs101_usbd31rd_phy
+	}, {
+		.compatible = "google,gs201-usb31drd-phy",
+		.data = &gs201_usbd31rd_phy
 	}, {
 		.compatible = "samsung,exynos2200-usb32drd-phy",
 		.data = &exynos2200_usb32drd_phy,

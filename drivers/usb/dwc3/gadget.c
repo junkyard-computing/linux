@@ -4134,6 +4134,7 @@ static void dwc3_gadget_reset_interrupt(struct dwc3 *dwc)
 {
 	u32			reg;
 
+	dev_info(dwc->dev, "DWC3-DBG: reset_interrupt entry\n");
 	dwc->suspended = false;
 
 	/*
@@ -4278,6 +4279,7 @@ static void dwc3_gadget_conndone_interrupt(struct dwc3 *dwc)
 		dwc3_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(64);
 		dwc->gadget->ep0->maxpacket = 64;
 		dwc->gadget->speed = USB_SPEED_HIGH;
+		dev_info(dwc->dev, "DWC3-DBG: conndone HIGHSPEED ep0 maxpkt=64\n");
 		break;
 	case DWC3_DSTS_FULLSPEED:
 		dwc3_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(64);
@@ -4544,6 +4546,13 @@ static void dwc3_gadget_interrupt(struct dwc3 *dwc,
 static void dwc3_process_event_entry(struct dwc3 *dwc,
 		const union dwc3_event *event)
 {
+	dev_info(dwc->dev,
+		 "DWC3-DBG: event raw=0x%08x is_devspec=%u devt_type=%u depevt_ep=%u depevt_type=%u\n",
+		 event->raw,
+		 event->type.is_devspec,
+		 event->type.is_devspec ? event->devt.type : 0,
+		 event->type.is_devspec ? 0 : event->depevt.endpoint_number,
+		 event->type.is_devspec ? 0 : event->depevt.endpoint_event);
 	trace_dwc3_event(event->raw, dwc);
 
 	if (!event->type.is_devspec)
