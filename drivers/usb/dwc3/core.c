@@ -1099,6 +1099,21 @@ static void dwc3_core_setup_global_control(struct dwc3 *dwc)
 		reg |= DWC3_GCTL_U2EXIT_LFPS;
 
 	/*
+	 * When the USB2 PHY's free-running clock isn't available
+	 * (snps,dis-u2-freeclk-exists-quirk), SOF/ITP must be sourced from
+	 * the ref_clk instead of the U2 PHY clock — i.e. SOFITPSYNC=1.
+	 * Mainline only enables SOFITPSYNC for host/OTG modes via the
+	 * 210A-250A workaround above, but gs201's USB2 PHY needs it for
+	 * peripheral mode too — without it, EP0 transactions return
+	 * EPROTO on the host side ("device descriptor read/64, error -71").
+	 * AOSP's dwc3-exynos sets this conditionally on the same quirk; we
+	 * mirror that here. See AOSP soc/gs/drivers/usb/dwc3/dwc3-exynos.c
+	 * dwc3_exynos_core_init for the original logic.
+	 */
+	if (dwc->dis_u2_freeclk_exists_quirk)
+		reg |= DWC3_GCTL_SOFITPSYNC;
+
+	/*
 	 * WORKAROUND: DWC3 revisions <1.90a have a bug
 	 * where the device can fail to connect at SuperSpeed
 	 * and falls back to high-speed mode which causes
