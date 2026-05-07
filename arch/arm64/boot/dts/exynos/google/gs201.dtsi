@@ -913,25 +913,187 @@
 
 	/* ------------------------------------------------------------------ */
 	/* USB 3.1 (HSI0 subsystem) — type-C port on the Pixel Fold           */
+	/*                                                                    */
+	/* Layout mirrors gs101.dtsi (Pixel 6) at 0x1100_0000 — gs201 reuses  */
+	/* the same HSI0 register map per AOSP cal-if. Driver bindings:       */
+	/*   - cmu_hsi0:    google,gs201-cmu-hsi0  (clk-gs101.c, gs201 entry  */
+	/*                  shares hsi0_cmu_info).                            */
+	/*   - sysreg_hsi0: google,gs101-hsi0-sysreg + syscon (no gs201       */
+	/*                  variant; register layout is identical).           */
+	/*   - usbdrd31_phy: google,gs101-usb31drd-phy (phy-exynos5-usbdrd).  */
+	/*   - usbdrd31:     google,gs101-dwusb3 (dwc3-exynos.c).             */
+	/*                                                                    */
+	/* HSI0 user-mux input parents (bus / dpgtc / usb31drd / usbdpdbg):   */
+	/* gs101 sources these from cmu_top dout outputs; gs201 leaves        */
+	/* cmu_top disabled (clk_divider_recalc_rate panics on its rate       */
+	/* table — see top-of-file note), so we feed cmu_hsi0 from fixed-rate */
+	/* stubs at the AOSP-typical rates instead. Same workaround pattern   */
+	/* as cmu_peric0 above. Rates may need refinement once cmu_top boots; */
+	/* until then the user-muxes will land on whatever bootloader-       */
+	/* programmed value matches one of these stubs.                       */
+	/*                                                                    */
+	/* Status = "disabled" on every node here. felix.dts (or a future    */
+	/* board file) re-enables them when the board has the necessary      */
+	/* regulators / TCPC / role-switch wiring up.                         */
 	/* ------------------------------------------------------------------ */
 
-	usb_0: usb@11100000 {
-		compatible = "samsung,exynos850-dwusb3";
-		clocks = <&oscclk>;
-		clock-names = "bus_early";
-		#address-cells = <2>;
+	hsi0_bus_clk: hsi0-bus-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <400000000>;
+		clock-output-names = "hsi0_bus";
+	};
+
+	hsi0_dpgtc_clk: hsi0-dpgtc-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+		clock-output-names = "hsi0_dpgtc";
+	};
+
+	hsi0_usb31drd_clk: hsi0-usb31drd-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <19200000>;
+		clock-output-names = "hsi0_usb31drd";
+	};
+
+	hsi0_usbdpdbg_clk: hsi0-usbdpdbg-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24576000>;
+		clock-output-names = "hsi0_usbdpdbg";
+	};
+
+	/*
+	 * USB PHY reference-clock rate stub. The mainline PHY driver checks
+	 * `clk_get_rate("ref")` against a fixed allow-list (9.6/10/12/19.2/20/
+	 * 24/26/50 MHz, strict equality). When fed via cmu_hsi0 the rate
+	 * walks back through the user-mux/PLL chain — which on gs201 reads
+	 * back the bootloader-programmed PLL (~614.4 MHz) because cmu_top
+	 * stays disabled, and PHY probe rejects the rate with -EINVAL.
+	 *
+	 * Workaround: tell the driver "ref is 26 MHz" via a fixed-clock,
+	 * matching the AOSP/cal-if rate that the gs101 clock name suffix
+	 * `_REFCLK_26` already reflects. The actual REFCLK pin going into
+	 * the PHY is driven by the bootloader-programmed cmu_hsi0 hardware,
+	 * not this stub — the stub only feeds the kernel's rate accounting.
+	 */
+	hsi0_ref_clk: hsi0-ref-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+		clock-output-names = "hsi0_ref";
+	};
+
+	cmu_hsi0: clock-controller@11000000 {
+		compatible = "google,gs201-cmu-hsi0";
+		reg = <0x0 0x11000000 0x10000>;
+		#clock-cells = <1>;
+		clocks = <&oscclk>,
+			 <&hsi0_bus_clk>,
+			 <&hsi0_dpgtc_clk>,
+			 <&hsi0_usb31drd_clk>,
+			 <&hsi0_usbdpdbg_clk>;
+		clock-names = "oscclk", "bus", "dpgtc", "usb31drd", "usbdpdbg";
+		samsung,sysreg = <&sysreg_hsi0>;
+	};
+
+	sysreg_hsi0: syscon@11020000 {
+		compatible = "google,gs101-hsi0-sysreg", "syscon";
+		reg = <0x0 0x11020000 0x10000>;
+		clocks = <&cmu_hsi0 CLK_GOUT_HSI0_SYSREG_HSI0_PCLK>;
+	};
+
+	/*
+	 * gs201 PHY register layout differs from gs101 mainline expects:
+	 *   - "phy" (UTMI registers, LINKCTRL at +0x04, UTMI at +0x50, etc.):
+	 *     gs201 = 0x11200000 (AOSP), gs101 mainline driver expects same
+	 *     symbol at its own base — driver hits SError in
+	 *     exynos850_usbdrd_utmi_init's first readl(LINKCTRL) when the DT
+	 *     points to gs101's 0x11100000 (which is gs201's PMA region).
+	 *   - "pcs" stays at 0x110f0000 on both gs101 and gs201 (size differs:
+	 *     mainline=0x800, AOSP=0x2800; mainline driver only writes within
+	 *     0x800 so size shouldn't matter).
+	 *   - "pma" gs201 = 0x11100000 / size 0x800 (AOSP), mainline gs101
+	 *     driver expects 0x110e0000 / size 0x2800. Different address AND
+	 *     size — pipe3 (SuperSpeed) init will likely abort, but Phase A
+	 *     is HS-only (maximum-speed = "high-speed" in felix.dts) so we may
+	 *     not hit pipe3 init anyway. If it does fire we'll see in the
+	 *     trace and remap pma to 0x11100000 too.
+	 */
+	usbdrd31_phy: phy@11200000 {
+		compatible = "google,gs201-usb31drd-phy";
+		reg = <0x0 0x11200000 0x0200>,
+		      <0x0 0x110f0000 0x0800>,
+		      <0x0 0x11100000 0x2800>;
+		reg-names = "phy", "pcs", "pma";
+		clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_ACLK_PHYCTRL>,
+			 <&hsi0_ref_clk>,
+			 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_CTRL_ACLK>,
+			 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_CTRL_PCLK>,
+			 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USBDPPHY_SCL_APB_PCLK>;
+		clock-names = "phy", "ref", "ctrl_aclk", "ctrl_pclk", "scl_pclk";
+		#phy-cells = <1>;
+		samsung,pmu-syscon = <&pmu_alive>;
+		status = "disabled";
+	};
+
+	/*
+	 * gs201 shifts the DWC3 controller wrapper +0x100000 from gs101
+	 * (0x11210000 vs gs101's 0x11110000). AOSP gs201.dtsi places `udc` at
+	 * 0x11210000 with `IRQ_USB31DRD_GIC_0_HSI0 = 379`. Reading mainline-
+	 * style gs101 register names at 0x11110000 hits dead/firewalled space
+	 * → synchronous external abort 0x96000010 inside dwc3_core_probe's
+	 * first MMIO read. AOSP's PHY also uses 4 reg ranges including a
+	 * "link" region overlapping the controller wrapper at 0x11210000;
+	 * mainline phy-exynos5-usbdrd's gs101 binding only has 3, so we keep
+	 * the mainline 3-range PHY layout above for now and accept that the
+	 * PHY's "link" view is owned by the controller node here. If PHY
+	 * power-up needs the link region, the PHY driver will need either a
+	 * gs201-specific drvdata with 4 reg ranges or a shared-mapping
+	 * workaround.
+	 */
+	usbdrd31: usb@11210000 {
+		compatible = "google,gs101-dwusb3";
+		ranges = <0x0 0x0 0x11210000 0x10000>;
+		clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_BUS_CLK_EARLY>,
+			 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB31DRD_SUSPEND_CLK_26>,
+			 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_LINK_ACLK>,
+			 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_LINK_PCLK>;
+		clock-names = "bus_early", "susp_clk", "link_aclk", "link_pclk";
+		#address-cells = <1>;
 		#size-cells = <1>;
-		ranges;
 		status = "disabled";
 
-		dwc3_0: usb@11110000 {
+		usbdrd31_dwc3: usb@0 {
 			compatible = "snps,dwc3";
-			reg = <0x0 0x11110000 0x10000>;
+			reg = <0x0 0x10000>;
+			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB31DRD_REF_CLK_40>;
+			clock-names = "ref";
+			/*
+			 * IRQ 379 = AOSP gs201.h IRQ_USB31DRD_GIC_0_HSI0
+			 * (gs101 uses 463 for the same signal — gs201
+			 * remapped). Verified against
+			 * private/google-modules/soc/gs/include/dt-bindings/
+			 * interrupt-controller/gs201.h:393 in source.aosp-backup.
+			 */
 			interrupts = <GIC_SPI 379 IRQ_TYPE_LEVEL_HIGH>;
-			dr_mode = "host";
-			usb-role-switch;
-			snps,quirk-frame-length-adjustment = <0x20>;
-			snps,parkmode-disable-ss-quirk;
+			phys = <&usbdrd31_phy 0>, <&usbdrd31_phy 1>;
+			phy-names = "usb2-phy", "usb3-phy";
+			snps,has-lpm-erratum;
+			snps,dis_u2_susphy_quirk;
+			snps,dis_u3_susphy_quirk;
+			/*
+			 * gs201's USB2 PHY clock isn't free-running. The
+			 * mainline dwc3 quirk clears GUSB2PHYCFG.U2_FREECLK_EXISTS
+			 * AND (with our SOFITPSYNC patch in dwc3 core) sets
+			 * GCTL.SOFITPSYNC=1 so SOF/ITP timing is referenced off
+			 * ref_clk instead of the absent U2 freeclock. Without
+			 * this, host EP0 GET_DESCRIPTOR returns EPROTO.
+			 */
+			snps,dis-u2-freeclk-exists-quirk;
+			status = "disabled";
 		};
 	};
 
