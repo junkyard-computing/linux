@@ -9,7 +9,8 @@
  * Headless mainline Linux configuration:
  *   - Serial console via UART0 at 115200 baud (earlycon)
  *   - UFS storage via google,gs201-ufs
- *   - USB host via USB 3.1 DWC3 (USB-C port)
+ *   - USB peripheral (CDC-NCM + CDC-ACM composite gadget) over USB-C
+ *     (full DRD with role-switch waits on a MAX77759 TCPC port — Phase B)
  *   - GPU via Panthor (Mali-G710 CSF)
  *
  * Not enabled (no mainline driver or Android-only):
@@ -53,6 +54,26 @@
 		regulator-name = "mali";
 		regulator-min-microvolt = <900000>;
 		regulator-max-microvolt = <900000>;
+		regulator-always-on;
+	};
+
+	/*
+	 * Placeholder regulator for the USB PHY + DWC3 supply phandles.
+	 *
+	 * Real felix routing has these supplies coming off S2MPG12 / S2MPG13
+	 * (BUCK_S2MPG13_*, LDO_S2MPG12_*); neither chip has a mainline driver
+	 * yet, so we feed both the gs101-usb31drd-phy regulator-bulk handles
+	 * and the dwc3-exynos vdd33/vdd10 lookups from this single fixed-1V8
+	 * always-on stub. Same shape as the placeholder used by
+	 * gs101-pixel-common.dtsi (oriole / raven). Voltage value is nominal
+	 * — the rails are already powered by the bootloader and nothing in
+	 * the consumer paths attempts to reprogram them.
+	 */
+	reg_placeholder: regulator-usb-placeholder {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-placeholder";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
 		regulator-always-on;
 	};
 };
@@ -108,10 +129,72 @@
 	status = "okay";
 };
 
+/*
+ * USB 3.1 (HSI0) — Phase A: peripheral-only gadget over the USB-C port.
+ *
+ * Felix has a single USB-C connector. Full DRD requires a MAX77759 TCPC
+ * driver which mainline doesn't have (memory/reference_mainline_gs201_status.md);
+ * Phase B will port that. For now, we hard-pin dr_mode = "peripheral" so
+ * Linux comes up as a USB device — host machine sees a composite gadget
+ * (CDC-NCM + CDC-ACM) for SSH-over-USB and serial console, freeing the
+ * UART cable conflict (memory/project_felix_dongle_pd_workaround.md).
+ *
+ * No usb-role-switch, no Type-C connector node, no orientation switch —
+ * those land in Phase B alongside the TCPC.
+ *
+ * All 6 PHY supplies + the 2 dwc3-exynos supplies are wired to
+ * &reg_placeholder above; see that node for the rationale.
+ */
+&usbdrd31_phy {
+	pll-supply = <&reg_placeholder>;
+	dvdd-usb20-supply = <&reg_placeholder>;
+	vddh-usb20-supply = <&reg_placeholder>;
+	vdd33-usb20-supply = <&reg_placeholder>;
+	vdda-usbdp-supply = <&reg_placeholder>;
+	vddh-usbdp-supply = <&reg_placeholder>;
+	status = "okay";
+};
+
+&usbdrd31 {
+	vdd33-supply = <&reg_placeholder>;
+	vdd10-supply = <&reg_placeholder>;
+	status = "okay";
+};
+
+&usbdrd31_dwc3 {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	snps,quirk-frame-length-adjustment = <0x20>;
+	snps,parkmode-disable-ss-quirk;
+	status = "okay";
+};
+
 /* watchdog_cl1 stays disabled: the s3c2410-wdt of_match table maps
  * google,gs201-wdt → drv_data_gs101_cl0 only, so cl1 would inherit
  * cluster-0 PMU register offsets. */
 &watchdog_cl1 {
 	status = "disabled";
+};
+
+/*
+ * Override the ramoops carveout layout from gs201-android-handoff.dtsi.
+ * Original (AOSP) had only console-size + pmsg-size = 2 MiB + 2 MiB,
+ * which leaves zero bytes for dmesg zones. With record-size=0 the kernel
+ * creates no DMESG zones, and kmsg_dump(KMSG_DUMP_PANIC) on a kernel
+ * panic finds no place to write the panic dmesg — pstore stays empty
+ * across the reboot even though the carveout's ring buffer DOES survive
+ * the 0xcafe S/W-reboot path (verified: DBGC signature + boot console
+ * text round-trips through reset).
+ *
+ * New layout in the same 4 MiB region:
+ *   record-size  = 0x80000  (512 KiB per panic dmesg, 4 records by
+ *                            default → 2 MiB for panics)
+ *   console-size = 0x100000 (1 MiB ring buffer for live console)
+ *   pmsg-size    = 0x100000 (1 MiB for /dev/pmsg0 user beacons)
+ */
+&{/reserved-memory/ramoops_mem@fd3ff000} {
+	record-size = <0x80000>;
+	console-size = <0x100000>;
+	pmsg-size = <0x100000>;
 };
 

@@ -282,6 +282,7 @@ void dwc3_ep0_out_start(struct dwc3 *dwc)
 	struct dwc3_ep			*dep;
 	int				ret;
 	int                             i;
+	u32				phycfg, gctl, dctl, dsts;
 
 	complete(&dwc->ep0_in_setup);
 
@@ -291,6 +292,14 @@ void dwc3_ep0_out_start(struct dwc3 *dwc)
 	ret = dwc3_ep0_start_trans(dep);
 	if (ret < 0)
 		dev_err(dwc->dev, "ep0 out start transfer failed: %d\n", ret);
+
+	phycfg = dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0));
+	gctl = dwc3_readl(dwc, DWC3_GCTL);
+	dctl = dwc3_readl(dwc, DWC3_DCTL);
+	dsts = dwc3_readl(dwc, DWC3_DSTS);
+	dev_info(dwc->dev,
+		 "DWC3-DBG: ep0_out_start ret=%d GUSB2PHYCFG=0x%08x GCTL=0x%08x DCTL=0x%08x DSTS=0x%08x\n",
+		 ret, phycfg, gctl, dctl, dsts);
 
 	for (i = 2; i < DWC3_ENDPOINTS_NUM; i++) {
 		struct dwc3_ep *dwc3_ep;
@@ -829,6 +838,13 @@ static void dwc3_ep0_inspect_setup(struct dwc3 *dwc,
 	struct usb_ctrlrequest *ctrl = (void *) dwc->ep0_trb;
 	int ret = -EINVAL;
 	u32 len;
+
+	dev_info(dwc->dev,
+		 "DWC3-DBG: ep0 inspect_setup bRequestType=0x%02x bRequest=0x%02x wValue=0x%04x wIndex=0x%04x wLength=%u (gadget_driver=%p softconnect=%d connected=%d)\n",
+		 ctrl->bRequestType, ctrl->bRequest,
+		 le16_to_cpu(ctrl->wValue), le16_to_cpu(ctrl->wIndex),
+		 le16_to_cpu(ctrl->wLength),
+		 dwc->gadget_driver, dwc->softconnect, dwc->connected);
 
 	if (!dwc->gadget_driver || !dwc->softconnect || !dwc->connected)
 		goto out;
