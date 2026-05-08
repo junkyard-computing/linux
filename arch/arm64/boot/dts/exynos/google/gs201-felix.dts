@@ -252,6 +252,47 @@
 	snps,quirk-frame-length-adjustment = <0x20>;
 	snps,parkmode-disable-ss-quirk;
 	/*
+	 * Phase G.11 (felix gs201): match AOSP dwc3_exynos_core_init's
+	 * DWC31 180A-190A GFLADJ programming.
+	 *
+	 * AOSP `dwc3-exynos.c:365` for our exact silicon revision sets
+	 * REFCLK_LPM_SEL unconditionally; mainline `dwc3_ref_clk_period`
+	 * only sets it when `snps,gfladj-refclk-lpm-sel-quirk` is present.
+	 *
+	 * `snps,ref-clock-period-ns = <52>` is a hint for the kernel to
+	 * use 52 ns (= 1/19.2 MHz) when computing GUCTL.REFCLKPER and the
+	 * 240MHz_DECR+PLS1 fields. Mainline ignores the override if it
+	 * already has `dwc->ref_clk` (we have one named "ref" via the
+	 * inner dwc3 DT clocks property), but pairing it here lets us
+	 * verify via the Phase G.11 DBG print: if the kernel-reported
+	 * rate is 19200000 we're already correct; if not, the override
+	 * surfaces a mismatch we'd otherwise silently program past.
+	 */
+	snps,gfladj-refclk-lpm-sel-quirk;
+	snps,ref-clock-period-ns = <52>;
+	/*
+	 * Phase G.11 finding (2026-05-08): gs101 clk driver reports
+	 * `clk_get_rate(dwc->ref_clk)` = 614400000 (614.4 MHz, which is
+	 * 32 × 19.2 MHz — likely the upstream PLL rate, not the
+	 * divided-down dwc3 reference). Mainline `dwc3_ref_clk_period`
+	 * prefers `dwc->ref_clk` over `dwc->ref_clk_per`, so it
+	 * computes period=1ns instead of 52ns and programs GUCTL.REFCLKPER
+	 * + GFLADJ with completely wrong values. HS bus timing relies on
+	 * these being correct — chirp/handshake at link-state still
+	 * works (independent of refclk timing) but byte-level NRZI
+	 * decode does not, exactly matching our SETUP-no-show symptom.
+	 *
+	 * Drop the clocks / clock-names "ref" entries so dwc->ref_clk
+	 * stays NULL and the snps,ref-clock-period-ns override path
+	 * runs. clk_ignore_unused in our kernel cmdline keeps the
+	 * bootloader-enabled HSI0 ref clock running so the dwc3
+	 * controller and PHY still get their reference signal — we
+	 * just don't have the dwc3 driver call clk_prepare_enable on
+	 * it (which is a no-op when dwc->ref_clk is NULL anyway).
+	 */
+	/delete-property/ clocks;
+	/delete-property/ clock-names;
+	/*
 	 * dma-coherent: keep IO-coherent annotation in case the gs201
 	 * interconnect requires it for dwc3 master writes to be visible
 	 * to CPU without explicit cache flushes. Empirically harmless
