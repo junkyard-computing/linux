@@ -1533,6 +1533,94 @@ int dwc3_core_init(struct dwc3 *dwc)
 		dwc3_writel(dwc, DWC3_GUCTL3, reg);
 	}
 
+	/*
+	 * AOSP-derived workaround block for DWC_usb31 1.80a–1.90a.
+	 *
+	 * felix's Tensor G2 USB controller reports as DWC31 1.80a (confirmed
+	 * via probe-time GHWPARAMS6 dump 2026-05-07). AOSP's
+	 * `dwc3_core_config()` in
+	 * `private/google-modules/soc/gs/drivers/usb/dwc3/dwc3-exynos.c`
+	 * applies a substantial set of register writes for this revision
+	 * range that mainline does not. Without them, the controller
+	 * brings up the bus to HS chirp + CONNECT_DONE but never delivers
+	 * SETUP packets to EP0 OUT (host: -EPROTO on descriptor read).
+	 *
+	 * Each block below mirrors exactly what AOSP writes; bit definitions
+	 * are local because mainline's core.h doesn't expose them.
+	 */
+	if (DWC3_VER_IS_WITHIN(DWC31, 180A, 190A)) {
+		/* Local register / bit definitions (per AOSP core-exynos.h
+		 * and dwc3-exynos.h). */
+#define DWC3_LSKIPFREQ_REG          0xd020
+#define DWC3_BU31RHBDBG_REG         0xd800
+#define DWC3_PENDING_HP_TIMER_US(n) ((n) << 16)
+#define DWC3_EN_US_HP_TIMER         BIT(15)
+#define DWC3_LLUCTL_LTSSM_TIMER_OVRRD BIT(23)
+#define DWC3_LLUCTL_PIPE_RESET      BIT(7)
+#define DWC3_LLUCTL_TX_TS1_CNT_MASK (0x1f << 0)
+#define DWC3_PM_ENTRY_TIMER_US(n)   ((n) << 20)
+#define DWC3_PM_LC_TIMER_US(n)      ((n) << 24)
+#define DWC3_PM_ENTRY_TIMER_US_MASK (0xf << 20)
+#define DWC3_PM_LC_TIMER_US_MASK    (0x7 << 24)
+#define DWC3_EN_PM_TIMER_US         BIT(27)
+#define DWC3_GUCTL1_IP_GAP_ADD_ON(n) ((n) << 21)
+#define DWC3_GUCTL1_IP_GAP_ADD_ON_MASK (0x7 << 21)
+#define DWC3_BU31RHBDBG_TOUTCTL     BIT(3)
+#define DWC3_GUCTL_USBHSTINAUTORETRYEN BIT(14)
+
+		/* GUCTL: SS bulk-IN auto-retry workaround (unconditional in
+		 * AOSP) + REFCLKPER fix to 0x34 for 180A–190A so the ITP
+		 * interval timer is calibrated for 125us frames. */
+		reg = dwc3_readl(dwc, DWC3_GUCTL);
+		reg |= DWC3_GUCTL_USBHSTINAUTORETRYEN;
+		reg &= ~DWC3_GUCTL_REFCLKPER_MASK;
+		reg |= FIELD_PREP(DWC3_GUCTL_REFCLKPER_MASK, 0x34);
+		dwc3_writel(dwc, DWC3_GUCTL, reg);
+
+		/* LLUCTL: pipe reset + LTSSM timer override + EN_US_HP_TIMER
+		 * with pending-HP-timer = 0xb, TX_TS1_CNT cleared. */
+		reg = dwc3_readl(dwc, DWC3_LLUCTL(0));
+		reg &= ~DWC3_LLUCTL_TX_TS1_CNT_MASK;
+		reg |= DWC3_PENDING_HP_TIMER_US(0xb) | DWC3_EN_US_HP_TIMER |
+		       DWC3_LLUCTL_PIPE_RESET | DWC3_LLUCTL_LTSSM_TIMER_OVRRD;
+		dwc3_writel(dwc, DWC3_LLUCTL(0), reg);
+
+		/* LSKIPFREQ: PM-entry timer = 9, PM-LC timer = 5, enable. */
+		reg = dwc3_readl(dwc, DWC3_LSKIPFREQ_REG);
+		reg &= ~(DWC3_PM_LC_TIMER_US_MASK |
+			 DWC3_PM_ENTRY_TIMER_US_MASK);
+		reg |= DWC3_PM_ENTRY_TIMER_US(0x9) |
+		       DWC3_PM_LC_TIMER_US(0x5) | DWC3_EN_PM_TIMER_US;
+		dwc3_writel(dwc, DWC3_LSKIPFREQ_REG, reg);
+
+		/* GUSB3PIPECTL: clear DISRXDETINP3 and RX_DETOPOLL. */
+		reg = dwc3_readl(dwc, DWC3_GUSB3PIPECTL(0));
+		reg &= ~DWC3_GUSB3PIPECTL_DISRXDETINP3;
+		reg &= ~DWC3_GUSB3PIPECTL_RX_DETOPOLL;
+		dwc3_writel(dwc, DWC3_GUSB3PIPECTL(0), reg);
+
+		/* GSBUSCFG0: add INCR8 and INCR4 burst-enable bits on top
+		 * of whatever is already configured. */
+		reg = dwc3_readl(dwc, DWC3_GSBUSCFG0);
+		reg |= DWC3_GSBUSCFG0_INCR8BRSTENA |
+		       DWC3_GSBUSCFG0_INCR4BRSTENA;
+		dwc3_writel(dwc, DWC3_GSBUSCFG0, reg);
+
+		/* BU31RHBDBG: enable debug TOUTCTL. */
+		reg = dwc3_readl(dwc, DWC3_BU31RHBDBG_REG);
+		reg |= DWC3_BU31RHBDBG_TOUTCTL;
+		dwc3_writel(dwc, DWC3_BU31RHBDBG_REG, reg);
+
+		/* GUCTL1: inter-packet gap add-on = 1. */
+		reg = dwc3_readl(dwc, DWC3_GUCTL1);
+		reg &= ~DWC3_GUCTL1_IP_GAP_ADD_ON_MASK;
+		reg |= DWC3_GUCTL1_IP_GAP_ADD_ON(0x1);
+		dwc3_writel(dwc, DWC3_GUCTL1, reg);
+
+		dev_info(dwc->dev,
+			 "DWC3-DBG: applied DWC31 180A-190A AOSP workaround block\n");
+	}
+
 	return 0;
 
 err_power_off_phy:
