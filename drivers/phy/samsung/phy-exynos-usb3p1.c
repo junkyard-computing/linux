@@ -18,6 +18,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include "phy-samsung-usb-cal.h"
@@ -635,6 +636,135 @@ u8 phy_exynos_usb_v3p1_tif_sts_rd(struct exynos_usbphy_info *info, u8 addr)
 					      0x0);
 }
 
+/*
+ * Phase G.10 (felix gs201): minimal CR-port (Control Register port) re-graft.
+ *
+ * The Synopsys USB31DRD wrapper exposes a CR-port at SSP_CRCTL0/1
+ * (regs offsets 0x40/0x44 in the USBCON block). The CR-port is a
+ * handshake-protocol channel into the embedded SS PHY's analog
+ * control registers. AOSP CAL accesses it via `phy_exynos_usb_v3p1_cr_access`
+ * — that whole machinery was trimmed from this graft because it was
+ * gated on `version > 0x500 && !ss_cap` in late_enable, and felix's
+ * 0x301 fell below the gate.
+ *
+ * We bring just `cr_access` + `cal_cr_write` back so we can issue
+ * the *one* write that AOSP runs unconditionally inside that gated
+ * block: RXDET_MEAS_TIME[11:4] = 0x80 (CR addr 0x1010). The
+ * speculation: the gate is wrong for combo-PHY SoCs and the SS
+ * analog frontend's RX detect timing also affects the HS path
+ * via shared bias, leaving the dwc3 unable to receive any byte
+ * stream beyond chirp-state events. See gs-usb.md "Where the gap
+ * is now (2026-05-08)".
+ */
+enum exynos_usbcon_cr {
+	USBCON_CR_ADDR = 0,
+	USBCON_CR_READ = 18,
+	USBCON_CR_WRITE = 19,
+};
+
+static u16 phy_exynos_usb_v3p1_cr_access(struct exynos_usbphy_info *info,
+					 enum exynos_usbcon_cr cr_bit, u16 data)
+{
+	void __iomem *base = info->regs_base;
+	u32 ssp_crctl0, ssp_crctl1 = 0;
+	u32 loop, loop_cnt;
+
+	ssp_crctl0 = readl(base + EXYNOS_USBCON_SSP_CRCTL0);
+	ssp_crctl0 &= ~0xfU;
+	ssp_crctl0 &= ~(0xffffU << 16);
+	writel(ssp_crctl0, base + EXYNOS_USBCON_SSP_CRCTL0);
+
+	ssp_crctl0 &= ~SSP_CCTRL0_CR_DATA_IN_MASK;
+	ssp_crctl0 |= SSP_CCTRL0_CR_DATA_IN(data);
+	writel(ssp_crctl0, base + EXYNOS_USBCON_SSP_CRCTL0);
+
+	loop = (cr_bit == USBCON_CR_ADDR) ? 1 : 2;
+
+	for (loop_cnt = 0; loop_cnt < loop; loop_cnt++) {
+		u32 trigger_bit = 0;
+		u32 handshake_cnt = 2;
+
+		if (cr_bit == USBCON_CR_ADDR) {
+			trigger_bit = SSP_CRCTRL0_CR_CAP_ADDR;
+		} else {
+			if (loop_cnt == 0)
+				trigger_bit = SSP_CRCTRL0_CR_CAP_DATA;
+			else if (cr_bit == USBCON_CR_READ)
+				trigger_bit = SSP_CRCTRL0_CR_READ;
+			else
+				trigger_bit = SSP_CRCTRL0_CR_WRITE;
+		}
+		do {
+			u32 usec = 100;
+
+			if (handshake_cnt == 2)
+				ssp_crctl0 |= trigger_bit;
+			else
+				ssp_crctl0 &= ~trigger_bit;
+
+			writel(ssp_crctl0, base + EXYNOS_USBCON_SSP_CRCTL0);
+
+			do {
+				ssp_crctl1 = readl(base + EXYNOS_USBCON_SSP_CRCTL1);
+				if (handshake_cnt == 2 &&
+				    (ssp_crctl1 & SSP_CRCTL1_CR_ACK))
+					break;
+				else if ((handshake_cnt == 1) &&
+					 !(ssp_crctl1 & SSP_CRCTL1_CR_ACK))
+					break;
+				udelay(1);
+			} while (usec-- > 0);
+			udelay(5);
+			handshake_cnt--;
+		} while (handshake_cnt != 0);
+		usleep_range(50, 60);
+	}
+	return (u16)((ssp_crctl1 & SSP_CRCTL1_CR_DATA_OUT_MASK) >> 16);
+}
+
+static void phy_exynos_usb_v3p1_cal_cr_write(struct exynos_usbphy_info *info,
+					     u16 addr, u16 data)
+{
+	phy_exynos_usb_v3p1_cr_access(info, USBCON_CR_ADDR, addr);
+	phy_exynos_usb_v3p1_cr_access(info, USBCON_CR_WRITE, data);
+}
+
+/*
+ * Phase G.10: force the single unconditional CR-port write that AOSP
+ * runs only for `version > 0x500 && !ss_cap` in late_enable.
+ *
+ * Setting CR addr 0x1010 (RXDET_MEAS_TIME) bits [11:4] to 0x80 —
+ * AOSP uses this as a per-reference-clock RX-detect timing tweak.
+ *
+ * Returns 0 on success; non-zero if the CR-port handshake fails
+ * (would indicate the CR-port hardware isn't wired through on this
+ * SoC, in which case the test result is "CR-port doesn't apply").
+ */
+int phy_exynos_usb_v3p1_force_gs201_cr_writes(struct exynos_usbphy_info *info)
+{
+	u32 ack_check;
+
+	/* Sanity probe: read SSP_CRCTL1 to see if the register block
+	 * responds. If reads come back all-ones, the CR-port hw isn't
+	 * present. */
+	ack_check = readl(info->regs_base + EXYNOS_USBCON_SSP_CRCTL1);
+	if (ack_check == 0xFFFFFFFF) {
+		dev_info(info->dev,
+			 "DWC3-DBG: CR-port readback all-ones, hardware not present (skipping)\n");
+		return -ENODEV;
+	}
+
+	dev_info(info->dev,
+		 "DWC3-DBG: CR-port pre-write SSP_CRCTL1=0x%08x\n", ack_check);
+
+	phy_exynos_usb_v3p1_cal_cr_write(info, 0x1010, 0x80);
+
+	dev_info(info->dev,
+		 "DWC3-DBG: CR-port post-write SSP_CRCTL1=0x%08x (wrote 0x1010=0x80)\n",
+		 readl(info->regs_base + EXYNOS_USBCON_SSP_CRCTL1));
+	return 0;
+}
+
 void phy_exynos_usb_v3p1_late_enable(struct exynos_usbphy_info *info)
 {
 	/*
@@ -642,8 +772,9 @@ void phy_exynos_usb_v3p1_late_enable(struct exynos_usbphy_info *info)
 	 * (a) version > 0x500 && !ss_cap (SS+ CR-port writes) and
 	 * (b) ss_cap (SSP CR-port write).
 	 * For felix's version=0x301 (EXYNOS_USBCON_VER_03_0_1) neither
-	 * predicate is true, so this is a no-op. CR-port helpers and
-	 * SS-only tune callees were dropped from the graft.
+	 * predicate is true, so this is a no-op for the AOSP-signal path.
+	 * Phase G.10 calls phy_exynos_usb_v3p1_force_gs201_cr_writes()
+	 * separately from gs201_aosp_utmi_init in phy-exynos5-usbdrd.c.
 	 */
 }
 
