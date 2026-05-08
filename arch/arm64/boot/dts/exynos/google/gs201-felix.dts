@@ -145,6 +145,17 @@
  * All 6 PHY supplies + the 2 dwc3-exynos supplies are wired to
  * &reg_placeholder above; see that node for the rationale.
  */
+/*
+ * Phase G.9 USB SETUP-delivery investigation: enable the gs201 S2MPU stub
+ * driver against the s2mpu_hsi0 device so we can test whether the
+ * SETUP-no-show symptom is gated on a kernel-side claim of the device.
+ * Stub does not write any S2MPU registers (the bootloader-programmed
+ * permissions persist).
+ */
+&s2mpu_hsi0 {
+	status = "okay";
+};
+
 &usbdrd31_phy {
 	/*
 	 * Phase A USB graft (felix only): switch the PHY init path from
@@ -168,12 +179,70 @@
 	vdd33-usb20-supply = <&reg_placeholder>;
 	vdda-usbdp-supply = <&reg_placeholder>;
 	vddh-usbdp-supply = <&reg_placeholder>;
+	/*
+	 * Phase G.9: mirror AOSP's `s2mpus = <&s2mpu_hsi0>;` (gs201.dtsi:791
+	 * in source.aosp-backup). The phandle is informational on mainline
+	 * — we have no driver hook that consumes it — but it makes the DT
+	 * topology match AOSP and lets us verify by `dtc`-decompile that
+	 * the relationship is declared, in case any future S2MPU driver
+	 * key off it.
+	 */
+	s2mpus = <&s2mpu_hsi0>;
 	status = "okay";
 };
 
 &usbdrd31 {
 	vdd33-supply = <&reg_placeholder>;
 	vdd10-supply = <&reg_placeholder>;
+	/*
+	 * Phase G.9 USB SETUP-delivery investigation: constrain the inner
+	 * dwc3's DMA window to the lower 1 GiB of DRAM (0x80000000 -
+	 * 0xc0000000). gs201 has 12 GiB total memory split into a low bank
+	 * at 0x80000000 (1 GiB declared by our DT, expanded by the bootloader
+	 * at runtime to ~4 GiB) and a high bank at 0x880000000 (8 GiB).
+	 * Mainline dwc3 has no DMA-mask constraint, so dma_alloc_coherent
+	 * for the gadget's EP0 OUT SETUP TRB lands wherever the buddy
+	 * allocator decides — observed once at 0x8_9556a000 in the upper
+	 * bank.
+	 *
+	 * The bootloader-programmed S2MPU permission table for the HSI0
+	 * master almost certainly only whitelists the lower bank (the
+	 * region the bootloader itself uses for fastboot USB transfers).
+	 * AXI writes from the dwc3 master to upper-bank addresses get
+	 * silently dropped, leaving the EP0 TRB with HWO=1 forever and
+	 * the host stuck in the -EPROTO descriptor-read retry loop we've
+	 * been chasing since Phase A.
+	 *
+	 * `dma-ranges` here pins all child DMA into 0x80000000-0xc0000000.
+	 * of_dma_configure walks up the device tree on platform_device
+	 * registration and uses this entry to limit the inner dwc3's
+	 * dma_range_map / bus_dma_limit, so dma_alloc_coherent gets the
+	 * constraint without any driver code change.
+	 *
+	 * If this works, S2MPU is confirmed and we keep this as the
+	 * Phase A workaround. Phase B (real DRD with TCPC) may want a
+	 * proper google,s2mpu driver port to permit upper-bank access
+	 * for higher-throughput paths.
+	 *
+	 * Cell layout: child-addr (1 cell, usbdrd31's #address-cells=1)
+	 *              parent-addr (2 cells, root #address-cells=2)
+	 *              length (1 cell, usbdrd31's #size-cells=1)
+	 *
+	 * Identity mapping: child-addr == parent-addr (no offset
+	 * translation). gs201's HSI0 master has no hardware bus
+	 * address translator, so the dma-ranges entry must declare
+	 * 1:1 mapping; the offset isn't a "shift the bus address"
+	 * directive, only a "constrain allocations to this physical
+	 * range" hint via bus_dma_limit.
+	 *
+	 * First attempt (2026-05-08) used <0x0 0x0 0x80000000 0x40000000>
+	 * which IS a translating mapping (child sees 0x0 = parent 0x80000000),
+	 * and observed allocations at child-side 0x0281f000 — the dwc3
+	 * master then DMA-wrote to literal 0x0281f000 in physical
+	 * memory, which is below DRAM and presumably not mapped.
+	 * Identity-form below avoids the offset.
+	 */
+	dma-ranges = <0x80000000  0x0 0x80000000  0x40000000>;
 	status = "okay";
 };
 
@@ -183,22 +252,18 @@
 	snps,quirk-frame-length-adjustment = <0x20>;
 	snps,parkmode-disable-ss-quirk;
 	/*
-	 * Route this device's dma_alloc_coherent through the xhci_dma
-	 * carveout (declared in gs201-android-handoff.dtsi). On gs201 the
-	 * dwc3 master appears to only have S2MPU permission for this
-	 * 0x97000000 / 4 MiB window. With generic dma_alloc_coherent the
-	 * gadget's EP0 OUT SETUP TRB lands outside the permitted window
-	 * and writes are silently dropped, producing the
-	 * "DCFG.DevAddr=0 forever, host -EPROTO" symptom. The dma-coherent
-	 * property is paired in case the interconnect also requires
-	 * IO-coherent DMA mapping for the controller's writes to be
-	 * visible to CPU without explicit cache management.
+	 * dma-coherent: keep IO-coherent annotation in case the gs201
+	 * interconnect requires it for dwc3 master writes to be visible
+	 * to CPU without explicit cache flushes. Empirically harmless
+	 * with mainline's HW cache-coherency assumption.
 	 *
-	 * See kernel/asop_port_questions/gs-usb.md "DT diff against
-	 * AOSP's gs201.dtsi" for the empirical context that motivated
-	 * adding both at once.
+	 * Note: memory-region = <&xhci_dma>; was tried in 2026-05-07
+	 * but of_dma_configure didn't propagate the carveout to this
+	 * inner platform device (no "assigning to device" message in
+	 * the boot log). Replaced by the dma-ranges constraint on the
+	 * outer &usbdrd31 wrapper above, which the kernel honors via
+	 * of_dma_configure's bus_dma_limit path.
 	 */
-	memory-region = <&xhci_dma>;
 	dma-coherent;
 	status = "okay";
 };

@@ -52,4 +52,8 @@ u8 phy_exynos_usb_v3p1_tif_ov_wr(struct exynos_usbphy_info *info, u8 addr, u8 da
 u8 phy_exynos_usb_v3p1_tif_sts_rd(struct exynos_usbphy_info *info, u8 addr);
 void phy_exynos_usb_v3p1_late_enable(struct exynos_usbphy_info *info);
 
+/* Phase G.10 (felix gs201): force the unconditional CR-port write AOSP
+ * gates on version > 0x500. See phy-exynos-usb3p1.c for rationale. */
+int phy_exynos_usb_v3p1_force_gs201_cr_writes(struct exynos_usbphy_info *info);
+
 #endif /* DRIVER_USB_USBPHY_CAL_PHY_EXYNOS_USB3P1_H_ */
