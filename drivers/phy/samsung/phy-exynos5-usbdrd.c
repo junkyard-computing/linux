@@ -26,6 +26,10 @@
 #include <linux/usb/typec.h>
 #include <linux/usb/typec_mux.h>
 
+/* AOSP CAL graft (felix gs201) — see phy-exynos-usb3p1.c. */
+#include "phy-samsung-usb-cal.h"
+#include "phy-exynos-usb3p1.h"
+
 /* Exynos USB PHY registers */
 #define EXYNOS5_FSEL_9MHZ6		0x0
 #define EXYNOS5_FSEL_10MHZ		0x1
@@ -2825,6 +2829,93 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_gs201[] = {
 	},
 };
 
+/*
+ * AOSP-CAL graft: A/B harness against exynos5_usbdrd_gs201_utmi_init above.
+ *
+ * Selected by the "google,gs201-aosp-usb31drd-phy" OF compatible (see
+ * phy_cfg_gs201_aosp / gs201_aosp_usbd31rd_phy below).  Builds a stack-local
+ * struct exynos_usbphy_info populated from the AOSP felix DT property values
+ * (private/devices/google/gs201/dts/gs201.dtsi) and then drives the AOSP CAL
+ * sequence verbatim — phy_exynos_usb_v3p1_link_sw_reset → enable → pipe_ovrd.
+ *
+ * Mainline's exynos850_usbdrd_utmi_init is intentionally NOT called: the AOSP
+ * CAL enable() is the complete HS bring-up and the two would conflict (CLKRST,
+ * UTMI, HSP, SSP_PLL, POR cycle all written by both).  Regulators / clocks /
+ * isolation handling stay with the mainline driver scaffold (probe path).
+ *
+ * The version=0x301 path inside phy_exynos_usb_v3p1_enable runs the
+ * !ss_only_cap HS branch and skips the SS-only late_enable callees (both
+ * gated on bit 0x40 / `> 0x500` predicates).  See gs-usb.md for the ranked
+ * empirical-state context that motivates this graft.
+ */
+static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
+{
+	struct phy_usb_instance *inst = &phy_drd->phys[0];
+	struct exynos_usbphy_info info = {
+		.dev			= phy_drd->dev,
+		/* AOSP felix DT phy_version = 0x301 (EXYNOS_USBCON_VER_03_0_1). */
+		.version		= EXYNOS_USBCON_VER_03_0_1,
+		.refclk			= USBPHY_REFCLK_DIFF_19_2MHZ,
+		.refsel			= USBPHY_REFSEL_CLKCORE,
+		.use_io_for_ovc		= false,
+		.common_block_disable	= true,
+		.not_used_vbus_pad	= true,
+		.regs_base		= phy_drd->reg_phy,
+		.hs_tune		= NULL,
+		.ss_tune		= NULL,
+		.tune_param		= NULL,	/* AOSP felix &usb_hs_tune is status="disabled" */
+		.hw_version		= 0,
+		.regs_base_2nd		= NULL,
+		.pma_base		= phy_drd->reg_pma,
+		.pcs_base		= phy_drd->reg_pcs,
+		.ctrl_base		= NULL,
+		.link_base		= NULL,
+		.used_phy_port		= 0,
+		.alt_ref_clk		= false,
+		.hs_rewa		= 0,
+		.dual_phy		= false,
+		.sel_sof		= 0,
+		.usbdp_mode		= 0,
+		.add_val_magic		= 0,
+	};
+
+	dev_info(phy_drd->dev, "DWC3-DBG: AOSP CAL graft phy_init (regs_base=%p)\n",
+		 phy_drd->reg_phy);
+
+	/* Power on + de-isolate the same way mainline gs201 init does. */
+	inst->phy_cfg->phy_isol(inst, false);
+
+	phy_exynos_usb_v3p1_link_sw_reset(&info);
+	phy_exynos_usb_v3p1_enable(&info);
+	phy_exynos_usb_v3p1_pipe_ovrd(&info);
+
+	dev_info(phy_drd->dev, "DWC3-DBG: AOSP CAL graft phy_init done\n");
+}
+
+/*
+ * PIPE3 init for the AOSP-graft path: same no-op rationale as
+ * exynos5_usbdrd_gs201_pipe3_init above. SS PMA programming would need the
+ * combo (G2) PHY tables we don't have for gs201, so HS-only Phase A skips
+ * PIPE3 init entirely — the link's pipe_pclk source stays at the bootloader
+ * default and dwc3 ep0out enables cleanly.
+ */
+static void exynos5_usbdrd_gs201_aosp_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
+{
+}
+
+static const struct exynos5_usbdrd_phy_config phy_cfg_gs201_aosp[] = {
+	{
+		.id		= EXYNOS5_DRDPHY_UTMI,
+		.phy_isol	= exynos5_usbdrd_phy_isol,
+		.phy_init	= exynos5_usbdrd_gs201_aosp_utmi_init,
+	},
+	{
+		.id		= EXYNOS5_DRDPHY_PIPE3,
+		.phy_isol	= exynos5_usbdrd_phy_isol,
+		.phy_init	= exynos5_usbdrd_gs201_aosp_pipe3_init,
+	},
+};
+
 static const struct exynos5_usbdrd_phy_tuning gs101_tunes_utmi_postinit[] = {
 	PHY_TUNING_ENTRY_PHY(EXYNOS850_DRD_HSPPARACON,
 			     (HSPPARACON_TXVREF | HSPPARACON_TXRES |
@@ -3057,6 +3148,26 @@ static const struct exynos5_usbdrd_phy_drvdata gs201_usbd31rd_phy = {
 	.n_regulators			= ARRAY_SIZE(gs101_regulator_names),
 };
 
+/*
+ * AOSP-graft drvdata. Same scaffolding as gs201_usbd31rd_phy except phy_cfg
+ * routes phy_init through the AOSP CAL wrappers and phy_tunes is NULL (the
+ * AOSP CAL applies tunes internally via phy_exynos_usb_v3p1_tune; we pass
+ * tune_param=NULL so it early-exits — felix's &usb_hs_tune was disabled).
+ */
+static const struct exynos5_usbdrd_phy_drvdata gs201_aosp_usbd31rd_phy = {
+	.phy_cfg			= phy_cfg_gs201_aosp,
+	.phy_tunes			= NULL,
+	.phy_ops			= &gs101_usbdrd_phy_ops,
+	.pmu_offset_usbdrd0_phy		= GS101_PHY_CTRL_USB20,
+	.pmu_offset_usbdrd0_phy_ss	= GS101_PHY_CTRL_USBDP,
+	.clk_names			= gs101_clk_names,
+	.n_clks				= ARRAY_SIZE(gs101_clk_names),
+	.core_clk_names			= exynos5_core_clk_names,
+	.n_core_clks			= ARRAY_SIZE(exynos5_core_clk_names),
+	.regulator_names		= gs101_regulator_names,
+	.n_regulators			= ARRAY_SIZE(gs101_regulator_names),
+};
+
 static const struct of_device_id exynos5_usbdrd_phy_of_match[] = {
 	{
 		.compatible = "google,gs101-usb31drd-phy",
@@ -3064,6 +3175,9 @@ static const struct of_device_id exynos5_usbdrd_phy_of_match[] = {
 	}, {
 		.compatible = "google,gs201-usb31drd-phy",
 		.data = &gs201_usbd31rd_phy
+	}, {
+		.compatible = "google,gs201-aosp-usb31drd-phy",
+		.data = &gs201_aosp_usbd31rd_phy
 	}, {
 		.compatible = "samsung,exynos2200-usb32drd-phy",
 		.data = &exynos2200_usb32drd_phy,

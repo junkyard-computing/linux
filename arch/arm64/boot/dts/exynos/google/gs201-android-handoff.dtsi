@@ -147,6 +147,27 @@
 			no-map;
 		};
 
+		/*
+		 * dwc3 USB controller DMA carveout. Mirrors AOSP's
+		 * private/devices/google/gs201/dts/gs101-dma-heap.dtsi
+		 * `xhci_dma@97000000` (4 MiB shared-dma-pool, no-map).
+		 *
+		 * Investigation context (see kernel/asop_port_questions/gs-usb.md
+		 * "Graft verdict — PHY HS-init exonerated"): on gs201 the dwc3
+		 * master appears to only have S2MPU permission for this
+		 * carveout window. With mainline's generic dma_alloc_coherent
+		 * the gadget's EP0 OUT SETUP TRB lands somewhere outside the
+		 * permitted window and writes get silently dropped, producing
+		 * the "host sees device, DCFG.DevAddr stays 0, descriptor read
+		 * times out -EPROTO" symptom. Felix's dwc3 inner node opts in
+		 * via memory-region = <&xhci_dma> in gs201-felix.dts.
+		 */
+		xhci_dma: xhci_dma@97000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x97000000 0x00400000>;
+			no-map;
+		};
+
 		/* ABL (Android bootloader) runtime region. */
 		abl_reserved: abl@f8800000 {
 			reg = <0x0 0xf8800000 0x02000000>;
