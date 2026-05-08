@@ -1022,6 +1022,30 @@
 	 *     not hit pipe3 init anyway. If it does fire we'll see in the
 	 *     trace and remap pma to 0x11100000 too.
 	 */
+	/*
+	 * gs201 Stage-2 MPU instance for the HSI0 master (the dwc3
+	 * USB31DRD wrapper). AOSP DT puts s2mpus = <&s2mpu_hsi0>; on
+	 * the USB PHY node so the AOSP s2mpu driver can program
+	 * per-client allow tables when HSI0 transitions through power
+	 * states. Mainline has no S2MPU driver; we register the device
+	 * under a probe-only stub (drivers/soc/samsung/gs201-s2mpu-stub.c,
+	 * CONFIG_GS201_S2MPU_STUB=y in felix.config) so the OF node
+	 * binds without generating "deferred probe pending" spam, and we
+	 * can confirm at boot that ATF/firmware doesn't gate HSI0 master
+	 * permissions on a kernel-side claim.
+	 *
+	 * IRQ 373 = AOSP IRQ_SYSMMU_USB_S2_HSI0
+	 * (private/google-modules/soc/gs/include/dt-bindings/
+	 * interrupt-controller/gs201.h:387). Reg layout matches AOSP
+	 * gs201-s2mpu.dtsi:140.
+	 */
+	s2mpu_hsi0: s2mpu@11070000 {
+		compatible = "google,s2mpu";
+		reg = <0x0 0x11070000 0x10000>;
+		interrupts = <GIC_SPI 373 IRQ_TYPE_LEVEL_HIGH>;
+		status = "disabled";
+	};
+
 	usbdrd31_phy: phy@11200000 {
 		compatible = "google,gs201-usb31drd-phy";
 		reg = <0x0 0x11200000 0x0200>,
