@@ -2890,6 +2890,36 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 	phy_exynos_usb_v3p1_enable(&info);
 	phy_exynos_usb_v3p1_pipe_ovrd(&info);
 
+	/*
+	 * Phase G.10: force the AOSP CR-port write that's gated on
+	 * version > 0x500 in the AOSP late_enable path. Felix's
+	 * version=0x301 falls below the gate, but the CR-port hardware
+	 * is part of the dwc3 wrapper itself (regs offsets 0x40/0x44 in
+	 * USBCON, independent of which actual SS PHY is attached).
+	 *
+	 * Hypothesis: the SS PHY's RX-detect timing (CR addr 0x1010,
+	 * RXDET_MEAS_TIME) shares analog bias with the HS RX path on
+	 * combo PHYs (gs201's PHY is combo per AOSP DT
+	 * `has_combo_phy = <1>`). Without programming it, the HS RX
+	 * pipeline may receive only link-state events (chirp/RESET/
+	 * CONDONE) but fail to forward NRZI byte streams to the dwc3
+	 * MAC. Across ~50 host plug attempts on the prior boot, dwc3
+	 * fired zero endpoint events — only RESET/CONDONE/EOPF
+	 * (clock-driven). See gs-usb.md "Where the gap is now (2026-05-08)".
+	 *
+	 * If the CR-port hardware isn't wired through on gs201
+	 * (combo-PHY designs sometimes route around it), the function
+	 * returns -ENODEV after detecting an all-ones readback. That
+	 * is itself a useful negative — it tells us the CR-port path
+	 * doesn't apply and we should look elsewhere.
+	 */
+	{
+		int cr_ret = phy_exynos_usb_v3p1_force_gs201_cr_writes(&info);
+		dev_info(phy_drd->dev,
+			 "DWC3-DBG: AOSP CAL graft force_gs201_cr_writes ret=%d\n",
+			 cr_ret);
+	}
+
 	dev_info(phy_drd->dev, "DWC3-DBG: AOSP CAL graft phy_init done\n");
 }
 

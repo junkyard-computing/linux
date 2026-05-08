@@ -75,4 +75,15 @@ config SAMSUNG_PM_CHECK_CHUNKSIZE
 config EXYNOS_REGULATOR_COUPLER
 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
 	depends on ARCH_EXYNOS || COMPILE_TEST
+
+config GS201_S2MPU_STUB
+	tristate "gs201 S2MPU stub driver (probe-only)"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	help
+	  Probe-only stub for the gs201 Stage-2 MPU instances. Claims the
+	  "google,s2mpu" OF compatible and ioremaps the regs without writing
+	  to them. Exists to test whether the felix USB SETUP-delivery
+	  symptom is gated on the kernel having claimed s2mpu_hsi0.
+	  Safe to leave disabled if not actively investigating S2MPU.
+
 endif
