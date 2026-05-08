@@ -146,6 +146,22 @@
  * &reg_placeholder above; see that node for the rationale.
  */
 &usbdrd31_phy {
+	/*
+	 * Phase A USB graft (felix only): switch the PHY init path from
+	 * mainline's exynos5_usbdrd_gs201_utmi_init (a hand-translated
+	 * subset of the AOSP CAL sequence) to the full AOSP CAL — built
+	 * from kernel/source.aosp-backup/private/google-modules/soc/gs/
+	 * drivers/phy/samsung/phy-exynos-usb3p1.c, grafted into the
+	 * mainline phy-exynos5-usbdrd module by phy-exynos-usb3p1.[ch]
+	 * + phy-samsung-usb-cal.h + phy-exynos-usb3p1-reg.h. The empirical
+	 * record for why the graft is the cheapest remaining path is in
+	 * kernel/asop_port_questions/gs-usb.md (post-walk, 2026-05-07).
+	 *
+	 * Reverting to "google,gs201-usb31drd-phy" rolls back to the
+	 * mainline init path with no other changes — they're A/B sides of
+	 * the same harness.
+	 */
+	compatible = "google,gs201-aosp-usb31drd-phy";
 	pll-supply = <&reg_placeholder>;
 	dvdd-usb20-supply = <&reg_placeholder>;
 	vddh-usb20-supply = <&reg_placeholder>;
@@ -166,6 +182,24 @@
 	maximum-speed = "high-speed";
 	snps,quirk-frame-length-adjustment = <0x20>;
 	snps,parkmode-disable-ss-quirk;
+	/*
+	 * Route this device's dma_alloc_coherent through the xhci_dma
+	 * carveout (declared in gs201-android-handoff.dtsi). On gs201 the
+	 * dwc3 master appears to only have S2MPU permission for this
+	 * 0x97000000 / 4 MiB window. With generic dma_alloc_coherent the
+	 * gadget's EP0 OUT SETUP TRB lands outside the permitted window
+	 * and writes are silently dropped, producing the
+	 * "DCFG.DevAddr=0 forever, host -EPROTO" symptom. The dma-coherent
+	 * property is paired in case the interconnect also requires
+	 * IO-coherent DMA mapping for the controller's writes to be
+	 * visible to CPU without explicit cache management.
+	 *
+	 * See kernel/asop_port_questions/gs-usb.md "DT diff against
+	 * AOSP's gs201.dtsi" for the empirical context that motivated
+	 * adding both at once.
+	 */
+	memory-region = <&xhci_dma>;
+	dma-coherent;
 	status = "okay";
 };
 
