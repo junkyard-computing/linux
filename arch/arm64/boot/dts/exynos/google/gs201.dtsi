@@ -25,6 +25,7 @@
 #include <dt-bindings/clock/google,gs101.h>
 #include <dt-bindings/clock/google,gs201-acpm.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/soc/samsung,exynos-usi.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 
 / {
@@ -336,6 +337,27 @@
 		clock-output-names = "peric0_ip";
 	};
 
+	/*
+	 * PERIC1 bus/ip stubs — same rationale as peric0 above. cmu_top is
+	 * disabled (SError on gs201's divider map), so cmu_peric1 can't pull
+	 * its bus/ip parents from CLK_DOUT_CMU_PERIC1_* there; feed it the
+	 * bootloader-programmed fixed rates instead. PERIC1 hosts USI14 (the
+	 * felix MAX77759 PMIC/charger i2c bus, hsi2c@10d60000).
+	 */
+	peric1_bus_clk: peric1-bus-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+		clock-output-names = "peric1_bus";
+	};
+
+	peric1_ip_clk: peric1-ip-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <400000000>;
+		clock-output-names = "peric1_ip";
+	};
+
 	/* ------------------------------------------------------------------ */
 	/* CMU clock controllers                                                */
 	/* ------------------------------------------------------------------ */
@@ -389,6 +411,79 @@
 		compatible = "google,gs201-peric0-sysreg", "syscon";
 		reg = <0x0 0x10820000 0x10000>;
 		clocks = <&cmu_peric0 CLK_GOUT_PERIC0_SYSREG_PERIC0_PCLK>;
+	};
+
+	/*
+	 * PERIC1 CMU + sysreg — clk-gs101.c advertises `google,gs201-cmu-peric1`
+	 * and has the full PERIC1 mux/div/gate table. Same fixed-stub parent
+	 * trick as cmu_peric0 (cmu_top is disabled). Supplies USI14 (hsi2c@10d60000).
+	 */
+	cmu_peric1: clock-controller@10c00000 {
+		compatible = "google,gs201-cmu-peric1";
+		reg = <0x0 0x10c00000 0x10000>;
+		#clock-cells = <1>;
+		clocks = <&oscclk>, <&peric1_bus_clk>, <&peric1_ip_clk>;
+		clock-names = "oscclk", "bus", "ip";
+		samsung,sysreg = <&sysreg_peric1>;
+		/*
+		 * USI13 (hsi2c@10d60000) clock fix. Its "_usi_user" mux selects
+		 * { oscclk, dout_cmu_peric1_ip }; the latter comes from cmu_top,
+		 * which is disabled on gs201, so the mux sits at rate 0 and the
+		 * hsi2c driver can't bind. Unlike PERIC0/UART, clk-gs101.c has no
+		 * gs201 stub variant for the PERIC1 USIs, so re-parent the mux to
+		 * oscclk (24.576 MHz — plenty for 100/400 kHz i2c) here.
+		 */
+		assigned-clocks = <&cmu_peric1 CLK_MOUT_PERIC1_USI13_USI_USER>;
+		assigned-clock-parents = <&oscclk>;
+	};
+
+	sysreg_peric1: syscon@10c20000 {
+		compatible = "google,gs201-peric1-sysreg", "syscon";
+		reg = <0x0 0x10c20000 0x10000>;
+		clocks = <&cmu_peric1 CLK_GOUT_PERIC1_SYSREG_PERIC1_PCLK>;
+	};
+
+	/*
+	 * USI14 (PERIC1) in HS-I2C mode — the felix MAX77759 PMIC/charger/
+	 * fuel-gauge/TCPC live on this bus (pmic@66, chrg@69, fg@36, tcpc@25).
+	 * Same SoC block as gs101's usi13/hsi2c@10d60000; gs201 differs only in
+	 * the GIC line (695) and the 2-cell soc addressing. Bring it up so we can
+	 * reach the MAX77759 charger and enable its OTG VBUS boost (host-mode
+	 * dongle networking).
+	 */
+	usi14: usi@10d600c0 {
+		compatible = "google,gs101-usi", "samsung,exynos850-usi";
+		reg = <0x0 0x10d600c0 0x20>;
+		ranges;
+		#address-cells = <2>;
+		#size-cells = <1>;
+		clocks = <&cmu_peric1 CLK_GOUT_PERIC1_PERIC1_TOP0_PCLK_6>,
+			 <&cmu_peric1 CLK_GOUT_PERIC1_PERIC1_TOP0_IPCLK_6>;
+		clock-names = "pclk", "ipclk";
+		samsung,sysreg = <&sysreg_peric1 0x1014>;
+		samsung,mode = <USI_MODE_I2C>;
+		status = "okay";
+
+		hsi2c14: i2c@10d60000 {
+			compatible = "google,gs101-hsi2c",
+				     "samsung,exynosautov9-hsi2c";
+			reg = <0x0 0x10d60000 0xc0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clocks = <&cmu_peric1 CLK_GOUT_PERIC1_PERIC1_TOP0_IPCLK_6>,
+				 <&cmu_peric1 CLK_GOUT_PERIC1_PERIC1_TOP0_PCLK_6>;
+			clock-names = "hsi2c", "hsi2c_pclk";
+			interrupts = <GIC_SPI 695 IRQ_TYPE_LEVEL_HIGH>;
+			/*
+			 * No pinctrl-0: the gpp25-0/1 SDA/SCL pins are already in
+			 * i2c alt-function from the bootloader (it talks to the
+			 * MAX77759 on this bus), same as uart0 above. Declaring an
+			 * hsi2c14_bus group would need all 26 gpp banks defined in
+			 * order (samsung pinctrl matches bank subnodes positionally),
+			 * which isn't worth it when the POR state already works.
+			 */
+			status = "okay";
+		};
 	};
 
 	/* ------------------------------------------------------------------ */
@@ -632,6 +727,7 @@
 			interrupt-controller;
 			#interrupt-cells = <2>;
 		};
+
 
 		/*
 		 * Force gpp0-1 into GPIO output function so the
@@ -1053,7 +1149,7 @@
 		      <0x0 0x11100000 0x2800>;
 		reg-names = "phy", "pcs", "pma";
 		clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_ACLK_PHYCTRL>,
-			 <&hsi0_ref_clk>,
+			 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB31DRD_REF_CLK_40>,
 			 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_CTRL_ACLK>,
 			 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_CTRL_PCLK>,
 			 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USBDPPHY_SCL_APB_PCLK>;
