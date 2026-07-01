@@ -21,7 +21,7 @@
 #define CLKS_NR_TOP	(CLK_GOUT_CMU_TPU_UART + 1)
 #define CLKS_NR_APM	(CLK_APM_PLL_DIV16_APM + 1)
 #define CLKS_NR_DPU	(CLK_GOUT_DPU_SYSREG_DPU_PCLK + 1)
-#define CLKS_NR_HSI0	(CLK_GOUT_HSI0_XIU_P_HSI0_ACLK + 1)
+#define CLKS_NR_HSI0	(CLK_DOUT_HSI0_USB + 1)
 #define CLKS_NR_HSI2	(CLK_GOUT_HSI2_XIU_P_HSI2_ACLK + 1)
 #define CLKS_NR_MISC	(CLK_GOUT_MISC_XIU_D_MISC_ACLK + 1)
 #define CLKS_NR_PERIC0	(CLK_GOUT_PERIC0_SYSREG_PERIC0_PCLK + 1)
@@ -2517,13 +2517,13 @@ PNAME(mout_hsi0_bus_p)			= { "mout_hsi0_bus_user",
 					    "mout_hsi0_alt_user" };
 PNAME(mout_hsi0_usb20_ref_p)		= { "mout_pll_usb",
 					    "mout_hsi0_tcxo_user" };
-PNAME(mout_hsi0_usb31drd_p)		= { "fout_usb_pll",
+PNAME(mout_hsi0_usb31drd_p)		= { "dout_hsi0_usb",
 					    "mout_hsi0_usb31drd_user",
 					    "dout_hsi0_usb31drd",
-					    "fout_usb_pll" };
+					    "oscclk" };
 
 static const struct samsung_pll_rate_table hsi0_usb_pll_rates[] __initconst = {
-	PLL_35XX_RATE(24576000, 19200000, 150, 6, 5),
+	PLL_35XX_RATE(24576000, 614400000, 100, 4, 0),
 	{ /* sentinel */ }
 };
 
@@ -2573,6 +2573,20 @@ static const struct samsung_div_clock hsi0_div_clks[] __initconst = {
 	DIV(CLK_DOUT_HSI0_USB31DRD,
 	    "dout_hsi0_usb31drd", "mout_hsi0_usb20_user",
 	    CLK_CON_DIV_DIV_CLK_HSI0_USB31DRD, 0, 3),
+};
+
+/*
+ * PLL_USB runs at 614.4 MHz (M=100/P=4/S=0 off the 24.576 MHz OSCCLK_HSI0).
+ * The USB31DRD SuperSpeed PHY reference is that ÷32 = 19.2 MHz — AOSP's
+ * DIV_CLK_HSI0_USB, the parent selected by mout_hsi0_usb31drd index 0. The
+ * bootloader fixes this divider and we never re-rate it, so model it as a
+ * fixed factor: this always reports the 19.2 MHz the PMA is programmed for
+ * (USBPHY_REFCLK_DIFF_19_2MHZ) and avoids the wide DIVRATIO field. Feeding
+ * the PHY "ref" from here (not a fixed-clock stub) also makes the driver's
+ * clk_enable() hold the real PLL/gate on so the SS LCPLL has a live input.
+ */
+static const struct samsung_fixed_factor_clock hsi0_fixed_factor_clks[] __initconst = {
+	FFACTOR(CLK_DOUT_HSI0_USB, "dout_hsi0_usb", "fout_usb_pll", 1, 32, 0),
 };
 
 static const struct samsung_gate_clock hsi0_gate_clks[] __initconst = {
@@ -2754,6 +2768,8 @@ static const struct samsung_cmu_info hsi0_cmu_info __initconst = {
 	.nr_mux_clks		= ARRAY_SIZE(hsi0_mux_clks),
 	.div_clks		= hsi0_div_clks,
 	.nr_div_clks		= ARRAY_SIZE(hsi0_div_clks),
+	.fixed_factor_clks	= hsi0_fixed_factor_clks,
+	.nr_fixed_factor_clks	= ARRAY_SIZE(hsi0_fixed_factor_clks),
 	.gate_clks		= hsi0_gate_clks,
 	.nr_gate_clks		= ARRAY_SIZE(hsi0_gate_clks),
 	.fixed_clks		= hsi0_fixed_clks,
