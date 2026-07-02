@@ -14,6 +14,7 @@
 #include <linux/pci.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/usb/phy.h>
 #include <linux/slab.h>
@@ -201,6 +202,38 @@ int xhci_plat_probe(struct platform_device *pdev, struct device *sysdev, const s
 
 	hcd->rsrc_start = res->start;
 	hcd->rsrc_len = resource_size(res);
+
+	/*
+	 * felix/gs201: the USB DMA master sits behind an S2MPU that only permits
+	 * the reserved `xhci_dma` carveout (pointed to by memory-region on the
+	 * dwc3 node = sysdev). xhci transfer buffers otherwise use streaming DMA
+	 * into ordinary kernel memory, which the S2MPU blocks -> every
+	 * SETUP/descriptor transfer fails -EPROTO (-71) at ALL speeds (confirmed:
+	 * even a low-speed keyboard fails). Route ALL HCD DMA -- rings AND bounced
+	 * transfer buffers -- through the carveout via a local-mem gen_pool.
+	 * Best-effort: no memory-region => no S2MPU restriction, skip.
+	 */
+	if (dev_of_node(sysdev)) {
+		struct device_node *mem_np =
+			of_parse_phandle(dev_of_node(sysdev), "memory-region", 0);
+		struct reserved_mem *rmem =
+			mem_np ? of_reserved_mem_lookup(mem_np) : NULL;
+
+		of_node_put(mem_np);
+		if (rmem) {
+			ret = usb_hcd_setup_local_mem(hcd, rmem->base,
+						      rmem->base, rmem->size);
+			if (ret < 0) {
+				dev_err(sysdev,
+					"xhci local-mem carveout setup failed (%d)\n",
+					ret);
+				goto put_hcd;
+			}
+			dev_info(sysdev,
+				 "xhci: DMA routed through carveout %pa size %pa\n",
+				 &rmem->base, &rmem->size);
+		}
+	}
 
 	xhci = hcd_to_xhci(hcd);
 
