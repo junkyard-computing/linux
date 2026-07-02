@@ -29,6 +29,7 @@
 /* AOSP CAL graft (felix gs201) — see phy-exynos-usb3p1.c. */
 #include "phy-samsung-usb-cal.h"
 #include "phy-exynos-usb3p1.h"
+#include "phy-exynos-usbdp-gen2-v4.h"
 
 /* Exynos USB PHY registers */
 #define EXYNOS5_FSEL_9MHZ6		0x0
@@ -2852,6 +2853,29 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_gs201[] = {
 static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
 {
 	struct phy_usb_instance *inst = &phy_drd->phys[0];
+	/*
+	 * felix USB2 HS PHY tune. AOSP applies a tune (HSP_TUNE = 0x81673237,
+	 * TXVREF = 0x8 = strong HS TX drive) even though its &usb_hs_tune DT node
+	 * is status="disabled"; leaving tune_param = NULL made the CAL tune fn
+	 * (phy_exynos_usb_v3p1_tune) early-exit, so HSP_TUNE stayed at the reset
+	 * default 0x31233333 (TXVREF = 0x3 = weak TX) and USB2 host enumeration
+	 * failed at -71/EPROTO. These fields recompose to exactly AOSP's
+	 * 0x81673237, captured via felixprobe mmio from a working AOSP boot on the
+	 * same felix (differential same-session capture, 2026-07-01).
+	 */
+	static struct exynos_usb_tune_param felix_hs_tune_param[] = {
+		{ .name = "tx_vref",         .value = 0x8 },
+		{ .name = "tx_rise",         .value = 0x1 },
+		{ .name = "tx_res",          .value = 0x3 },
+		{ .name = "tx_pre_emp",      .value = 0x1 },
+		{ .name = "tx_pre_emp_plus", .value = 0x0 },
+		{ .name = "tx_hsxv",         .value = 0x3 },
+		{ .name = "tx_fsls",         .value = 0x3 },
+		{ .name = "rx_sqrx",         .value = 0x2 },
+		{ .name = "otg",             .value = 0x3 },
+		{ .name = "compdis",         .value = 0x7 },
+		{ .name = "",                .value = EXYNOS_USB_TUNE_LAST },
+	};
 	struct exynos_usbphy_info info = {
 		.dev			= phy_drd->dev,
 		/* AOSP felix DT phy_version = 0x301 (EXYNOS_USBCON_VER_03_0_1). */
@@ -2864,14 +2888,14 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 		.regs_base		= phy_drd->reg_phy,
 		.hs_tune		= NULL,
 		.ss_tune		= NULL,
-		.tune_param		= NULL,	/* AOSP felix &usb_hs_tune is status="disabled" */
+		.tune_param		= felix_hs_tune_param,	/* HS tune -> HSP_TUNE=0x81673237 (TXVREF=0x8); fixes -71, see array above */
 		.hw_version		= 0,
 		.regs_base_2nd		= NULL,
 		.pma_base		= phy_drd->reg_pma,
 		.pcs_base		= phy_drd->reg_pcs,
-		.ctrl_base		= NULL,
+		.ctrl_base		= phy_drd->reg_phy,
 		.link_base		= NULL,
-		.used_phy_port		= 0,
+		.used_phy_port		= 1,	/* CC2/flipped: route SS lanes for port 1. TODO: derive from live CC orientation (AOSP reads extcon TYPEC_POLARITY); hardcoded for the bench device which sits on CC2. */
 		.alt_ref_clk		= false,
 		.hs_rewa		= 0,
 		.dual_phy		= false,
@@ -2889,6 +2913,34 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 	phy_exynos_usb_v3p1_link_sw_reset(&info);
 	phy_exynos_usb_v3p1_enable(&info);
 	phy_exynos_usb_v3p1_pipe_ovrd(&info);
+
+	/*
+	 * Bring up the SuperSpeed PMA/PLL that the graft otherwise skips. On this
+	 * combo PHY the dwc3 link's pipe3 clock IS the SS PMA PLL output, and the
+	 * HS/UTMI RX path shares the SS PMA's analog bias -- so with the PMA left
+	 * unpowered and its PLL not running, USB2 HS host enumeration fails: the
+	 * device connects at HS but its SETUP/descriptor data never decodes
+	 * (-71/EPROTO), and routing the pipe3 link clock over a dead PMA gives
+	 * connect-debounce failures. AOSP runs this as part of pipe3_init.
+	 *
+	 * Before any PMA analog MMIO (reg_pma), the SS/DP PHY power domain must be
+	 * de-isolated. The phy_isol() above only lifts the HS (USB20 @0x3eb0)
+	 * isolation; the gen2 PMA lives in the separate USBDP domain (@0x3eb4).
+	 * Without this the gen2-v4 PMA register writes hit an isolated/unpowered
+	 * block and the CPU takes an asynchronous SError (boot panic).
+	 *
+	 * g2_pma_ready() then powers the PMA and holds its resets (via
+	 * COMBO_PMA_CTRL @0x48 in the phy/controller region -- always-on MMIO).
+	 * g2_v4_enable() loads the full gen2-v4 PMA config (19.2MHz tables + PCS),
+	 * releases the resets, and polls LCPLL/RX-CDR lock. link_pclk_sel then
+	 * routes the now-live pipe3 clock to the dwc3 link.
+	 */
+	if (inst->reg_pmu)
+		regmap_update_bits(inst->reg_pmu, GS101_PHY_CTRL_USBDP,
+				   EXYNOS4_PHY_ENABLE, EXYNOS4_PHY_ENABLE);
+	phy_exynos_usb_v3p1_g2_pma_ready(&info);
+	phy_exynos_usbdp_g2_v4_enable(&info);
+	phy_exynos_usb_v3p1_g2_link_pclk_sel(&info);
 
 	/*
 	 * Phase G.10: force the AOSP CR-port write that's gated on
@@ -2919,6 +2971,19 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 			 "DWC3-DBG: AOSP CAL graft force_gs201_cr_writes ret=%d\n",
 			 cr_ret);
 	}
+
+	/*
+	 * felix/gs201 fix #3 (-71 HS wall): re-assert the HS tune HERE, LAST,
+	 * on the fully settled PHY. AOSP applies its felix HS tune POST-power-on
+	 * (dwc3_otg_phy_tune) with the DT `usb_hs_tune` node DISABLED — i.e. NOT
+	 * inside enable(). Our graft tuned inside enable() (BEFORE the ~374-write
+	 * gen2 PMA bring-up + resets that follow), so even though HSP_TUNE reads
+	 * the correct 0x81673237, the HS RX analog bias may have been perturbed
+	 * by the PMA sequence after the tune latched. Re-tuning after everything
+	 * matches AOSP's timing.
+	 */
+	phy_exynos_usb_v3p1_tune(&info);
+	dev_info(phy_drd->dev, "DWC3-DBG: re-asserted HS tune post-PMA (fix#3)\n");
 
 	dev_info(phy_drd->dev, "DWC3-DBG: AOSP CAL graft phy_init done\n");
 }
