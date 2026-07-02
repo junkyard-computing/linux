@@ -451,8 +451,14 @@ static void dwc3_ref_clk_period(struct dwc3 *dwc)
 
 	/*
 	 * The documented 240MHz constant is scaled by 2 to get PLS1 as well.
+	 *
+	 * felix/gs201: the dwc3 ref clock reports 19230769 Hz (not exactly
+	 * 19.2 MHz), so a truncating divide gives 480e6/19230769 = 24.96 -> 24
+	 * (=20 MHz) and drops PLS1, mis-scaling SOF/micro-frame timing -> HS
+	 * control-transfer data decodes as -EPROTO (-71). Round to nearest so
+	 * we get 25 -> PLS1=1, matching AOSP's hardcoded GFLADJ=0x8c8000a0.
 	 */
-	decr = 480000000 / rate;
+	decr = DIV_ROUND_CLOSEST(480000000, rate);
 
 	reg = dwc3_readl(dwc, DWC3_GFLADJ);
 	FIELD_MODIFY(DWC3_GFLADJ_REFCLK_FLADJ_MASK, &reg, fladj);
@@ -876,7 +882,18 @@ static int dwc3_phy_init(struct dwc3 *dwc)
 	 * GUSB2PHYCFG.SUSPHY are set soon after initialization to avoid
 	 * blocking phy ops.
 	 */
-	if (!DWC3_VER_IS_WITHIN(DWC3, ANY, 194A))
+	/*
+	 * felix/gs201 (DWC31 180A-190A): DON'T re-enable SUSPHY here. AOSP keeps
+	 * GUSB2PHYCFG.SUSPHY / GUSB3PIPECTL.SUSPENDENABLE CLEARED through the
+	 * entire core_init + exynos controller-config, and sets SUSPHY last.
+	 * If we set it here (before the ported AOSP config block in
+	 * dwc3_core_init writes the PHY-clock-domain registers), the UTMI PHY
+	 * can suspend between those writes and the HS RX datapath latches
+	 * mis-clocked -> control transfers fail with -71. The deferred
+	 * dwc3_enable_susphy(true) is done at the tail of that block instead.
+	 */
+	if (!DWC3_VER_IS_WITHIN(DWC3, ANY, 194A) &&
+	    !DWC3_VER_IS_WITHIN(DWC31, 180A, 190A))
 		dwc3_enable_susphy(dwc, true);
 
 	return 0;
@@ -1114,19 +1131,16 @@ static void dwc3_core_setup_global_control(struct dwc3 *dwc)
 		reg |= DWC3_GCTL_U2EXIT_LFPS;
 
 	/*
-	 * When the USB2 PHY's free-running clock isn't available
-	 * (snps,dis-u2-freeclk-exists-quirk), SOF/ITP must be sourced from
-	 * the ref_clk instead of the U2 PHY clock — i.e. SOFITPSYNC=1.
-	 * Mainline only enables SOFITPSYNC for host/OTG modes via the
-	 * 210A-250A workaround above, but gs201's USB2 PHY needs it for
-	 * peripheral mode too — without it, EP0 transactions return
-	 * EPROTO on the host side ("device descriptor read/64, error -71").
-	 * AOSP's dwc3-exynos sets this conditionally on the same quirk; we
-	 * mirror that here. See AOSP soc/gs/drivers/usb/dwc3/dwc3-exynos.c
-	 * dwc3_exynos_core_init for the original logic.
+	 * felix/gs201: clear SOFITPSYNC to match AOSP's working host config
+	 * (GCTL=0x30c11004, bit10=0). AOSP's dwc3-exynos sets SOFITPSYNC on the
+	 * dis-u2-freeclk quirk but then clears it again when adj-sof-accuracy is
+	 * set (the felix DT sets it), so the effective value is 0. An earlier
+	 * mainline change set SOFITPSYNC=1 on a guess that it fixed peripheral
+	 * -71, but -71 persisted with it set, so that theory was wrong; match
+	 * the AOSP config that actually enumerates. Combined with the GFLADJ
+	 * SOF-decrement fix above, this restores correct HS SOF/ITP timing.
 	 */
-	if (dwc->dis_u2_freeclk_exists_quirk)
-		reg |= DWC3_GCTL_SOFITPSYNC;
+	reg &= ~DWC3_GCTL_SOFITPSYNC;
 
 	/*
 	 * WORKAROUND: DWC3 revisions <1.90a have a bug
@@ -1606,6 +1620,13 @@ int dwc3_core_init(struct dwc3 *dwc)
 		reg |= DWC3_GUCTL_USBHSTINAUTORETRYEN;
 		reg &= ~DWC3_GUCTL_REFCLKPER_MASK;
 		reg |= FIELD_PREP(DWC3_GUCTL_REFCLKPER_MASK, 0x34);
+		/*
+		 * felix/gs201: DTOUT[10:0] = device-response timeout. AOSP sets
+		 * it to max (0x7ff via usb_host_device_timeout); mainline leaves
+		 * the tiny reset value (0x2), so the host gives up on a slightly
+		 * slow control-IN and reports -71. Match AOSP -> GUCTL=0x0d036fff.
+		 */
+		reg |= 0x7ff;
 		dwc3_writel(dwc, DWC3_GUCTL, reg);
 
 		/* LLUCTL: pipe reset + LTSSM timer override + EN_US_HP_TIMER
@@ -1648,8 +1669,15 @@ int dwc3_core_init(struct dwc3 *dwc)
 		reg |= DWC3_GUCTL1_IP_GAP_ADD_ON(0x1);
 		dwc3_writel(dwc, DWC3_GUCTL1, reg);
 
+		/*
+		 * felix/gs201: NOW set SUSPHY (deferred from dwc3_phy_init) —
+		 * last, after every PHY-clock-domain config write above, matching
+		 * AOSP's dwc3_core_susphy_set(1) at the end of core bring-up.
+		 */
+		dwc3_enable_susphy(dwc, true);
+
 		dev_info(dwc->dev,
-			 "DWC3-DBG: applied DWC31 180A-190A AOSP workaround block\n");
+			 "DWC3-DBG: applied DWC31 180A-190A AOSP workaround block + deferred SUSPHY\n");
 	}
 
 	return 0;
