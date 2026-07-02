@@ -1144,9 +1144,16 @@
 
 	usbdrd31_phy: phy@11200000 {
 		compatible = "google,gs201-usb31drd-phy";
+		/*
+		 * pcs @0x11100000 (0x800), pma @0x110f0000 (0x2800). These were
+		 * swapped previously: the gen2 PMA CMN/TRSV block (needs the 0x2800
+		 * map, regs to ~0x1f0c) lives at 0x110f0000 per AOSP (reg_phy2), and
+		 * 0x11100000 is the smaller PCS. The swap sent all PMA config writes
+		 * to the wrong region, so the SS LCPLL never locked.
+		 */
 		reg = <0x0 0x11200000 0x0200>,
-		      <0x0 0x110f0000 0x0800>,
-		      <0x0 0x11100000 0x2800>;
+		      <0x0 0x11100000 0x0800>,
+		      <0x0 0x110f0000 0x2800>;
 		reg-names = "phy", "pcs", "pma";
 		clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_ACLK_PHYCTRL>,
 			 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB31DRD_REF_CLK_40>,
