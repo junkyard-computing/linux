@@ -247,7 +247,15 @@
 };
 
 &usbdrd31_dwc3 {
-	dr_mode = "peripheral";
+	/*
+	 * Host mode: drive the USB-ethernet dongle through the powered hub the
+	 * same way the AOSP image does (phone = USB host, hub sources VBUS to the
+	 * dongle). This is the agreed networking path — it keeps the UART tap on
+	 * the USB-C breakout usable (no gadget-to-host re-cabling) and reuses the
+	 * existing bench topology (phone -> powered hub -> dongle -> LAN). The
+	 * peripheral/CDC-NCM gadget path is parked behind Phase B (MAX77759 TCPC).
+	 */
+	dr_mode = "host";
 	maximum-speed = "high-speed";
 	snps,quirk-frame-length-adjustment = <0x20>;
 	snps,parkmode-disable-ss-quirk;
@@ -298,13 +306,19 @@
 	 * to CPU without explicit cache flushes. Empirically harmless
 	 * with mainline's HW cache-coherency assumption.
 	 *
-	 * Note: memory-region = <&xhci_dma>; was tried in 2026-05-07
-	 * but of_dma_configure didn't propagate the carveout to this
-	 * inner platform device (no "assigning to device" message in
-	 * the boot log). Replaced by the dma-ranges constraint on the
-	 * outer &usbdrd31 wrapper above, which the kernel honors via
-	 * of_dma_configure's bus_dma_limit path.
+	 * memory-region = <&xhci_dma>: the gs201 dwc3 DMA master only has
+	 * S2MPU permission for this 4 MiB carveout. In HOST mode the actual
+	 * DMA is done by the synthetic xhci-hcd child device (dwc3_host_init),
+	 * which has no OF node — so the 2026-05-07 attempt to put memory-region
+	 * here "didn't propagate": of_dma_configure ran for THIS node, but the
+	 * xhci child never inherited it. Fixed driver-side in dwc3/host.c, which
+	 * now calls of_reserved_mem_device_init_by_idx(&xhci->dev, dwc-node, 0)
+	 * to bind THIS carveout to the xhci child. Keep the property here so the
+	 * driver has the region to propagate. (dma-ranges on the outer wrapper
+	 * constrained the core's own event buffers, which is why connect/reset
+	 * events worked but every transfer's descriptor DMA still -71'd.)
 	 */
+	memory-region = <&xhci_dma>;
 	dma-coherent;
 	status = "okay";
 };
