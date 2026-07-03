@@ -29,6 +29,7 @@
 
 #include "gs201.dtsi"
 #include "gs201-android-handoff.dtsi"
+#include <dt-bindings/usb/pd.h>
 
 / {
 	model = "Google Pixel Fold";
@@ -255,7 +256,16 @@
 	 * existing bench topology (phone -> powered hub -> dongle -> LAN). The
 	 * peripheral/CDC-NCM gadget path is parked behind Phase B (MAX77759 TCPC).
 	 */
-	dr_mode = "host";
+	/*
+	 * Phase B: TCPM-managed dual-role. The MAX77759 TCPC (tcpc@25 below,
+	 * bound by tcpci_maxim) + the generic TCPM state machine drive the
+	 * role via usb-role-switch: default peripheral, switch to host when a
+	 * sink (the USB-ethernet dongle) attaches on CC. Replaces the earlier
+	 * hard dr_mode="host" once the TCPC/connector graph is wired.
+	 */
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
 	maximum-speed = "high-speed";
 	snps,quirk-frame-length-adjustment = <0x20>;
 	snps,parkmode-disable-ss-quirk;
@@ -352,3 +362,82 @@
 	pmsg-size = <0x100000>;
 };
 
+
+/*
+ * Phase B: MAX77759 USB-C TCPC + Type-C Port Manager (TCPM) for automatic host
+ * mode. Binds the mainline tcpci_maxim driver via the maxim,max33359 fallback
+ * (MAX77759's TCPC is the same TCPCI family). Adapted from mainline
+ * gs101-pixel-common.dtsi (Pixel 6, same MAX77759 + same combo PHY). The TCPC
+ * alert line is gpa9-7 (felix), now referenceable after the gs201 pinctrl bank
+ * nodes were added. NOTE: no vbus-supply yet — this stage validates CC attach
+ * detection + role/orientation switching; VBUS sourcing (charger OTG regulator)
+ * is wired in a follow-up.
+ */
+&usbdrd31_phy {
+	orientation-switch;
+
+	port {
+		usbdrd31_phy_orien_switch: endpoint {
+			remote-endpoint = <&usbc0_orien_sw>;
+		};
+	};
+};
+
+&usbdrd31_dwc3 {
+	port {
+		usbdrd31_dwc3_role_switch: endpoint {
+			remote-endpoint = <&usbc0_role_sw>;
+		};
+	};
+};
+
+&hsi2c14 {
+	usb-typec@25 {
+		compatible = "maxim,max77759-tcpci", "maxim,max33359";
+		reg = <0x25>;
+		interrupt-parent = <&gpa9>;
+		interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			data-role = "dual";
+			power-role = "dual";
+			self-powered;
+			try-power-role = "sink";
+			op-sink-microwatt = <2600000>;
+			source-pdos = <PDO_FIXED(5000, 900,
+						 (PDO_FIXED_SUSPEND
+						  | PDO_FIXED_USB_COMM
+						  | PDO_FIXED_DATA_SWAP
+						  | PDO_FIXED_DUAL_ROLE))>;
+			sink-pdos = <PDO_FIXED(5000, 3000,
+					       (PDO_FIXED_DATA_SWAP
+						| PDO_FIXED_USB_COMM
+						| PDO_FIXED_HIGHER_CAP
+						| PDO_FIXED_DUAL_ROLE))>;
+			/* PD off for bench bring-up: we need attach + host role + VBUS, not PD. */
+			pd-disable;
+			typec-power-opmode = "default";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					usbc0_orien_sw: endpoint {
+						remote-endpoint = <&usbdrd31_phy_orien_switch>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					usbc0_role_sw: endpoint {
+						remote-endpoint = <&usbdrd31_dwc3_role_switch>;
+					};
+				};
+			};
+		};
+	};
+};
