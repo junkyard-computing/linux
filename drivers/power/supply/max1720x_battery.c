@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/nvmem-provider.h>
 #include <linux/power_supply.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 
 #include <linux/unaligned.h>
@@ -37,6 +38,7 @@
 #define MAX172XX_REPCAP			0x05	/* Average capacity */
 #define MAX172XX_REPSOC			0x06	/* Percentage of charge */
 #define MAX172XX_TEMP			0x08	/* Temperature */
+#define MAX172XX_VCELL			0x09	/* Per-cell voltage */
 #define MAX172XX_CURRENT		0x0A	/* Actual current */
 #define MAX172XX_AVG_CURRENT		0x0B	/* Average current */
 #define MAX172XX_FULL_CAP		0x10	/* Calculated full capacity */
@@ -57,12 +59,14 @@
 static const char *const max1720x_manufacturer = "Maxim Integrated";
 static const char *const max17201_model = "MAX17201";
 static const char *const max17205_model = "MAX17205";
+static const char *const max1720x_model = "MAX1720X";
 
 struct max1720x_device_info {
 	struct regmap *regmap;
 	struct regmap *regmap_nv;
 	struct i2c_client *ancillary;
 	int rsense;
+	struct power_supply_desc desc;
 };
 
 /*
@@ -285,7 +289,12 @@ static int max172xx_percent_to_ps(unsigned int reg)
 
 static int max172xx_voltage_to_ps(unsigned int reg)
 {
-	return reg * 1250;	/* in uV */
+	return reg * 1250;	/* Batt reg, LSB 1.25 mV, in uV */
+}
+
+static int max172xx_vcell_to_ps(unsigned int reg)
+{
+	return reg * 625 / 8;	/* VCell reg, LSB 78.125 uV, in uV */
 }
 
 static int max172xx_capacity_to_ps(unsigned int reg,
@@ -391,7 +400,19 @@ static int max1720x_battery_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		ret = regmap_read(info->regmap, MAX172XX_BATT, &reg_val);
-		val->intval = max172xx_voltage_to_ps(reg_val);
+		if (ret < 0)
+			break;
+		if (reg_val) {
+			val->intval = max172xx_voltage_to_ps(reg_val);
+		} else {
+			/*
+			 * Single-cell gauges (e.g. the felix base pack) leave
+			 * the multi-cell Batt reg (0xDA) at 0; fall back to the
+			 * per-cell VCell reg (0x09).
+			 */
+			ret = regmap_read(info->regmap, MAX172XX_VCELL, &reg_val);
+			val->intval = max172xx_vcell_to_ps(reg_val);
+		}
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		ret = regmap_read(info->regmap, MAX172XX_DESIGN_CAP, &reg_val);
@@ -435,7 +456,7 @@ static int max1720x_battery_get_property(struct power_supply *psy,
 		else if (reg_val == MAX172XX_DEV_NAME_TYPE_MAX17205)
 			val->strval = max17205_model;
 		else
-			return -ENODEV;
+			val->strval = max1720x_model;
 		break;
 	case POWER_SUPPLY_PROP_MANUFACTURER:
 		val->strval = max1720x_manufacturer;
@@ -603,10 +624,27 @@ static int max1720x_probe(struct i2c_client *client)
 				     "regmap initialization failed\n");
 
 	ret = max1720x_probe_nvmem(client, info);
-	if (ret)
-		return dev_err_probe(dev, ret, "Failed to probe nvmem\n");
+	if (ret) {
+		/*
+		 * Some gauges (e.g. the felix base pack) have no 0x0b nvmem
+		 * companion; keep the gauge usable for live telemetry with a
+		 * default sense-resistor value instead of failing the probe.
+		 */
+		dev_warn(dev, "nvmem unavailable (%d); using default rsense\n",
+			 ret);
+		info->rsense = 1000; /* 10 mOhm, in 10^-5 Ohm */
+	}
 
-	bat = devm_power_supply_register(dev, &max1720x_bat_desc, &psy_cfg);
+	/*
+	 * Copy the template desc so a per-instance name can be applied — felix
+	 * is dual-battery (two gauges on separate i2c buses), and two power
+	 * supplies can't share the "max1720x" sysfs name. An optional DT "label"
+	 * overrides it (e.g. maxfg_base / maxfg_secondary).
+	 */
+	info->desc = max1720x_bat_desc;
+	device_property_read_string(dev, "label", &info->desc.name);
+
+	bat = devm_power_supply_register(dev, &info->desc, &psy_cfg);
 	if (IS_ERR(bat))
 		return dev_err_probe(dev, PTR_ERR(bat),
 				     "Failed to register power supply\n");
