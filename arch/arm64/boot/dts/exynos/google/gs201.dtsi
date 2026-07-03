@@ -486,6 +486,51 @@
 		};
 	};
 
+		/*
+		 * USI15 (PERIC1) in HS-I2C mode @ 10da0000 — felix's SECONDARY
+		 * fuel gauge (the larger fold pack: max1720x@36 + 0x0b nvram) lives
+		 * here, alongside the CS40L26 haptics, wireless charger and an
+		 * EEPROM (not wired). This USI does NOT exist on gs101, so
+		 * clk-gs101.c has no gs201 USI15 mux/gate model — feed the block a
+		 * fixed ipclk/pclk stub instead. The bootloader leaves the CMU gate
+		 * (GATE_PERIC1_TOP0_USI15_USI) enabled to reach the gauge at boot,
+		 * and the cmdline's clk_ignore_unused keeps it that way, so the
+		 * block stays clocked. GIC line 696, sysreg USI mode reg at peric1
+		 * +0x18 (vs +0x14 for USI13), SDA/SCL on gpp24-0/1 (left in i2c
+		 * alt-func by the bootloader, so no pinctrl-0).
+		 */
+		usi15_clk: usi15-clk {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <200000000>;
+			clock-output-names = "usi15_clk";
+		};
+
+		usi15: usi@10da00c0 {
+			compatible = "google,gs101-usi", "samsung,exynos850-usi";
+			reg = <0x0 0x10da00c0 0x20>;
+			ranges;
+			#address-cells = <2>;
+			#size-cells = <1>;
+			clocks = <&usi15_clk>, <&usi15_clk>;
+			clock-names = "pclk", "ipclk";
+			samsung,sysreg = <&sysreg_peric1 0x1018>;
+			samsung,mode = <USI_MODE_I2C>;
+			status = "okay";
+
+			hsi2c15: i2c@10da0000 {
+				compatible = "google,gs101-hsi2c",
+					     "samsung,exynosautov9-hsi2c";
+				reg = <0x0 0x10da0000 0xc0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				clocks = <&usi15_clk>, <&usi15_clk>;
+				clock-names = "hsi2c", "hsi2c_pclk";
+				interrupts = <GIC_SPI 696 IRQ_TYPE_LEVEL_HIGH>;
+				status = "okay";
+			};
+		};
+
 	/* ------------------------------------------------------------------ */
 	/* Interrupt controller                                                 */
 	/* ------------------------------------------------------------------ */
