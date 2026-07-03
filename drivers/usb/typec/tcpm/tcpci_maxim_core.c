@@ -243,6 +243,18 @@ static int max_tcpci_set_vbus(struct tcpci *tcpci, struct tcpci_data *tdata, boo
 	if (source) {
 		if (!regulator_is_enabled(chip->vbus_reg))
 			ret = regulator_enable(chip->vbus_reg);
+		/*
+		 * Route the USB2 D+/D- through the MAX77759 vendor data switch to
+		 * the controller. The driver otherwise only closes this switch
+		 * from ->set_partner_usb_comm_capable(), which TCPM calls only on
+		 * a PD contract advertising PDO_FIXED_USB_COMM. A plain USB2
+		 * ethernet dongle does no PD (and felix runs the connector
+		 * pd-disable), so without this the dongle gets VBUS but its data
+		 * lines never reach dwc3 and it never enumerates. We source VBUS
+		 * iff we are the host, so close the data switch here.
+		 */
+		max_tcpci_write8(chip, TCPC_VENDOR_USBSW_CTRL,
+				 TCPC_VENDOR_USBSW_CTRL_ENABLE_USB_DATA);
 	} else {
 		if (regulator_is_enabled(chip->vbus_reg))
 			ret = regulator_disable(chip->vbus_reg);
