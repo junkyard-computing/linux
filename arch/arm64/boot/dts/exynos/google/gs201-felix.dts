@@ -473,3 +473,33 @@
 		};
 	};
 };
+
+/*
+ * MAX1720x-family ModelGauge m5 fuel gauge for the base battery (i2c 0x36 on
+ * the same hsi2c14 bus). Provides SoC%, VCell, current and temperature. The
+ * base gauge has no 0x0b nvmem companion, so the driver falls back to a default
+ * rsense. felix's secondary-battery gauge lives on a different i2c bus and is
+ * not wired here yet.
+ */
+&hsi2c14 {
+	fuelgauge@36 {
+		compatible = "maxim,max17201";
+		reg = <0x36>;
+		label = "maxfg_base";
+	};
+};
+
+/*
+ * Secondary battery fuel gauge (felix is a dual-battery fold). Same
+ * MAX1720x-family gauge on the USI15 bus (i2c 0x36 @ 10da0000); unlike the
+ * base pack this one has a real 0x0b nvram companion, so the driver's nvmem
+ * probe succeeds and rsense comes from the part. Distinct `label` so the two
+ * gauges don't collide on the "max1720x" power-supply name.
+ */
+&hsi2c15 {
+	fuelgauge@36 {
+		compatible = "maxim,max17201";
+		reg = <0x36>;
+		label = "maxfg_secondary";
+	};
+};
