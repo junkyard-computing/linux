@@ -397,6 +397,8 @@
 		reg = <0x25>;
 		interrupt-parent = <&gpa9>;
 		interrupts = <7 IRQ_TYPE_LEVEL_LOW>;
+		/* OTG/host-mode VBUS via the MAX77759 charger reverse-boost. */
+		vbus-supply = <&chgin_otg>;
 
 		connector {
 			compatible = "usb-c-connector";
@@ -438,6 +440,36 @@
 					};
 				};
 			};
+		};
+	};
+};
+
+/*
+ * MAX77759 PMIC/charger MFD (i2c 0x66). Needed for OTG/host-mode VBUS: the
+ * charger's chgin-otg reverse-boost regulator is what the TCPC's vbus-supply
+ * points at. The MFD spawns the charger (matched to the child node below via
+ * the of_compatible added to its mfd_cell); the charger registers the
+ * "chgin-otg" regulator against that node. PMIC IRQ is gpa9-4 (felix, per AOSP
+ * if_pmic_int), distinct from the TCPC's gpa9-7.
+ */
+&hsi2c14 {
+	max77759_pmic: pmic@66 {
+		compatible = "maxim,max77759";
+		reg = <0x66>;
+		interrupt-parent = <&gpa9>;
+		interrupts = <4 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+
+		/*
+		 * The max77759 charger driver does
+		 * device_set_of_node_from_dev(dev, dev->parent), so its regulator
+		 * of_match ("chgin-otg-regulator") is searched among THIS pmic
+		 * node's direct children — the regulator must live here, not under
+		 * a charger subnode.
+		 */
+		chgin_otg: chgin-otg-regulator {
+			regulator-name = "chgin-otg";
 		};
 	};
 };
