@@ -2515,7 +2515,20 @@ PNAME(mout_hsi0_usbdpdbg_user_p)	= { "oscclk",
 					    "dout_cmu_hsi0_usbdpdbg" };
 PNAME(mout_hsi0_bus_p)			= { "mout_hsi0_bus_user",
 					    "mout_hsi0_alt_user" };
-PNAME(mout_hsi0_usb20_ref_p)		= { "mout_pll_usb",
+/*
+ * gs201 (felix): match AOSP's gs201 CAL topology for the USB2.0 ref mux.
+ * cmucal_mux_clk_hsi0_usb20_ref_parents differs by SoC: gs101 = {PLL_USB (raw
+ * 614.4 MHz), TCXO}, gs201 = {DIV_CLK_HSI0_USB (=PLL_USB/32 = 19.2 MHz), TCXO}.
+ * This driver started from the gs101 topology (parent[0] = mout_pll_usb =
+ * 614.4 MHz); point parent[0] at dout_hsi0_usb (/32 = 19.2 MHz) to match gs201.
+ *
+ * NOTE: this is a correctness fix only, NOT the HS "-71" fix. clk_summary shows
+ * gout_hsi0_usb31drd_i_usb20_phy_refclk_26 has enable_cnt 0 (deviceless) — this
+ * clock is not consumed by the combo PHY, whose actual reference is
+ * usb31drd_ref_clk_40 ("ref") = 19.2 MHz already. Verified on device: after
+ * this change usb20_phy_refclk reads 19.2 MHz but the HS -71 persists unchanged.
+ */
+PNAME(mout_hsi0_usb20_ref_p)		= { "dout_hsi0_usb",
 					    "mout_hsi0_tcxo_user" };
 PNAME(mout_hsi0_usb31drd_p)		= { "dout_hsi0_usb",
 					    "mout_hsi0_usb31drd_user",

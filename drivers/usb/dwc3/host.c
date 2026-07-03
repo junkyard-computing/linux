@@ -18,6 +18,7 @@
 #include "../host/xhci-caps.h"
 #include "../host/xhci-plat.h"
 #include "core.h"
+#include "io.h"
 
 #define XHCI_HCSPARAMS1		0x4
 #define XHCI_PORTSC_BASE	0x400
@@ -133,6 +134,21 @@ int dwc3_host_init(struct dwc3 *dwc)
 	struct platform_device	*xhci;
 	int			ret, irq;
 	int			prop_idx = 0;
+	u32			reg;
+
+	/*
+	 * felix/gs201: set GUSB2PHYCFG.SUSPHY + ENBLSLPM here, right before the
+	 * host controller starts. mainline clears both (dis_u2_susphy_quirk +
+	 * the has-lpm path) and dwc3_set_prtcap clears SUSPHY again on the
+	 * DEVICE->HOST prtcap change, so by host start GUSB2PHYCFG=0x00102400 vs
+	 * AOSP's working 0x00102540. This is the last HS-PHY-interface bit that
+	 * differs from the AOSP oracle; set it last so it sticks through init.
+	 */
+	reg = dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0));
+	reg |= DWC3_GUSB2PHYCFG_SUSPHY | DWC3_GUSB2PHYCFG_ENBLSLPM;
+	dwc3_writel(dwc, DWC3_GUSB2PHYCFG(0), reg);
+	dev_info(dwc->dev, "DWC3-DBG: felix GUSB2PHYCFG=0x%08x (SUSPHY+ENBLSLPM)\n",
+		 dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0)));
 
 	/*
 	 * Some platforms need to power off all Root hub ports immediately after DWC3 set to host
