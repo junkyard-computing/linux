@@ -624,7 +624,11 @@
 	pinctrl_0: pinctrl@180d0000 {
 		compatible = "google,gs201-pinctrl";
 		reg = <0x0 0x180d0000 0x1000>;
-		wakeup-interrupt-controller;
+		wakeup-interrupt-controller {
+			compatible = "google,gs101-wakeup-eint",
+				     "samsung,exynos850-wakeup-eint",
+				     "samsung,exynos7-wakeup-eint";
+		};
 		/*
 		 * ALIVE EINTW banks. The samsung pinctrl driver needs a DT child
 		 * node per bank (names match gs201_pin_alive in
@@ -747,7 +751,11 @@
 	pinctrl_1: pinctrl@180e0000 {
 		compatible = "google,gs201-pinctrl";
 		reg = <0x0 0x180e0000 0x1000>;
-		wakeup-interrupt-controller;
+		wakeup-interrupt-controller {
+			compatible = "google,gs101-wakeup-eint",
+				     "samsung,exynos850-wakeup-eint",
+				     "samsung,exynos7-wakeup-eint";
+		};
 		gpa6: gpa6-gpio-bank {
 			gpio-controller;
 			#gpio-cells = <2>;
