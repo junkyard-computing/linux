@@ -2910,6 +2910,22 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 	/* Power on + de-isolate the same way mainline gs201 init does. */
 	inst->phy_cfg->phy_isol(inst, false);
 
+	/*
+	 * gs201/felix USB2 HS "-71" FIX. The common exynos5_usbdrd_phy_init()
+	 * (which runs before this per-instance init) unconditionally sets
+	 * PHYUTMICLKSEL.UTMI_CLKSEL (bit 2) with a generic "must be set for HS and
+	 * SS" comment, leaving PHYUTMICLKSEL = 0x6. On gs201 AOSP leaves this
+	 * register 0 (captured from a working AOSP boot on felix .108). With the
+	 * wrong UTMI clock select the USB2 PHY completes HS chirp/connect (the
+	 * device shows up as high-speed) but corrupts every HS data packet:
+	 * "device descriptor read/64, error -71" / "not accepting address", so no
+	 * device enumerates; LS/FS are unaffected (huge timing margin). Verified on
+	 * device by MMIO poke: clearing 0x11200030 to 0 makes an RTL8153 USB2
+	 * ethernet dongle enumerate and pull a DHCP lease (gateway ping 0% loss).
+	 * This single register is the whole fix; restore AOSP's value here.
+	 */
+	writel(0, phy_drd->reg_phy + EXYNOS5_DRD_PHYUTMICLKSEL);
+
 	phy_exynos_usb_v3p1_link_sw_reset(&info);
 	phy_exynos_usb_v3p1_enable(&info);
 	phy_exynos_usb_v3p1_pipe_ovrd(&info);
