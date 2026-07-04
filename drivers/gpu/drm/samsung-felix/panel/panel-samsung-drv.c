@@ -4103,6 +4103,7 @@ static void exynos_panel_node_attach(struct exynos_drm_connector *exynos_connect
 }
 
 static int exynos_panel_bridge_attach(struct drm_bridge *bridge,
+				      struct drm_encoder *encoder,
 				      enum drm_bridge_attach_flags flags)
 {
 	struct drm_device *dev = bridge->dev;
@@ -4147,7 +4148,7 @@ static void exynos_panel_bridge_detach(struct drm_bridge *bridge)
 }
 
 static void exynos_panel_bridge_enable(struct drm_bridge *bridge,
-				       struct drm_bridge_state *old_bridge_state)
+				       struct drm_atomic_state *state)
 {
 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
 	struct dsim_device *dsim = host_to_dsi(to_mipi_dsi_device(ctx->dev)->host);
@@ -4385,7 +4386,7 @@ static int exynos_panel_bridge_atomic_check(struct drm_bridge *bridge,
 }
 
 static void exynos_panel_bridge_pre_enable(struct drm_bridge *bridge,
-					   struct drm_bridge_state *old_bridge_state)
+					   struct drm_atomic_state *state)
 {
 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
 
@@ -4400,7 +4401,7 @@ static void exynos_panel_bridge_pre_enable(struct drm_bridge *bridge,
 }
 
 static void exynos_panel_bridge_disable(struct drm_bridge *bridge,
-					struct drm_bridge_state *old_bridge_state)
+					struct drm_atomic_state *state)
 {
 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
 	const struct drm_connector_state *conn_state = ctx->exynos_connector.base.state;
@@ -4464,7 +4465,7 @@ static void exynos_panel_bridge_disable(struct drm_bridge *bridge,
 }
 
 static void exynos_panel_bridge_post_disable(struct drm_bridge *bridge,
-					     struct drm_bridge_state *old_bridge_state)
+					     struct drm_atomic_state *state)
 {
 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
 
