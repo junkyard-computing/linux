@@ -10,6 +10,7 @@
 
 #include <linux/clk.h>
 #include <linux/dma-mapping.h>
+#include <linux/genalloc.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/of.h>
@@ -221,8 +222,28 @@ int xhci_plat_probe(struct platform_device *pdev, struct device *sysdev, const s
 
 		of_node_put(mem_np);
 		if (rmem) {
-			ret = usb_hcd_setup_local_mem(hcd, rmem->base,
-						      rmem->base, rmem->size);
+			/*
+			 * dwc3 OTG role-switching removes and re-probes xhci,
+			 * but usb_hcd_setup_local_mem() creates the carveout
+			 * gen_pool via devm tied to the *persistent* sysdev (the
+			 * dwc3 device), named dev_name(sysdev). A second probe
+			 * therefore fails -EINVAL on the duplicate pool name,
+			 * killing xhci re-probe (and the felix charge+host path,
+			 * where a PD sink swap forces a host->device->host dance).
+			 * Reuse the pool created on the first probe if present.
+			 */
+			struct gen_pool *pool =
+				gen_pool_get(hcd->self.sysdev,
+					     dev_name(hcd->self.sysdev));
+
+			if (pool) {
+				hcd->localmem_pool = pool;
+				ret = 0;
+			} else {
+				ret = usb_hcd_setup_local_mem(hcd, rmem->base,
+							      rmem->base,
+							      rmem->size);
+			}
 			if (ret < 0) {
 				dev_err(sysdev,
 					"xhci local-mem carveout setup failed (%d)\n",
