@@ -265,7 +265,7 @@
 	 */
 	dr_mode = "otg";
 	usb-role-switch;
-	role-switch-default-mode = "peripheral";
+	role-switch-default-mode = "host";
 	maximum-speed = "high-speed";
 	snps,quirk-frame-length-adjustment = <0x20>;
 	snps,parkmode-disable-ss-quirk;
@@ -403,23 +403,48 @@
 		connector {
 			compatible = "usb-c-connector";
 			label = "USB-C";
+			/*
+			 * data-role="dual" like AOSP: forcing "host" makes the PD
+			 * data-role bit collide with the adapter when we attach as a
+			 * sink ("Data role mismatch -> error recovery"), which kills
+			 * the charge negotiation. Dual lets PD complete; the data
+			 * role is then swapped to host separately to keep the dongle.
+			 */
 			data-role = "dual";
 			power-role = "dual";
 			self-powered;
+			/*
+			 * try-source (not AOSP's try-sink): felix must stay the USB
+			 * host for the ethernet dongle, so attach as source (DFP),
+			 * then let the self-powered dock PR_SWAP us to power-sink
+			 * while the data role stays DFP -> charge + keep the dongle.
+			 */
 			try-power-role = "sink";
 			op-sink-microwatt = <2600000>;
+			/* Match AOSP felix: FRS + slow-charger-loop so a
+			 * self-powered dock can hand power back to us. */
+			new-source-frs-typec-current = <FRS_5V_1P5A>;
+			slow-charger-loop;
 			source-pdos = <PDO_FIXED(5000, 900,
 						 (PDO_FIXED_SUSPEND
 						  | PDO_FIXED_USB_COMM
 						  | PDO_FIXED_DATA_SWAP
 						  | PDO_FIXED_DUAL_ROLE))>;
+			/* Advertise 9V + PPS sink capability like AOSP so the
+			 * dock knows we can take real charging power. */
 			sink-pdos = <PDO_FIXED(5000, 3000,
 					       (PDO_FIXED_DATA_SWAP
 						| PDO_FIXED_USB_COMM
 						| PDO_FIXED_HIGHER_CAP
-						| PDO_FIXED_DUAL_ROLE))>;
-			/* PD off for bench bring-up: we need attach + host role + VBUS, not PD. */
-			pd-disable;
+						| PDO_FIXED_DUAL_ROLE))
+				     PDO_FIXED(9000, 2200, 0)
+				     PDO_PPS_APDO(5000, 11000, 3000)>;
+			/*
+			 * PD enabled: the port is dual-role (try-power-role=sink),
+			 * so it still sources VBUS to a bare dongle, but a PD dock
+			 * with external power can PR_SWAP us to sink and charge the
+			 * phone while we keep the data-host role for ethernet.
+			 */
 			typec-power-opmode = "default";
 
 			ports {
