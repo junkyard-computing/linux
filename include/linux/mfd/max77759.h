@@ -103,6 +103,12 @@
 #define MAX77759_CHGR_REG_CHG_CNFG_08                  0xc1
 #define MAX77759_CHGR_REG_CHG_CNFG_09                  0xc2
 #define   MAX77759_CHGR_REG_CHG_CNFG_09_CHGIN_ILIM     GENMASK(6, 0)
+/*
+ * NO_AUTOIBUS: when 0 (POR default) the charger auto-limits CHGIN input current
+ * to a conservative value and IGNORES CHGIN_ILIM, so a negotiated PD current
+ * (e.g. 2.2A) trickles at ~500mA. Set to 1 to honor the explicit CHGIN_ILIM.
+ */
+#define   MAX77759_CHGR_REG_CHG_CNFG_09_NO_AUTOIBUS     BIT(7)
 #define MAX77759_CHGR_REG_CHG_CNFG_10                  0xc3
 #define MAX77759_CHGR_REG_CHG_CNFG_11                  0xc4
 #define MAX77759_CHGR_REG_CHG_CNFG_12                  0xc5
