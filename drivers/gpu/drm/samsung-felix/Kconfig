@@ -10,6 +10,7 @@ config DRM_SAMSUNG_FELIX
 	select DRM_PANEL_BRIDGE
 	select BACKLIGHT_CLASS_DEVICE
 	select VIDEOMODE_HELPERS
+	select GENERIC_PHY
 	help
 	  Grafted AOSP samsung DRM stack (DECON1/DSIM1/DPP) to drive the felix
 	  outer/cover panel samsung,ea8182-f10 (command-mode, DSC). Bring-up WIP.
