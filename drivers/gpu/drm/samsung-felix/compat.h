@@ -57,3 +57,14 @@ static inline struct dma_buf *dma_heap_buffer_alloc(struct dma_heap *h, size_t l
 #define exynos_get_idle_ip_index(...) (-1)
 #define exynos_update_ip_idle_status(...) do {} while (0)
 #include <soc/google/exynos_pm_qos.h>
+/* drm_panel_init removed for refcounted devm_drm_panel_alloc; the panel is
+ * embedded in exynos_panel (devm-managed) so replicate the old init. */
+#include <drm/drm_panel.h>
+static inline void drm_panel_init(struct drm_panel *panel, struct device *dev,
+			const struct drm_panel_funcs *funcs, int connector_type)
+{
+	INIT_LIST_HEAD(&panel->list);
+	panel->dev = dev;
+	panel->funcs = funcs;
+	panel->connector_type = connector_type;
+}

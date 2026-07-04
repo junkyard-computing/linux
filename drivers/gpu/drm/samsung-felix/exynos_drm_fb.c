@@ -53,6 +53,7 @@ static const struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
 
 static struct drm_framebuffer *
 exynos_drm_framebuffer_init(struct drm_device *dev,
+			    const struct drm_format_info *info,
 			    const struct drm_mode_fb_cmd2 *mode_cmd,
 			    struct drm_gem_object **obj,
 			    int count)
@@ -68,7 +69,7 @@ exynos_drm_framebuffer_init(struct drm_device *dev,
 	for (i = 0; i < count; i++)
 		fb->obj[i] = obj[i];
 
-	drm_helper_mode_fill_fb_struct(dev, fb, mode_cmd);
+	drm_helper_mode_fill_fb_struct(dev, fb, info, mode_cmd);
 
 	ret = drm_framebuffer_init(dev, fb, &exynos_drm_fb_funcs);
 	if (ret < 0) {
@@ -126,9 +127,9 @@ static size_t get_plane_size(const struct drm_mode_fb_cmd2 *mode_cmd, u32 idx,
 
 static struct drm_framebuffer *
 exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
+		      const struct drm_format_info *info,
 		      const struct drm_mode_fb_cmd2 *mode_cmd)
 {
-	const struct drm_format_info *info = drm_get_format_info(dev, mode_cmd);
 	struct drm_gem_object *obj[MAX_FB_BUFFER] = { 0 };
 	struct drm_framebuffer *fb;
 	size_t size;
@@ -180,7 +181,7 @@ exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
 	DRM_DEBUG("offset(%d), handle(%d), size(%lu)\n", mode_cmd->offsets[0],
 			mode_cmd->handles[0], size);
 
-	fb = exynos_drm_framebuffer_init(dev, mode_cmd, obj, i);
+	fb = exynos_drm_framebuffer_init(dev, info, mode_cmd, obj, i);
 	if (IS_ERR(fb)) {
 		ret = PTR_ERR(fb);
 		goto err;
@@ -197,12 +198,12 @@ err:
 }
 
 static const struct drm_format_info *
-exynos_get_format_info(const struct drm_mode_fb_cmd2 *cmd)
+exynos_get_format_info(u32 pixel_format, u64 modifier)
 {
 	const struct drm_format_info *info = NULL;
 
-	if (cmd->modifier[0] == DRM_FORMAT_MOD_SAMSUNG_COLORMAP) {
-		info = drm_format_info(cmd->pixel_format);
+	if (modifier == DRM_FORMAT_MOD_SAMSUNG_COLORMAP) {
+		info = drm_format_info(pixel_format);
 		if (info->format == DRM_FORMAT_BGRA8888)
 			return info;
 

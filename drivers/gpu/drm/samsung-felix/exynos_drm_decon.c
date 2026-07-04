@@ -625,7 +625,7 @@ static int _decon_handover_check(struct exynos_drm_crtc *exynos_crtc,
 	bool found_handover_dpp = false;
 
 	if (exynos_crtc_state->planes_updated) {
-		drm_info(decon, "%s: planes updated on commit, skipping handover\n", __func__);
+		drm_info(decon->drm_dev, "%s: planes updated on commit, skipping handover\n", __func__);
 		return 0;
 	}
 
@@ -660,12 +660,12 @@ static int _decon_handover_check(struct exynos_drm_crtc *exynos_crtc,
 	decon_debug(decon, "%s: final win_mask=0x%lx\n", __func__, win_mask);
 
 	if (!win_mask) {
-		drm_warn(decon, "%s: handover memory defined, but no windows attached\n", __func__);
+		drm_warn(decon->drm_dev, "%s: handover memory defined, but no windows attached\n", __func__);
 		return -ENOENT;
 	}
 
 	if (!found_handover_dpp) {
-		drm_warn(decon, "%s: handover memory defined, but cannot find handover dpp\n",
+		drm_warn(decon->drm_dev, "%s: handover memory defined, but cannot find handover dpp\n",
 				__func__);
 		return -EBUSY;
 	}
