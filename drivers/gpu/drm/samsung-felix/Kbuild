@@ -6,7 +6,7 @@ ccflags-y += -include $(src)/compat.h
 ccflags-y += -I$(src)/stubs
 ccflags-y += -I$(src)/cal_common -I$(src)/cal_9845 -I$(src)/cal_9855
 ccflags-y += -I$(src)/include/uapi -I$(src)/common/include
-ccflags-y += -DCONFIG_SOC_GS201=1
+ccflags-y += -DCONFIG_SOC_GS201=1 -DCONFIG_EXYNOS_PM_QOS=1
 
 obj-$(CONFIG_DRM_SAMSUNG_FELIX) += exynos-drm.o
 exynos-drm-y := \

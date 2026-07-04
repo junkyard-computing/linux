@@ -31,5 +31,29 @@
 #define strlcpy strscpy
 #endif
 /* exynos idle-IP tracking (soc/google) — no-op for bring-up */
-static inline int exynos_get_idle_ip_index(const char *name, int a) { return -1; }
-static inline void exynos_update_ip_idle_status(int idx, int status) {}
+
+/* --- wave 1: more mainline includes + removed-API shims --- */
+#include <linux/vmalloc.h>
+#include <linux/hex.h>
+#include <linux/fb.h>
+#include <linux/err.h>
+#ifndef FB_BLANK_UNBLANK
+#define FB_BLANK_UNBLANK    0
+#define FB_BLANK_POWERDOWN  4
+#endif
+/* iommu device-fault-handler API removed in mainline (macros swallow args) */
+#define iommu_register_device_fault_handler(dev, handler, data) (0)
+#define iommu_unregister_device_fault_handler(dev) (0)
+/* dma-heap consumer funcs absent from mainline's linux/dma-heap.h */
+struct dma_heap;
+struct dma_buf;
+static inline struct dma_heap *dma_heap_find(const char *name) { return NULL; }
+static inline void dma_heap_put(struct dma_heap *h) {}
+static inline struct dma_buf *dma_heap_buffer_alloc(struct dma_heap *h, size_t len,
+			unsigned int fd_flags, unsigned int heap_flags) { return ERR_PTR(-ENOSYS); }
+/* exynos idle-IP: arg-count-agnostic no-ops (override earlier inline decls) */
+#undef exynos_get_idle_ip_index
+#undef exynos_update_ip_idle_status
+#define exynos_get_idle_ip_index(...) (-1)
+#define exynos_update_ip_idle_status(...) do {} while (0)
+#include <soc/google/exynos_pm_qos.h>
