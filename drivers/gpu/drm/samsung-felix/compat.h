@@ -13,3 +13,7 @@
 #define drm_atomic_state_put		drm_atomic_commit_put
 
 #endif /* __SAMSUNG_FELIX_COMPAT_H */
+
+/* drm_debug_printer(prefix) -> drm_dbg_printer(dev,category,prefix) */
+#include <drm/drm_print.h>
+#define drm_debug_printer(prefix) drm_dbg_printer(NULL, DRM_UT_DRIVER, (prefix))
