@@ -77,11 +77,50 @@
 		regulator-max-microvolt = <1800000>;
 		regulator-always-on;
 	};
+
+	/*
+	 * Placeholder for the ea8182-f10 outer-panel rails (vci/vddi/vddd).
+	 * Real routing is off S2MPG12/13 LDOs (m_ldo27/m_ldo23/disp_vddd), none
+	 * modelled on mainline; the bootloader leaves the panel rails powered,
+	 * so a single always-on stub satisfies the drm_panel supply lookups.
+	 */
+	reg_disp_placeholder: regulator-disp-placeholder {
+		compatible = "regulator-fixed";
+		regulator-name = "disp-placeholder";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
 };
 
 /* Wire the stub regulator to the GPU node as its mali-supply. */
 &gpu {
 	mali-supply = <&mali_vreg>;
+};
+
+/*
+ * OUTER/cover panel ea8182-f10 on DSIM1. drmdsim1 itself stays disabled
+ * (see gs201.dtsi) until the pd_dpu power-on + DSIM D-PHY shim land, so this
+ * panel child does not probe yet.
+ */
+&drmdsim1 {
+	panel@0 {
+		compatible = "samsung,ea8182-f10";
+		label = "ea8182-f10";
+		reg = <0>;
+		channel = <0>;
+		/*
+		 * TODO: real reset is gpp23-0, but mainline gs201.dtsi only
+		 * populates the gpa and gpp0 banks — add the gpp23 bank (under the
+		 * matching peric pinctrl) when enabling the panel. Placeholder
+		 * gpp0 keeps the DTB compiling; the driver's gpio lookup is
+		 * stubbed (-ENOSYS) until the of_gpio->gpiod port lands anyway.
+		 */
+		reset-gpios = <&gpp0 0 GPIO_ACTIVE_HIGH>;
+		vci-supply = <&reg_disp_placeholder>;
+		vddi-supply = <&reg_disp_placeholder>;
+		vddd-supply = <&reg_disp_placeholder>;
+	};
 };
 
 /*
