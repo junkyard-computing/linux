@@ -1562,7 +1562,7 @@ struct exynos_dqe *exynos_dqe_register(struct decon_device *decon)
 	INIT_LIST_HEAD(&dqe->state.hist_pending_events_list);
 
 	scnprintf(dqe_name, MAX_DQE_NAME_SIZE, "dqe%u", decon->id);
-	dqe->dqe_class = class_create(THIS_MODULE, dqe_name);
+	dqe->dqe_class = class_create(dqe_name);
 	if (IS_ERR(dqe->dqe_class)) {
 		pr_err("failed to create dqe class\n");
 		return NULL;

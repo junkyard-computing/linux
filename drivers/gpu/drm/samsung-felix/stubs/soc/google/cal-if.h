@@ -13,4 +13,6 @@ static inline int cal_clk_setrate(unsigned int id, unsigned long rate) { return 
 static inline unsigned long cal_clk_getrate(unsigned int id) { return 0; }
 static inline int cal_clk_enable(unsigned int id) { return 0; }
 static inline int cal_clk_disable(unsigned int id) { return 0; }
+static inline unsigned long cal_dfs_get_max_freq(unsigned int id) { return 0; }
+#define ACPM_DVFS_DISP 0
 #endif
