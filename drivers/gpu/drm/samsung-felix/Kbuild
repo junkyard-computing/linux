@@ -23,3 +23,7 @@ obj-$(CONFIG_DRM_SAMSUNG_FELIX) += exynos-panel.o
 exynos-panel-y := \
 	panel/panel-samsung-drv.o panel/panel-common.o \
 	panel/panel-samsung-ea8182-f10.o
+
+# DSIM D-PHY (samsung,mipi-phy-m4m4) — separate module; must bind before DSIM
+# probes so devm_phy_get("dsim_dphy") resolves.
+obj-$(CONFIG_DRM_SAMSUNG_FELIX) += samsung-mipi-dphy.o
