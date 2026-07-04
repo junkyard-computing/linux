@@ -1030,7 +1030,6 @@ static struct drm_driver exynos_drm_driver = {
 	.fops			   = &exynos_drm_driver_fops,
 	.name			   = DRIVER_NAME,
 	.desc			   = DRIVER_DESC,
-	.date			   = DRIVER_DATE,
 	.major			   = DRIVER_MAJOR,
 	.minor			   = DRIVER_MINOR,
 };
@@ -1269,10 +1268,10 @@ static int exynos_drm_platform_probe(struct platform_device *pdev)
 					       match);
 }
 
-static int exynos_drm_platform_remove(struct platform_device *pdev)
+static void exynos_drm_platform_remove(struct platform_device *pdev)
 {
 	component_master_del(&pdev->dev, &exynos_drm_ops);
-	return 0;
+	return;
 }
 
 static void exynos_drm_platform_shutdown(struct platform_device *pdev)
@@ -1401,5 +1400,5 @@ MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
 MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
 MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
 MODULE_DESCRIPTION("Samsung SoC DRM Driver");
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");
 MODULE_LICENSE("GPL");
