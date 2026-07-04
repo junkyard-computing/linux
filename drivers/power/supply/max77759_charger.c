@@ -353,9 +353,15 @@ static int set_input_current_limit(struct max77759_charger *chg, int ilim_ua)
 
 	linear_range_get_selector_within(chgin_ilim_ranges, ilim_ua, &regval);
 
+	/*
+	 * Also set NO_AUTOIBUS so the charger honors CHGIN_ILIM instead of
+	 * auto-throttling the input to ~500mA (which starves PD charging).
+	 */
 	return regmap_update_bits(chg->regmap, MAX77759_CHGR_REG_CHG_CNFG_09,
-				  MAX77759_CHGR_REG_CHG_CNFG_09_CHGIN_ILIM,
-				  regval);
+				  MAX77759_CHGR_REG_CHG_CNFG_09_CHGIN_ILIM |
+				  MAX77759_CHGR_REG_CHG_CNFG_09_NO_AUTOIBUS,
+				  regval |
+				  MAX77759_CHGR_REG_CHG_CNFG_09_NO_AUTOIBUS);
 }
 
 static const enum power_supply_property max77759_charger_props[] = {
