@@ -10,6 +10,16 @@
  * Free Software Foundation;  either version 2 of the  License, or (at your
  * option) any later version.
  *
+ * Mainline bring-up note (felix outer-screen port):
+ *   The original AOSP driver backed every GEM buffer with the ION/dma-heap
+ *   "system" heap and mapped it through the DPU SYSMMU (iommu_client). The
+ *   mainline gs201 port has no sysmmu_dpu node, so buffers must be physically
+ *   contiguous and the DPU DMA consumes the physical address directly. This
+ *   file is reworked to allocate write-combine coherent (CMA-backed) memory
+ *   via dma_alloc_wc(); exynos_gem_obj->dma_addr is the DPU-visible scanout
+ *   address. Imported dma-bufs (prime) still go through the sg_table path.
+ *   The struct exynos_drm_gem and all ->dma_addr/->vaddr consumers are
+ *   unchanged, so fb/dqe scanout code needs no edits.
  */
 #define pr_fmt(fmt)  "%s: " fmt, __func__
 
@@ -17,38 +27,27 @@
 #include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/mm_types.h>
-#include <linux/dma-heap.h>
+#include <linux/dma-mapping.h>
 
 #include "exynos_drm_dsim.h"
 #include "exynos_drm_gem.h"
 
-static void exynos_drm_gem_unmap(struct exynos_drm_gem *exynos_gem_obj)
-{
-	struct dma_buf_attachment *attach = exynos_gem_obj->base.import_attach;
-
-	if (!attach)
-		return;
-
-	/* nothing to do for color map buffers */
-	if (exynos_gem_obj->flags & EXYNOS_DRM_GEM_FLAG_COLORMAP)
-		return;
-}
-
 void exynos_drm_gem_free_object(struct drm_gem_object *obj)
 {
 	struct exynos_drm_gem *exynos_gem_obj = to_exynos_gem(obj);
-	struct dma_buf *dma_buf;
-
-	exynos_drm_gem_unmap(exynos_gem_obj);
 
 	if (obj->import_attach) {
-		dma_buf = obj->import_attach->dmabuf;
-		if (dma_buf && exynos_gem_obj->vaddr) {
-			struct iosys_map map = IOSYS_MAP_INIT_VADDR(exynos_gem_obj->vaddr);
-			dma_buf_vunmap(dma_buf, &map);
+		/* imported dma-buf: undo the vmap + sg import */
+		if (exynos_gem_obj->vaddr) {
+			struct iosys_map map =
+				IOSYS_MAP_INIT_VADDR(exynos_gem_obj->vaddr);
+			dma_buf_vunmap(obj->import_attach->dmabuf, &map);
 		}
-
 		drm_prime_gem_destroy(obj, exynos_gem_obj->sgt);
+	} else if (exynos_gem_obj->vaddr) {
+		/* locally allocated CMA/coherent buffer */
+		dma_free_wc(obj->dev->dev, obj->size, exynos_gem_obj->vaddr,
+			    exynos_gem_obj->dma_addr);
 	}
 
 	drm_gem_object_release(&exynos_gem_obj->base);
@@ -61,21 +60,48 @@ void *exynos_drm_gem_get_vaddr(struct exynos_drm_gem *exynos_gem_obj)
 	struct iosys_map map;
 	int ret;
 
+	/* local CMA buffers already carry a kernel mapping from dma_alloc_wc */
+	if (exynos_gem_obj->vaddr)
+		return exynos_gem_obj->vaddr;
+
 	if (WARN_ON(!attach))
 		return NULL;
 
-	if (!exynos_gem_obj->vaddr) {
-		ret = dma_buf_vmap(attach->dmabuf, &map);
-		if (ret) {
-			pr_err("Failed to map virtual address\n");
-			return NULL;
-		}
-
-		exynos_gem_obj->vaddr = map.vaddr;
-		pr_debug("mapped vaddr: %pK\n", exynos_gem_obj->vaddr);
+	ret = dma_buf_vmap(attach->dmabuf, &map);
+	if (ret) {
+		pr_err("Failed to map virtual address\n");
+		return NULL;
 	}
 
+	exynos_gem_obj->vaddr = map.vaddr;
+	pr_debug("mapped vaddr: %pK\n", exynos_gem_obj->vaddr);
+
 	return exynos_gem_obj->vaddr;
+}
+
+static int exynos_drm_gem_object_mmap(struct drm_gem_object *obj,
+				      struct vm_area_struct *vma)
+{
+	struct exynos_drm_gem *exynos_gem_obj = to_exynos_gem(obj);
+	int ret;
+
+	/*
+	 * Turn the DRM fake buffer offset into a real page offset and clear the
+	 * VM_PFNMAP flag that drm_gem_mmap() set (mirrors drm_gem_dma_mmap()).
+	 */
+	vma->vm_pgoff -= drm_vma_node_start(&obj->vma_node);
+	vm_flags_mod(vma, VM_DONTEXPAND, VM_PFNMAP);
+
+	if (obj->import_attach)
+		ret = dma_buf_mmap(obj->import_attach->dmabuf, vma, 0);
+	else
+		ret = dma_mmap_wc(obj->dev->dev, vma, exynos_gem_obj->vaddr,
+				  exynos_gem_obj->dma_addr,
+				  vma->vm_end - vma->vm_start);
+	if (ret)
+		pr_err("Failed to mmap gem buffer: %d\n", ret);
+
+	return ret;
 }
 
 static const struct vm_operations_struct exynos_drm_gem_vm_ops = {
@@ -85,6 +111,7 @@ static const struct vm_operations_struct exynos_drm_gem_vm_ops = {
 
 static const struct drm_gem_object_funcs exynos_drm_gem_object_funcs = {
 	.free = exynos_drm_gem_free_object,
+	.mmap = exynos_drm_gem_object_mmap,
 	.vm_ops = &exynos_drm_gem_vm_ops,
 };
 
@@ -140,9 +167,9 @@ static int exynos_drm_gem_create(struct drm_device *dev, struct drm_file *filep,
 				 size_t size, unsigned int flags,
 				 unsigned int *gem_handle)
 {
-	struct dma_heap *dma_heap;
-	struct dma_buf *dmabuf;
-	struct drm_gem_object *obj;
+	struct exynos_drm_gem *exynos_gem_obj;
+	void *vaddr;
+	dma_addr_t dma_addr;
 	int ret;
 
 	if (flags & EXYNOS_DRM_GEM_FLAG_COLORMAP) {
@@ -150,41 +177,29 @@ static int exynos_drm_gem_create(struct drm_device *dev, struct drm_file *filep,
 		return -EINVAL;
 	}
 
-	dma_heap = dma_heap_find("system");
-	if (!dma_heap) {
-		pr_err("Failed to find DMA-BUF system heap\n");
-		return -EINVAL;
+	exynos_gem_obj = exynos_drm_gem_alloc(dev, size, flags);
+	if (IS_ERR(exynos_gem_obj))
+		return PTR_ERR(exynos_gem_obj);
+
+	vaddr = dma_alloc_wc(dev->dev, size, &dma_addr,
+			     GFP_KERNEL | __GFP_NOWARN);
+	if (!vaddr) {
+		pr_err("Failed to allocate %#zx bytes of contiguous memory\n",
+		       size);
+		/* nothing mapped yet -> free_object() won't dma_free */
+		drm_gem_object_put(&exynos_gem_obj->base);
+		return -ENOMEM;
 	}
 
-	dmabuf = dma_heap_buffer_alloc(dma_heap, size, O_RDWR, 0);
-	dma_heap_put(dma_heap);
-	if (IS_ERR(dmabuf)) {
-		pr_err("Failed to allocate %#zx bytes from DMA-BUF system heap\n", size);
-		return PTR_ERR(dmabuf);
-	}
+	exynos_gem_obj->vaddr = vaddr;
+	exynos_gem_obj->dma_addr = dma_addr;
 
-	obj = exynos_drm_gem_prime_import(dev, dmabuf);
-	if (IS_ERR(obj)) {
-		pr_err("Unable to import created DMA-BUF heap buffer\n");
-		ret = PTR_ERR(obj);
-	} else {
-		struct exynos_drm_gem *exynos_gem_obj = to_exynos_gem(obj);
-
-		exynos_gem_obj->flags |= flags;
-
-		ret = drm_gem_handle_create(filep, obj, gem_handle);
-		if (ret) {
-			pr_err("Failed to create a handle of GEM\n");
-			/* drop ref from import */
-			dma_buf_put(dmabuf);
-		}
-
-		/* drop ref from import - handle holds it now */
-		drm_gem_object_put(obj);
-	}
-
-	/* drop ref from alloc - import holds it now */
-	dma_buf_put(dmabuf);
+	ret = drm_gem_handle_create(filep, &exynos_gem_obj->base, gem_handle);
+	/* handle now holds a ref (on success); drop our creation ref either way.
+	 * On failure the last put frees the buffer via free_object(). */
+	drm_gem_object_put(&exynos_gem_obj->base);
+	if (ret)
+		pr_err("Failed to create a handle of GEM\n");
 
 	return ret;
 }
@@ -215,9 +230,9 @@ int exynos_drm_gem_dumb_create(struct drm_file *file_priv,
 struct drm_gem_object *exynos_drm_gem_prime_import(struct drm_device *dev,
 						   struct dma_buf *dma_buf)
 {
-	struct exynos_drm_private *priv = drm_to_exynos_dev(dev);
-
-	return drm_gem_prime_import_dev(dev, dma_buf, priv->iommu_client);
+	/* No DPU IOMMU on mainline: attach against the DRM platform device and
+	 * consume the direct-mapped physical address for scanout. */
+	return drm_gem_prime_import(dev, dma_buf);
 }
 
 struct drm_gem_object *exynos_drm_gem_fd_to_obj(struct drm_device *dev, int val)
@@ -236,52 +251,23 @@ struct drm_gem_object *exynos_drm_gem_fd_to_obj(struct drm_device *dev, int val)
 	return obj;
 }
 
-static int exynos_drm_gem_mmap_object(struct exynos_drm_gem *exynos_gem_obj,
-			       struct vm_area_struct *vma)
-{
-	struct dma_buf_attachment *attach = exynos_gem_obj->base.import_attach;
-	int ret;
-
-
-	if (unlikely(!attach)) {
-		pr_err("Invalid mmap with empty attach!\n");
-		return (-EINVAL);
-	}
-
-	ret = dma_buf_mmap(attach->dmabuf, vma, 0);
-	if (ret)
-		pr_err("Failed to mmap imported buffer: %d\n", ret);
-
-	return ret;
-}
-
 int exynos_drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	int ret;
 
-	/* NOTE: drm_gem_mmap() always set the vm_page_prot to writecombine */
+	/* drm_gem_mmap() looks up the object by fake offset and dispatches to
+	 * obj->funcs->mmap (exynos_drm_gem_object_mmap). */
 	ret = drm_gem_mmap(filp, vma);
-	if (ret < 0)
-		goto err;
-
-	ret =
-	    exynos_drm_gem_mmap_object(to_exynos_gem(vma->vm_private_data),
-				       vma);
-	if (ret)
-		goto err_mmap;
+	if (ret < 0) {
+		pr_err("Failed to mmap with offset %lu.\n", vma->vm_pgoff);
+		return ret;
+	}
 
 	pr_debug("mmaped the offset %lu of size %lu to %#lx\n",
 			 vma->vm_pgoff, vma->vm_end - vma->vm_start,
 			 vma->vm_start);
 
 	return 0;
-err_mmap:
-	/* release the resources referenced by drm_gem_mmap() */
-	drm_gem_vm_close(vma);
-err:
-	pr_err("Failed to mmap with offset %lu.\n", vma->vm_pgoff);
-
-	return ret;
 }
 
 static int exynos_drm_gem_offset(struct drm_device *dev, struct drm_file *filep,
@@ -290,14 +276,11 @@ static int exynos_drm_gem_offset(struct drm_device *dev, struct drm_file *filep,
 	struct drm_gem_object *obj;
 	int ret = 0;
 
-
-
 	obj = drm_gem_object_lookup(filep, handle);
 	if (!obj) {
 		pr_err("Failed to lookup gem object from handle %u.\n",
 			  handle);
-		ret = -EINVAL;
-		goto unlock;
+		return -EINVAL;
 	}
 
 	ret = drm_gem_create_mmap_offset(obj);
@@ -310,8 +293,6 @@ static int exynos_drm_gem_offset(struct drm_device *dev, struct drm_file *filep,
 	*offset = drm_vma_node_offset_addr(&obj->vma_node);
 out:
 	drm_gem_object_put(obj);
-unlock:
-
 
 	return ret;
 }
