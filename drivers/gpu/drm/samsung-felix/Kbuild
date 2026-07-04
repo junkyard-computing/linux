@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0
+# felix outer-display graft (AOSP samsung DRM -> mainline 7.1)
+# stubs/ must precede so <soc/google/*.h>, <linux/soc/samsung/exynos-smc.h>,
+# <dt-bindings/soc/google/*-devfreq.h> resolve to our no-ops.
+ccflags-y += -include $(src)/compat.h
+ccflags-y += -I$(src)/stubs
+ccflags-y += -I$(src)/cal_common -I$(src)/cal_9845 -I$(src)/cal_9855
+ccflags-y += -I$(src)/include/uapi -I$(src)/common/include
+ccflags-y += -DCONFIG_SOC_GS201=1
+
+obj-$(CONFIG_DRM_SAMSUNG_FELIX) += exynos-drm.o
+exynos-drm-y := \
+	exynos_drm_drv.o exynos_drm_crtc.o exynos_drm_connector.o \
+	exynos_drm_decon.o exynos_drm_dsim.o exynos_drm_dpp.o \
+	exynos_drm_plane.o exynos_drm_fb.o exynos_drm_format.o exynos_drm_gem.o \
+	exynos_drm_dqe.o exynos_drm_bts.o exynos_drm_debug.o \
+	exynos_drm_hibernation.o exynos_drm_partial.o exynos_drm_recovery.o \
+	cal_9845/decon_reg.o cal_9845/dsim_reg.o cal_9845/dpp_reg.o \
+	cal_9845/dqe_reg.o cal_9845/hdr_reg.o \
+	cal_9855/decon_reg.o cal_9855/dpp_reg.o cal_9855/dqe_reg.o
+
+obj-$(CONFIG_DRM_SAMSUNG_FELIX) += exynos-panel.o
+exynos-panel-y := \
+	panel/panel-samsung-drv.o panel/panel-common.o \
+	panel/panel-samsung-ea8182-f10.o
