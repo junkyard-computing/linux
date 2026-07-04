@@ -557,12 +557,12 @@ static int exynos_atomic_helper_wait_for_fences(struct drm_device *dev,
 			}
 			print_drm_plane_state_info(&p, new_plane_state);
 
-			spin_lock_irq(fence->lock);
+
 			drm_printf(&p, "fence: %s-%s %llu-%llu status:%s\n",
 				fence->ops ? fence->ops->get_driver_name(fence) : "none",
 				fence->ops ? fence->ops->get_timeline_name(fence) : "none",
 				fence->context, fence->seqno,
-				dma_fence_get_status_locked(fence) < 0 ? "error" : "active");
+				dma_fence_get_status(fence) < 0 ? "error" : "active");
 			if (test_bit(DMA_FENCE_FLAG_TIMESTAMP_BIT, &fence->flags)) {
 				struct timespec64 ts64 = ktime_to_timespec64(fence->timestamp);
 				drm_printf(&p, "fence: timestamp:%lld.%09ld\n",
@@ -570,7 +570,7 @@ static int exynos_atomic_helper_wait_for_fences(struct drm_device *dev,
 			}
 			if (fence->error)
 				drm_printf(&p, "fence: err=%d\n", fence->error);
-			spin_unlock_irq(fence->lock);
+
 
 			tmo = 0;
 			err = -ETIMEDOUT;
@@ -1153,8 +1153,8 @@ static int exynos_drm_bind(struct device *dev)
 
 	priv_state->available_win_mask = BIT(MAX_WIN_PER_DECON) - 1;
 
-	drm_atomic_private_obj_init(drm, &private->obj, &priv_state->base,
-				    &exynos_priv_state_funcs);
+	drm_atomic_private_obj_init(drm, &private->obj, &exynos_priv_state_funcs);
+	private->obj.state = &priv_state->base;
 
 	/* Try to bind all sub drivers. */
 	ret = component_bind_all(dev, drm);
