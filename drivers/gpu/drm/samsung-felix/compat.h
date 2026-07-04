@@ -17,3 +17,19 @@
 /* drm_debug_printer(prefix) -> drm_dbg_printer(dev,category,prefix) */
 #include <drm/drm_print.h>
 #define drm_debug_printer(prefix) drm_dbg_printer(NULL, DRM_UT_DRIVER, (prefix))
+
+/* mainline moved several APIs behind explicit includes the AOSP tree got
+ * transitively; force them here. */
+#include <linux/debugfs.h>
+#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
+#include <linux/string.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/dma-fence.h>
+/* strlcpy removed in mainline (6.8); strscpy is the replacement. */
+#ifndef strlcpy
+#define strlcpy strscpy
+#endif
+/* exynos idle-IP tracking (soc/google) — no-op for bring-up */
+static inline int exynos_get_idle_ip_index(const char *name, int a) { return -1; }
+static inline void exynos_update_ip_idle_status(int idx, int status) {}
