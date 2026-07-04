@@ -444,6 +444,163 @@
 	};
 
 	/*
+	 * Display (DPU) — OUTER/cover panel path DECON1 -> DSIM1 -> ea8182-f10.
+	 * Drives the grafted AOSP samsung DRM (drivers/gpu/drm/samsung-felix).
+	 * decon/dsim clocks + power are managed by the CAL layer via ACPM/CMU
+	 * (no DT clock phandles, no genpd) — same "bootloader gate + CAL" model
+	 * the gs201 fuel-gauge/USI stubs use. sysmmu_dpu is absent on mainline
+	 * so GEM uses CMA (no iommus). decon1/dsim1 stay status="disabled" until
+	 * the ACPM/EL3 pd_dpu power-on and the DSIM D-PHY shim land — probing
+	 * DECON MMIO on an unpowered domain external-aborts (headless hang).
+	 */
+	disp_ss: disp-ss@1c221000 {
+		compatible = "samsung,exynos9-disp_ss";
+		reg = <0x0 0x1c221000 0x10>;
+		reg-names = "sys";
+	};
+
+	mipi_phy_dsim1: dphy@1c2e0000 {
+		compatible = "samsung,mipi-phy-m4m4";
+		isolation = <0x3eb8>;
+		owner = <0>;		/* 0: DSI, 1: CSI */
+		#phy-cells = <1>;
+	};
+
+	drmdpp0: drmdpp@1c0b0000 {	/* L0 */
+		compatible = "samsung,exynos-dpp";
+		reg = <0x0 0x1c0b0000 0x1000>, <0x0 0x1c0d0000 0x1000>, <0x0 0x1c0e0000 0x1000>;
+		reg-names = "dma", "dpp", "hdr";
+		interrupts = <GIC_SPI 262 IRQ_TYPE_LEVEL_HIGH>, <GIC_SPI 271 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dma", "dpp";
+		attr = <0x50047>;
+		port = <0>;
+		scale_down = <1>;
+		scale_up = <1>;
+		dpp,id = <0>;
+	};
+	drmdpp1: drmdpp@1c0b1000 {	/* L1 */
+		compatible = "samsung,exynos-dpp";
+		reg = <0x0 0x1c0b1000 0x1000>, <0x0 0x1c0d1000 0x1000>, <0x0 0x1c0e1000 0x1000>;
+		reg-names = "dma", "dpp", "hdr";
+		interrupts = <GIC_SPI 263 IRQ_TYPE_LEVEL_HIGH>, <GIC_SPI 272 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dma", "dpp";
+		attr = <0x50047>;
+		port = <0>;
+		scale_down = <1>;
+		scale_up = <1>;
+		dpp,id = <1>;
+	};
+	drmdpp2: drmdpp@1c0b2000 {	/* L2 */
+		compatible = "samsung,exynos-dpp";
+		reg = <0x0 0x1c0b2000 0x1000>, <0x0 0x1c0d2000 0x1000>, <0x0 0x1c0e2000 0x1000>;
+		reg-names = "dma", "dpp", "hdr";
+		interrupts = <GIC_SPI 264 IRQ_TYPE_LEVEL_HIGH>, <GIC_SPI 273 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dma", "dpp";
+		attr = <0x50047>;
+		port = <1>;
+		scale_down = <1>;
+		scale_up = <1>;
+		dpp,id = <2>;
+	};
+	drmdpp3: drmdpp@1c0b3000 {	/* L3 */
+		compatible = "samsung,exynos-dpp";
+		reg = <0x0 0x1c0b3000 0x1000>, <0x0 0x1c0d3000 0x1000>, <0x0 0x1c0e3000 0x1000>;
+		reg-names = "dma", "dpp", "hdr";
+		interrupts = <GIC_SPI 265 IRQ_TYPE_LEVEL_HIGH>, <GIC_SPI 274 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dma", "dpp";
+		attr = <0x50047>;
+		port = <1>;
+		scale_down = <1>;
+		scale_up = <1>;
+		dpp,id = <3>;
+	};
+	drmdpp4: drmdpp@1c0b4000 {	/* L4 */
+		compatible = "samsung,exynos-dpp";
+		reg = <0x0 0x1c0b4000 0x1000>, <0x0 0x1c0d4000 0x1000>, <0x0 0x1c0e4000 0x1000>;
+		reg-names = "dma", "dpp", "hdr";
+		interrupts = <GIC_SPI 266 IRQ_TYPE_LEVEL_HIGH>, <GIC_SPI 275 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dma", "dpp";
+		attr = <0x50047>;
+		port = <0>;
+		scale_down = <1>;
+		scale_up = <1>;
+		dpp,id = <4>;
+	};
+	drmdpp5: drmdpp@1c0b5000 {	/* L5 */
+		compatible = "samsung,exynos-dpp";
+		reg = <0x0 0x1c0b5000 0x1000>, <0x0 0x1c0d5000 0x1000>, <0x0 0x1c0e5000 0x1000>;
+		reg-names = "dma", "dpp", "hdr";
+		interrupts = <GIC_SPI 267 IRQ_TYPE_LEVEL_HIGH>, <GIC_SPI 276 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dma", "dpp";
+		attr = <0x50047>;
+		port = <1>;
+		scale_down = <1>;
+		scale_up = <1>;
+		dpp,id = <5>;
+	};
+
+	drmdecon1: drmdecon@1c241000 {
+		status = "disabled";		/* enable after pd_dpu power-on lands */
+		compatible = "samsung,exynos-decon";
+		reg = <0x0 0x1c241000 0x6000>,	/* MAIN */
+		      <0x0 0x1c250000 0x6000>,	/* WIN */
+		      <0x0 0x1c260000 0x10000>,	/* SUB */
+		      <0x0 0x1c280000 0x6000>,	/* WINCON */
+		      <0x0 0x1c2b0000 0xf000>,	/* DQE1 */
+		      <0x0 0x1c0bf000 0x1000>;	/* CGC_DMA */
+		reg-names = "main", "win", "sub", "wincon", "dqe", "cgc-dma";
+		decon,id = <1>;
+		cgc-dma,id = <10>;
+		interrupts = <GIC_SPI 246 IRQ_TYPE_LEVEL_HIGH>,		/* frame_start */
+			     <GIC_SPI 245 IRQ_TYPE_LEVEL_HIGH>,		/* frame_done */
+			     <GIC_SPI 244 IRQ_TYPE_LEVEL_HIGH>,		/* extra */
+			     <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH>,		/* dimming_start */
+			     <GIC_SPI 242 IRQ_TYPE_LEVEL_HIGH>,		/* dimming_end */
+			     <GIC_SPI 261 IRQ_TYPE_LEVEL_HIGH>;		/* cgc-dma */
+		interrupt-names = "frame_start", "frame_done", "extra",
+				  "dimming_start", "dimming_end", "cgc-dma";
+		max_win = <6>;
+		ppc = <2>;
+		ppc_rotator = <4>;
+		ppc_scaler = <2>;
+		delay_comp = <4>;
+		delay_scaler = <3>;
+		bus_width = <16>;
+		bus_util = <65>;
+		rot_util = <60>;
+		dfs_lv_cnt = <7>;
+		dfs_lv = <664000 533000 465000 400000 310000 267000 134000>;
+		rd_en = <1>;
+		rd_hi_thres = <0x800>;
+		rd_lo_thres = <0x400>;
+		rd_wait_cycle = <0x11>;
+		dta_en = <1>;
+		dta_hi_thres = <0x3200>;
+		dta_lo_thres = <0x600>;
+		dpps = <&drmdpp0 &drmdpp1 &drmdpp2 &drmdpp3 &drmdpp4 &drmdpp5>;
+		/* DSI0(0x1), DSI1(0x2), VIDI(0x8) */
+		connector = <0x1 0x2 0x8>;
+	};
+
+	drmdsim1: drmdsim@1c2d0000 {
+		status = "disabled";		/* enable after DSIM D-PHY shim lands */
+		compatible = "samsung,exynos-dsim";
+		reg = <0x0 0x1c2d0000 0x300>,	/* DSI */
+		      <0x0 0x1c2e0900 0x700>,	/* M4M4S0 PHY */
+		      <0x0 0x1c2e0000 0x100>;	/* M4M4S0 PHY BIAS */
+		reg-names = "dsi", "dphy", "dphy-extra";
+		dsim,id = <1>;
+		interrupts = <GIC_SPI 251 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dsim";
+		phys = <&mipi_phy_dsim1 0>;
+		phy-names = "dsim_dphy";
+		te_from = <1>;
+		te-gpio = <&gpp0 4 0xf>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+
+	/*
 	 * USI14 (PERIC1) in HS-I2C mode — the felix MAX77759 PMIC/charger/
 	 * fuel-gauge/TCPC live on this bus (pmic@66, chrg@69, fg@36, tcpc@25).
 	 * Same SoC block as gs101's usi13/hsi2c@10d60000; gs201 differs only in
