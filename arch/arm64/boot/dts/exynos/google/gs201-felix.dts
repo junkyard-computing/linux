@@ -558,6 +558,16 @@
 		compatible = "maxim,max17201";
 		reg = <0x36>;
 		label = "maxfg_base";
+		/*
+		 * The base pack's gauge has no 0x0b nvram companion, so its
+		 * thermistor cal is volatile and reverts to garbage on power
+		 * loss (Temp freezes / mis-reads). Golden felix values, from
+		 * the AOSP battery-data model; the driver reprograms them and
+		 * clears Config.Tex at probe.
+		 */
+		maxim,thermistor-tgain = /bits/ 16 <0xED51>;
+		maxim,thermistor-toff = /bits/ 16 <0x1EBA>;
+		maxim,thermistor-tcurve = /bits/ 16 <0x0014>;
 	};
 };
 
