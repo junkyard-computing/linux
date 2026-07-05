@@ -53,8 +53,13 @@
 #define MAX172XX_DEV_NAME_TYPE_MAX17201	BIT(0)
 #define MAX172XX_DEV_NAME_TYPE_MAX17205	(BIT(0) | BIT(2))
 #define MAX172XX_QR_TABLE10		0x22
+#define MAX172XX_CONFIG			0x1D	/* Config */
+#define MAX172XX_CONFIG_TEX		BIT(8)	/* Temp measured externally (host-written) */
+#define MAX172XX_TGAIN			0x2C	/* Thermistor gain */
+#define MAX172XX_TOFF			0x2D	/* Thermistor offset */
 #define MAX172XX_BATT			0xDA	/* Battery voltage */
 #define MAX172XX_ATAVCAP		0xDF
+#define MAX172XX_TCURVE			0xB9	/* Thermistor curve */
 
 static const char *const max1720x_manufacturer = "Maxim Integrated";
 static const char *const max17201_model = "MAX17201";
@@ -618,6 +623,40 @@ static const struct power_supply_desc max1720x_bat_desc = {
 	.get_property = max1720x_battery_get_property,
 };
 
+/*
+ * (Re)program the external-thermistor calibration from DT.
+ *
+ * A gauge with a 0x0b nvmem companion restores its thermistor cal from nvram on
+ * every power-up, so it needs nothing here. The felix base pack's gauge has no
+ * such companion: its cal lives only in volatile shadow RAM, so any power loss
+ * reverts it to defaults — Config.Tex gets set (the chip then stops measuring
+ * the thermistor and freezes Temp at a host-written value) and TGain/TOff/TCurve
+ * drift — which silently corrupts the only thermal sensor on this platform.
+ *
+ * When the DT supplies the golden cal, rewrite it and clear Config.Tex at probe
+ * so the reading is correct regardless of power history. Absent the properties
+ * (e.g. the nvram-backed secondary pack) this is a no-op.
+ */
+static void max1720x_program_thermistor_cal(struct max1720x_device_info *info,
+					    struct device *dev)
+{
+	u16 tgain, toff, tcurve;
+
+	if (device_property_read_u16(dev, "maxim,thermistor-tgain", &tgain))
+		return;
+	if (device_property_read_u16(dev, "maxim,thermistor-toff", &toff) ||
+	    device_property_read_u16(dev, "maxim,thermistor-tcurve", &tcurve)) {
+		dev_warn(dev, "incomplete thermistor cal in DT; skipping\n");
+		return;
+	}
+
+	if (regmap_write(info->regmap, MAX172XX_TGAIN, tgain) ||
+	    regmap_write(info->regmap, MAX172XX_TOFF, toff) ||
+	    regmap_write(info->regmap, MAX172XX_TCURVE, tcurve) ||
+	    regmap_clear_bits(info->regmap, MAX172XX_CONFIG, MAX172XX_CONFIG_TEX))
+		dev_warn(dev, "failed to program thermistor cal\n");
+}
+
 static int max1720x_probe(struct i2c_client *client)
 {
 	struct power_supply_config psy_cfg = {};
@@ -650,6 +689,9 @@ static int max1720x_probe(struct i2c_client *client)
 			 ret);
 		info->rsense = 1000; /* 10 mOhm, in 10^-5 Ohm */
 	}
+
+	/* Restore volatile thermistor cal for gauges without an nvram companion. */
+	max1720x_program_thermistor_cal(info, dev);
 
 	/*
 	 * Copy the template desc so a per-instance name can be applied — felix
