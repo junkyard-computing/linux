@@ -466,6 +466,27 @@
 		#phy-cells = <1>;
 	};
 
+	/*
+	 * DSI PLL params keyed by mode-name. dsim_mode_valid() rejects any
+	 * display mode (MODE_NOMODE) for which dsim_get_clock_mode() finds no
+	 * matching entry here, so without this node the ea8182 1080x2092 modes
+	 * are pruned and no modeset is possible. pmsk/hs-clk/esc-clk are the
+	 * AOSP felix values (gs101-display-timing.dtsi 1080x2092). The driver
+	 * prefix-matches "1080x2092" so this one entry covers @60 and @120.
+	 */
+	dsim_modes: dsim_modes {
+		dsim-modes {
+			mode_1080x2092 {
+				mode-name = "1080x2092";
+				pmsk = <
+					0x2 0xEE 0x3 0xA155 /* p m s k */
+					>;
+				hs-clk = <730>;
+				esc-clk = <20>;
+			};
+		};
+	};
+
 	drmdpp0: drmdpp@1c0b0000 {	/* L0 */
 		compatible = "samsung,exynos-dpp";
 		reg = <0x0 0x1c0b0000 0x1000>, <0x0 0x1c0d0000 0x1000>, <0x0 0x1c0e0000 0x1000>;
@@ -540,7 +561,7 @@
 	};
 
 	drmdecon1: drmdecon@1c241000 {
-		status = "disabled";		/* enable after pd_dpu power-on lands */
+		status = "okay";
 		compatible = "samsung,exynos-decon";
 		reg = <0x0 0x1c241000 0x6000>,	/* MAIN */
 		      <0x0 0x1c250000 0x6000>,	/* WIN */
@@ -583,7 +604,7 @@
 	};
 
 	drmdsim1: drmdsim@1c2d0000 {
-		status = "disabled";		/* enable after DSIM D-PHY shim lands */
+		status = "okay";
 		compatible = "samsung,exynos-dsim";
 		reg = <0x0 0x1c2d0000 0x300>,	/* DSI */
 		      <0x0 0x1c2e0900 0x700>,	/* M4M4S0 PHY */
@@ -594,6 +615,7 @@
 		interrupt-names = "dsim";
 		phys = <&mipi_phy_dsim1 0>;
 		phy-names = "dsim_dphy";
+		dsim_mode = <&dsim_modes>;
 		te_from = <1>;
 		te-gpio = <&gpp0 4 0xf>;
 		#address-cells = <1>;
@@ -1096,6 +1118,21 @@
 		#gpio-cells = <2>;
 		interrupt-controller;
 		#interrupt-cells = <2>;
+
+		/*
+		 * gpp23 bank — the outer panel's reset line is gpp23-0
+		 * (see gs201-felix.dts panel@0 reset-gpios). Like the gpp0
+		 * UFS-VCC case above, the Samsung pinctrl driver needs an
+		 * explicit bank subnode for `<&gpp23 0 ...>` to resolve;
+		 * without it the panel's devm_gpiod_get("reset") fails and
+		 * the ea8182 driver aborts probe.
+		 */
+		gpp23: gpp23-gpio-bank {
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
 	};
 
 	/* 6: GPIO_HSI1 */
