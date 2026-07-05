@@ -136,6 +136,16 @@ static int acpm_clk_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(acpm_handle),
 				     "Failed to get acpm handle\n");
 
+	/*
+	 * This device is spawned by the ACPM firmware driver via
+	 * platform_device_register_data(), so it has no DT node of its own.
+	 * Borrow the parent ACPM node — which carries #clock-cells = <1> and a
+	 * phandle — so devm_of_clk_add_hw_provider() below registers the
+	 * provider against it and the DVFS clocks become referenceable by
+	 * phandle (e.g. the CPU cluster nodes' clocks = <&acpm_ipc ...>).
+	 */
+	device_set_of_node_from_dev(dev, dev->parent);
+
 	const struct acpm_clk_driver_data *drv_data =
 		(const struct acpm_clk_driver_data *)
 		platform_get_device_id(pdev)->driver_data;
