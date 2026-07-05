@@ -39,4 +39,13 @@ config DEVFREQ_EVENT_ROCKCHIP_DFI
 	  This add the devfreq-event driver for Rockchip SoC. It provides DFI
 	  (DDR Monitor Module) driver to count ddr load.
 
+config DEVFREQ_EVENT_GS201_PPC
+	tristate "Google gs201 PPC DEVFREQ event Driver"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	help
+	  This adds the devfreq-event driver for the Google Tensor G2 (gs201)
+	  PPC (Performance Profiling Counter) blocks on the memory-master ports.
+	  It provides bus cycle/transaction counters so exynos-bus can scale MIF
+	  with real memory load.
+
 endif # PM_DEVFREQ_EVENT
