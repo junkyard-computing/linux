@@ -32,6 +32,7 @@
 #include <linux/of_irq.h>
 #include <linux/of_device.h>
 #include <linux/of_gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/of_graph.h>
 #include <linux/phy/phy.h>
 #include <linux/pm_runtime.h>
@@ -1370,13 +1371,13 @@ static int dsim_atomic_check_exynos(const struct dsim_device *dsim,
 		if (!dsim->pinctrl ||
 		    (dsim->te_gpio < 0) || (dsim->te_from >= MAX_DECON_TE_FROM_DDI)) {
 			/*
-			 * Outer-panel bring-up: the HW tearing-effect path isn't
-			 * wired (no dsim pinctrl states in DT; te_gpio unresolved
-			 * because of_get_named_gpio is stubbed). Fall back to
-			 * software trigger instead of failing the whole modeset
+			 * Fallback: if the HW tearing-effect path isn't fully
+			 * wired (dsim pinctrl missing, or te-gpios / te_from
+			 * unresolved) drive frames via sw_trigger (decon
+			 * shadow-update+trigger) instead of failing the modeset
 			 * (-EINVAL here made drmModeSetCrtc fail -> no pixels).
-			 * SW trigger drives frames via decon shadow-update+trigger,
-			 * exactly like the validated first-pixels MMIO poke.
+			 * The outer panel normally takes HW TE off gpp0-4; this
+			 * only trips if that DT/gpiod wiring regresses.
 			 */
 			dsim_warn(dsim, "no HW TE (pinctrl/te_gpio unwired); forcing sw_trigger\n");
 			exynos_conn_state->exynos_mode.sw_trigger = true;
@@ -1973,14 +1974,32 @@ static int dsim_parse_dt(struct dsim_device *dsim)
 	dsim_debug(dsim, "TE from DDI%d\n", dsim->te_from);
 
 	if (!ret) {
-		dsim->te_gpio = of_get_named_gpio(np, "te-gpio", 0);
+		/*
+		 * mainline dropped of_gpio.h / of_get_named_gpio; resolve the
+		 * TE line via gpiod ("te-gpios"). GPIOD_ASIS keeps the pin on
+		 * its EINT alt-function (Samsung pinctrl is non-strict, so the
+		 * request doesn't remux); desc_to_gpio() gives the number the
+		 * decon feeds to gpio_to_irq() for the TE interrupt.
+		 */
+		struct gpio_desc *te_desc =
+			devm_gpiod_get_optional(dsim->dev, "te", GPIOD_ASIS);
+
+		if (IS_ERR(te_desc))
+			te_desc = NULL;
+		dsim->te_gpio = te_desc ? desc_to_gpio(te_desc) : -EINVAL;
 		if (dsim->te_gpio < 0) {
 			dsim_warn(dsim, "failed to get TE gpio\n");
 			dsim->te_from = MAX_DECON_TE_FROM_DDI;
 		}
 	}
 
-	dsim->tout_gpio = of_get_named_gpio(np, "tout-gpio", 0);
+	{
+		struct gpio_desc *tout_desc =
+			devm_gpiod_get_optional(dsim->dev, "tout", GPIOD_ASIS);
+
+		dsim->tout_gpio = !IS_ERR_OR_NULL(tout_desc) ?
+			desc_to_gpio(tout_desc) : -EINVAL;
+	}
 	if (dsim->tout_gpio < 0)
 		dsim_warn(dsim, "failed to get TOUT (TE2) gpio\n");
 
