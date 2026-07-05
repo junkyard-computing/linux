@@ -330,39 +330,55 @@ static int max172xx_current_to_voltage(unsigned int reg)
 	return val * 156252;
 }
 
+/*
+ * Physically-sane Li-ion health limits. We derive health from the measured
+ * temperature and per-cell voltage rather than from the gauge's Status alert
+ * latches (VMN/VMX/TMN/TMX): those latch against the user-programmable
+ * VAlrtTh/TAlrtTh thresholds, and the felix packs ship with those
+ * misconfigured (the base gauge's TAlrtTh selects a +3 degC max-temp alert,
+ * so TMX -> "Overheat" trips at any normal temperature, and a stale min-
+ * voltage latch spuriously reads "Dead"). The thermistor calibration itself
+ * is correct, so the measured Temp/VCell registers are trustworthy.
+ */
+#define MAX172XX_HEALTH_HOT_DDEGC	600	/* 60.0 degC, tenths */
+#define MAX172XX_HEALTH_COLD_DDEGC	0	/*  0.0 degC, tenths */
+#define MAX172XX_HEALTH_OV_UV		4500000	/* 4.50 V per cell */
+#define MAX172XX_HEALTH_DEAD_UV		2500000	/* 2.50 V per cell */
+
 static int max172xx_battery_health(struct max1720x_device_info *info,
 				   unsigned int *health)
 {
-	unsigned int status;
-	int ret;
+	unsigned int reg_val;
+	int temp, vcell, ret;
 
-	ret = regmap_read(info->regmap, MAX172XX_STATUS, &status);
+	ret = regmap_read(info->regmap, MAX172XX_STATUS, &reg_val);
 	if (ret < 0)
 		return ret;
+	if (FIELD_GET(MAX172XX_STATUS_BAT_ABSENT, reg_val)) {
+		*health = POWER_SUPPLY_HEALTH_NO_BATTERY;
+		return 0;
+	}
 
-	if (status & MAX172XX_STATUS_VMN)
-		*health = POWER_SUPPLY_HEALTH_DEAD;
-	else if (status & MAX172XX_STATUS_VMX)
-		*health = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
-	else if (status & MAX172XX_STATUS_TMN)
-		*health = POWER_SUPPLY_HEALTH_COLD;
-	else if (status & MAX172XX_STATUS_TMX)
+	ret = regmap_read(info->regmap, MAX172XX_TEMP, &reg_val);
+	if (ret < 0)
+		return ret;
+	temp = max172xx_temperature_to_ps(reg_val);
+
+	ret = regmap_read(info->regmap, MAX172XX_VCELL, &reg_val);
+	if (ret < 0)
+		return ret;
+	vcell = max172xx_vcell_to_ps(reg_val);
+
+	if (temp >= MAX172XX_HEALTH_HOT_DDEGC)
 		*health = POWER_SUPPLY_HEALTH_OVERHEAT;
-	else if (status & MAX172XX_STATUS_IMX)
-		*health = POWER_SUPPLY_HEALTH_OVERCURRENT;
+	else if (temp <= MAX172XX_HEALTH_COLD_DDEGC)
+		*health = POWER_SUPPLY_HEALTH_COLD;
+	else if (vcell >= MAX172XX_HEALTH_OV_UV)
+		*health = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+	else if (vcell > 0 && vcell <= MAX172XX_HEALTH_DEAD_UV)
+		*health = POWER_SUPPLY_HEALTH_DEAD;
 	else
 		*health = POWER_SUPPLY_HEALTH_GOOD;
-
-	/* Clear events which are not self-clearing to detect next events */
-	if (status > 0 && status != MAX172XX_STATUS_IMX) {
-		ret = regmap_set_bits(info->regmap, MAX172XX_STATUS,
-				      MAX172XX_STATUS_VMN |
-				      MAX172XX_STATUS_VMX |
-				      MAX172XX_STATUS_TMN |
-				      MAX172XX_STATUS_TMX);
-		if (ret < 0)
-			return ret;
-	}
 
 	return 0;
 }
