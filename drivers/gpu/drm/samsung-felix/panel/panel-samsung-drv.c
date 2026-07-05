@@ -980,13 +980,21 @@ int exynos_panel_get_modes(struct drm_panel *panel, struct drm_connector *connec
 		if (!mode)
 			return -ENOMEM;
 
-		if (!mode->name[0])
-			exynos_panel_mode_set_name(mode);
+		/*
+		 * Use the standard DRM "WxH" mode name (drm_mode_set_name)
+		 * instead of the vendor "WxHxR@R" form: userspace tools
+		 * (modetest -s conn:1080x2092) select modes by exact name, and
+		 * the "x60@60" suffix makes them unfindable. The dsim clock
+		 * lookup matches the DT dsim-modes entry by name prefix
+		 * ("1080x2092"), which still holds.
+		 */
+		drm_mode_set_name(mode);
 
 		mode->type |= DRM_MODE_TYPE_DRIVER;
 		drm_mode_probed_add(connector, mode);
 
-		dev_dbg(ctx->dev, "added display mode: %s\n", mode->name);
+		dev_info(ctx->dev, "added display mode: %s (%dx%d@%d)\n", mode->name,
+			 mode->hdisplay, mode->vdisplay, drm_mode_vrefresh(mode));
 
 		if (!preferred_mode || (mode->type & DRM_MODE_TYPE_PREFERRED))
 			preferred_mode = mode;
@@ -2813,12 +2821,20 @@ static int exynos_drm_connector_modes(struct drm_connector *connector)
 	struct exynos_panel *ctx = exynos_connector_to_panel(exynos_connector);
 	int ret;
 
-	ret = drm_panel_get_modes(&ctx->panel, connector);
+	/*
+	 * AOSP never wired drm_panel_funcs.get_modes (it lacks drm_panel_init);
+	 * the mainline helper drm_panel_get_modes() therefore sees a NULL
+	 * ->funcs->get_modes and returns 0 modes, so the connector advertised
+	 * "modes 0" and no modeset was possible. Call the exynos mode-adder
+	 * directly (it drm_mode_probed_add()s ctx->desc->modes).
+	 */
+	ret = exynos_panel_get_modes(&ctx->panel, connector);
 	if (ret < 0) {
 		dev_err(ctx->dev, "failed to get panel display modes\n");
 		return ret;
 	}
 
+	dev_info(ctx->dev, "exynos_drm_connector_modes: %d mode(s) added\n", ret);
 	return ret;
 }
 
@@ -4133,6 +4149,20 @@ static int exynos_panel_bridge_attach(struct drm_bridge *bridge,
 	connector->status = connector_status_connected;
 	if (ctx->desc->exynos_panel_func && ctx->desc->exynos_panel_func->commit_done)
 		ctx->exynos_connector.needs_commit = true;
+
+	/*
+	 * The panel/bridge attaches long after drm_dev_register() (dsim probes
+	 * the panel at runtime), so the connector is created too late to be
+	 * auto-registered by drm_dev_register(). Without an explicit
+	 * drm_connector_register() it never appears in sysfs / to userspace
+	 * (drmModeGetResources returns 0 connectors, modetest can't open it).
+	 */
+	ret = drm_connector_register(connector);
+	if (ret)
+		dev_err(ctx->dev, "failed to register connector (%d)\n", ret);
+	else
+		dev_info(ctx->dev, "exynos connector registered for %s\n",
+			 dev_name(ctx->dev));
 
 	drm_kms_helper_hotplug_event(connector->dev);
 
@@ -5803,6 +5833,19 @@ int exynos_panel_common_init(struct mipi_dsi_device *dsi,
 #ifdef CONFIG_OF
 	ctx->bridge.of_node = ctx->dev->of_node;
 #endif
+	/*
+	 * Mainline 7.1 made drm_bridge refcounted and expects bridges to be
+	 * allocated via devm_drm_bridge_alloc(), which INIT_LIST_HEADs ->list
+	 * and kref_inits ->refcount. This graft embeds the bridge in ctx (kzalloc
+	 * -> ->list is {NULL,NULL}), so drm_bridge_add()'s new
+	 * `if (!list_empty(&bridge->list)) list_del_init(&bridge->list)` NULL-
+	 * derefs, and drm_bridge_get() touches an uninitialized kref. Initialize
+	 * both here to match what the alloc helper would have done. (refcount
+	 * stays >=1 for the life of ctx; the bridge memory is freed with ctx via
+	 * devm, never through the refcount release.)
+	 */
+	INIT_LIST_HEAD(&ctx->bridge.list);
+	kref_init(&ctx->bridge.refcount);
 	drm_bridge_add(&ctx->bridge);
 
 	ret = sysfs_create_files(&dev->kobj, panel_attrs);
