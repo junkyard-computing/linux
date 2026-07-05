@@ -7,6 +7,12 @@ ccflags-y += -I$(src)/stubs
 ccflags-y += -I$(src)/cal_common -I$(src)/cal_9845 -I$(src)/cal_9855
 ccflags-y += -I$(src)/include/uapi -I$(src)/common/include
 ccflags-y += -DCONFIG_SOC_GS201=1 -DCONFIG_EXYNOS_PM_QOS=1
+# The graft collapses the AOSP per-driver Kconfig symbols under DRM_SAMSUNG_FELIX,
+# but exynos_drm_drv.c still gates sub-driver registration on them via
+# DRV_PTR(drv, CONFIG_...) = IS_ENABLED(cond) ? &drv : NULL. Define them so the
+# decon/dsim/dpp platform drivers actually register (else their devices stay
+# UNBOUND and the component master never binds -> no /dev/dri/card0).
+ccflags-y += -DCONFIG_DRM_SAMSUNG_DECON=1 -DCONFIG_DRM_SAMSUNG_DPP=1 -DCONFIG_DRM_SAMSUNG_DSI=1
 
 obj-$(CONFIG_DRM_SAMSUNG_FELIX) += exynos-drm.o
 exynos-drm-y := \
