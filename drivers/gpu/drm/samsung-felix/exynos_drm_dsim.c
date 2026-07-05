@@ -1367,18 +1367,25 @@ static int dsim_atomic_check_exynos(const struct dsim_device *dsim,
 	}
 
 	if (!exynos_conn_state->exynos_mode.sw_trigger) {
-		if (!dsim->pinctrl) {
-			dsim_err(dsim, "TE error: pinctrl not found\n");
-			return -EINVAL;
-		} else if ((dsim->te_gpio < 0) || (dsim->te_from >= MAX_DECON_TE_FROM_DDI)) {
-			dsim_err(dsim, "invalid TE config for hw trigger mode\n");
-			return -EINVAL;
+		if (!dsim->pinctrl ||
+		    (dsim->te_gpio < 0) || (dsim->te_from >= MAX_DECON_TE_FROM_DDI)) {
+			/*
+			 * Outer-panel bring-up: the HW tearing-effect path isn't
+			 * wired (no dsim pinctrl states in DT; te_gpio unresolved
+			 * because of_get_named_gpio is stubbed). Fall back to
+			 * software trigger instead of failing the whole modeset
+			 * (-EINVAL here made drmModeSetCrtc fail -> no pixels).
+			 * SW trigger drives frames via decon shadow-update+trigger,
+			 * exactly like the validated first-pixels MMIO poke.
+			 */
+			dsim_warn(dsim, "no HW TE (pinctrl/te_gpio unwired); forcing sw_trigger\n");
+			exynos_conn_state->exynos_mode.sw_trigger = true;
+		} else {
+			exynos_conn_state->te_from = dsim->te_from;
+			exynos_conn_state->te_gpio = dsim->te_gpio;
+			if (dsim->tout_gpio >= 0)
+				exynos_conn_state->tout_gpio = dsim->tout_gpio;
 		}
-
-		exynos_conn_state->te_from = dsim->te_from;
-		exynos_conn_state->te_gpio = dsim->te_gpio;
-		if (dsim->tout_gpio >= 0)
-			exynos_conn_state->tout_gpio = dsim->tout_gpio;
 	}
 	return 0;
 }
@@ -1895,8 +1902,18 @@ static int dsim_bind(struct device *dev, struct device *master, void *data)
 	}
 	dsim->encoder_initialized = true;
 
-	if (primary_attached || is_primary_panel(dsim)) {
+	/*
+	 * AOSP gated the bridge attach on the PRIMARY (inner) panel attaching
+	 * first (primary_attached || is_primary_panel), then fanned out to the
+	 * siblings. For an outer-only bring-up there is no primary (dsim0/ana6707
+	 * is disabled), so is_primary_panel(dsim1) is false and the ea8182 bridge
+	 * was never attached -> no drm_connector. dsim->dsi_device is guaranteed
+	 * valid by the EPROBE_DEFER guard above, so attach this dsim's own bridge
+	 * unconditionally; the primary-driven loop still handles dual-DSI siblings.
+	 */
+	if (dsim->panel_bridge == NULL)
 		dsim_attach_bridge(dsim);
+	if (primary_attached || is_primary_panel(dsim)) {
 		primary_attached = true;
 
 		for (i = 0; i < MAX_DSI_CNT; i++) {
