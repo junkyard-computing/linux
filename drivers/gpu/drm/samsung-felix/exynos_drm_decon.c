@@ -1854,8 +1854,15 @@ static void decon_wait_for_flip_done(struct exynos_drm_crtc *crtc,
 			 * Skip recovery on DP DECON.
 			 * Missing framestart means HPD UNPLUG just happened.
 			 * Let the DP unplug handler disable DP as usual.
+			 *
+			 * felix outer-panel bring-up: in SW-trigger mode there is
+			 * no real TE/trigger source yet, so the first framestart
+			 * legitimately times out. Do NOT kick ESD recovery here --
+			 * it suspend/resumes the crtc and faults (fffffffffffffff8)
+			 * before any trigger fix lands. Just log and carry on.
 			 */
-			if (!recovering && !(decon->config.out_type & DECON_OUT_DP))
+			if (!recovering && !(decon->config.out_type & DECON_OUT_DP) &&
+			    decon->config.mode.trig_mode != DECON_SW_TRIG)
 				decon_trigger_recovery(decon);
 			fs_success = false;
 		} else {

@@ -1825,7 +1825,12 @@ int decon_reg_init(u32 id, struct decon_config *config)
 		{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, /* decon2 : none */
 	};
 
-	decon_reg_set_clkgate_mode(0, 0);
+	/* felix outer-panel bring-up: only decon1 is probed, so decon0's
+	 * register block is never ioremapped. The upstream code hardcodes
+	 * id 0 here (CLOCK_CON @ 0x5000), which faults on regs_decon[DECON][0]
+	 * == NULL. Gate this decon's own clock instead.
+	 */
+	decon_reg_set_clkgate_mode(id, 0);
 
 	if (config->out_type & DECON_OUT_DP)
 		decon_reg_set_qactive_pll_mode(id, 1);
