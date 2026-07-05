@@ -1677,4 +1677,81 @@
 		opp-762000000 { opp-hz = /bits/ 64 <762000000>; opp-microvolt = <900000>; };
 		opp-848000000 { opp-hz = /bits/ 64 <848000000>; opp-microvolt = <900000>; };
 	};
+
+	/* ------------------------------------------------------------------ */
+	/* MIF (memory interface) devfreq                                       */
+	/*                                                                      */
+	/* Scale the DRAM/bus frequency with real memory load instead of       */
+	/* leaving it pinned at the boot rate (2028 MHz), which is a large      */
+	/* constant idle-power draw. The ACPM MIF clock does freq+voltage DVFS; */
+	/* PPC counters on the CCI memory ports feed the simple_ondemand        */
+	/* governor.                                                            */
+	/* ------------------------------------------------------------------ */
+
+	/*
+	 * exynos-bus requires a "vdd" regulator, but gs201 MIF voltage is
+	 * coupled to frequency inside ACPM (no Linux-controlled rail). A fixed
+	 * dummy satisfies the driver's regulator API; every OPP pins the same
+	 * nominal microvolt so the dummy is never actually moved. The real
+	 * per-level voltage is applied by ACPM on the frequency request.
+	 */
+	mif_dummy_vdd: regulator-mif-dummy {
+		compatible = "regulator-fixed";
+		regulator-name = "mif-dummy-vdd";
+		regulator-min-microvolt = <800000>;
+		regulator-max-microvolt = <800000>;
+		regulator-always-on;
+	};
+
+	mif_opp: opp-table-mif {
+		compatible = "operating-points-v2";
+		/* Valid ACPM MIF DVFS levels (from the felix mif_int_map). */
+		opp-421000000  { opp-hz = /bits/ 64 <421000000>;  opp-microvolt = <800000>; };
+		opp-546000000  { opp-hz = /bits/ 64 <546000000>;  opp-microvolt = <800000>; };
+		opp-1014000000 { opp-hz = /bits/ 64 <1014000000>; opp-microvolt = <800000>; };
+		opp-1352000000 { opp-hz = /bits/ 64 <1352000000>; opp-microvolt = <800000>; };
+		opp-1539000000 { opp-hz = /bits/ 64 <1539000000>; opp-microvolt = <800000>; };
+		opp-2028000000 { opp-hz = /bits/ 64 <2028000000>; opp-microvolt = <800000>; };
+		opp-2730000000 { opp-hz = /bits/ 64 <2730000000>; opp-microvolt = <800000>; };
+		opp-3172000000 { opp-hz = /bits/ 64 <3172000000>; opp-microvolt = <800000>; };
+	};
+
+	/* PPC bandwidth counters on the four CCI memory-master ports. */
+	ppc_mif0: ppc@1e130000 {
+		compatible = "google,gs201-ppc";
+		reg = <0x0 0x1e130000 0x1000>;
+		event-name = "ppc-mif-cci0";
+	};
+	ppc_mif1: ppc@1e140000 {
+		compatible = "google,gs201-ppc";
+		reg = <0x0 0x1e140000 0x1000>;
+		event-name = "ppc-mif-cci1";
+	};
+	ppc_mif2: ppc@1e150000 {
+		compatible = "google,gs201-ppc";
+		reg = <0x0 0x1e150000 0x1000>;
+		event-name = "ppc-mif-cci2";
+	};
+	ppc_mif3: ppc@1e160000 {
+		compatible = "google,gs201-ppc";
+		reg = <0x0 0x1e160000 0x1000>;
+		event-name = "ppc-mif-cci3";
+	};
+
+	bus_mif: bus-mif {
+		compatible = "samsung,exynos-bus";
+		clocks = <&acpm_ipc GS201_CLK_ACPM_DVFS_MIF>;
+		clock-names = "bus";
+		operating-points-v2 = <&mif_opp>;
+		vdd-supply = <&mif_dummy_vdd>;
+		devfreq-events = <&ppc_mif0 &ppc_mif1 &ppc_mif2 &ppc_mif3>;
+		/*
+		 * PPC transactions run ~6-7% of MIF cycles under a heavy memory
+		 * load (measured on-device). exynos-bus computes utilisation as
+		 * load*100/ratio over CCNT, ramping to max above load/CCNT >
+		 * ratio*0.004; ratio=8 sets that threshold at ~3.2% so real
+		 * memory load scales MIF up while idle (~0.4%) stays at minimum.
+		 */
+		exynos,saturation-ratio = <8>;
+	};
 };
