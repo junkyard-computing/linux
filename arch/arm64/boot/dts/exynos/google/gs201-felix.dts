@@ -104,19 +104,27 @@
  * panel child does not probe yet.
  */
 &drmdsim1 {
-	panel@0 {
+	/*
+	 * NO `reg` property, and node name has no unit-address: the AOSP samsung
+	 * dsim attaches the panel by matching `label` against the sec_panel_name
+	 * module param (exynos_drm.sec_panel_name=dsim1:ea8182-f10). A `reg`
+	 * property makes dsim_add_mipi_dsi_device() abort (it expects
+	 * mipi_dsi_host_register to auto-add reg'd nodes, which doesn't create the
+	 * device this driver needs) — matches AOSP gs201-felix-display.dtsi, whose
+	 * panel nodes carry label+channel and no reg.
+	 */
+	panel {
 		compatible = "samsung,ea8182-f10";
 		label = "ea8182-f10";
-		reg = <0>;
 		channel = <0>;
 		/*
-		 * TODO: real reset is gpp23-0, but mainline gs201.dtsi only
-		 * populates the gpa and gpp0 banks — add the gpp23 bank (under the
-		 * matching peric pinctrl) when enabling the panel. Placeholder
-		 * gpp0 keeps the DTB compiling; the driver's gpio lookup is
-		 * stubbed (-ENOSYS) until the of_gpio->gpiod port lands anyway.
+		 * Panel reset is gpp23-0 (matches AOSP gs201-felix-display.dtsi).
+		 * The gpp23 bank is provided by gs101-pinctrl.dtsi (peric1), which
+		 * gs201-felix.dts already includes, so this resolves to the real
+		 * pin — the driver's devm_gpiod_get(dev, "reset") toggles it during
+		 * the panel enable sequence.
 		 */
-		reset-gpios = <&gpp0 0 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpp23 0 GPIO_ACTIVE_HIGH>;
 		vci-supply = <&reg_disp_placeholder>;
 		vddi-supply = <&reg_disp_placeholder>;
 		vddd-supply = <&reg_disp_placeholder>;
