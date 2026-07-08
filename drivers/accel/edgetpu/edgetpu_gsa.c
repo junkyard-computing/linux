@@ -240,5 +240,60 @@ int edgetpu_mem_read(phys_addr_t phys, void *dst, size_t len)
 }
 EXPORT_SYMBOL_GPL(edgetpu_mem_read);
 
+/*
+ * Persistent TPU CSR mapping for the runtime (post-probe) mailbox path.
+ *
+ * The Rust driver's `IoMem` mapping of the main TPU CSR block only lives for
+ * the duration of probe (it drives the boot-time power/PSM/KCI sequence). The
+ * VII inference mailbox, by contrast, is rung from ioctls long after probe, so
+ * we keep a private module-lifetime `ioremap()` of the same window and expose
+ * simple 32-bit accessors. Plain `ioremap()` (no request_mem_region) coexists
+ * with the Rust driver's transient exclusive mapping of the same physical
+ * range. Set up once from the single-threaded probe path via edgetpu_csr_init().
+ */
+#define EDGETPU_TPU_CSR_PHYS	0x1ce00000UL
+#define EDGETPU_TPU_CSR_SIZE	0x200000
+
+static void __iomem *edgetpu_tpu_csr;
+
+int edgetpu_csr_init(void)
+{
+	if (edgetpu_tpu_csr)
+		return 0;
+	edgetpu_tpu_csr = ioremap(EDGETPU_TPU_CSR_PHYS, EDGETPU_TPU_CSR_SIZE);
+	if (!edgetpu_tpu_csr) {
+		pr_err("edgetpu_gsa: failed to map TPU CSR block@%lx\n",
+		       EDGETPU_TPU_CSR_PHYS);
+		return -ENOMEM;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(edgetpu_csr_init);
+
+u32 edgetpu_csr_read32(u32 off)
+{
+	if (!edgetpu_tpu_csr || off >= EDGETPU_TPU_CSR_SIZE)
+		return 0;
+	return readl(edgetpu_tpu_csr + off);
+}
+EXPORT_SYMBOL_GPL(edgetpu_csr_read32);
+
+void edgetpu_csr_write32(u32 off, u32 val)
+{
+	if (!edgetpu_tpu_csr || off >= EDGETPU_TPU_CSR_SIZE)
+		return;
+	writel(val, edgetpu_tpu_csr + off);
+}
+EXPORT_SYMBOL_GPL(edgetpu_csr_write32);
+
+static void __exit edgetpu_gsa_exit(void)
+{
+	if (edgetpu_tpu_csr) {
+		iounmap(edgetpu_tpu_csr);
+		edgetpu_tpu_csr = NULL;
+	}
+}
+module_exit(edgetpu_gsa_exit);
+
 MODULE_DESCRIPTION("GSA secure-firmware glue for the gs201 Edge TPU accel driver");
 MODULE_LICENSE("GPL");

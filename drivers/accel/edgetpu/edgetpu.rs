@@ -16,12 +16,16 @@
 use crate::driver::EdgeTpuPlatformDriver;
 
 mod bringup;
+mod csr;
 mod driver;
 mod file;
 mod gem;
 mod gsa;
+mod ioctl;
 mod kci;
+mod mem;
 mod regs;
+mod vii;
 
 kernel::module_platform_driver! {
     type: EdgeTpuPlatformDriver,

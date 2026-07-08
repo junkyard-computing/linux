@@ -33,7 +33,9 @@ use crate::gsa::{
     GSA_TPU_STATE_INACTIVE,
     GSA_TPU_STATE_RUNNING,
 };
+use crate::kci::Kci;
 use crate::regs;
+use crate::vii::Vii;
 
 /// Main TPU CSR block window (reg index 0).
 pub(crate) type TpuRegs<'a> = IoMem<'a, SZ_2M>;
@@ -85,12 +87,17 @@ fn ssmt_setup(ssmt: &SsmtRegs<'_>) -> Result {
     Ok(())
 }
 
-/// Authenticate, load and start the secure TPU firmware. Returns `Ok(())` only
-/// once GSA reports the TPU as `RUNNING`.
+/// Authenticate, load and start the secure TPU firmware, then activate the VII
+/// inference mailbox. Returns `Ok(())` only once GSA reports the TPU as
+/// `RUNNING`, the KCI `FW_INFO` handshake succeeds, and the VII mailbox is
+/// bound (`OPEN_DEVICE`). The `kci`/`vii` state is retained by the caller for
+/// the runtime submit path.
 pub(crate) fn firmware_bringup(
     dev: &Device,
     reg: &TpuRegs<'_>,
     ssmt: &SsmtRegs<'_>,
+    kci: &mut Kci,
+    vii: &mut Vii,
 ) -> Result {
     // 1. Power state machines up (rail/clock already enabled by the caller).
     lpm_up(reg)?;
@@ -144,7 +151,7 @@ pub(crate) fn firmware_bringup(
 
     // 6. Program the KCI mailbox + open the TPU data-path S2MPU BEFORE start —
     //    the firmware latches the queue-base CSRs when it boots.
-    crate::kci::setup(reg)?;
+    kci.setup(reg)?;
 
     // 7. Release the R52 out of reset via GSA.
     let state = gsa.send_cmd(GSA_TPU_START)?;
@@ -159,8 +166,13 @@ pub(crate) fn firmware_bringup(
     //    processing mailbox commands, not just started. Give the R52 a moment
     //    to finish its own boot before the first command.
     fsleep(Delta::from_millis(50));
-    let flavor = crate::kci::fw_info(dev, reg)?;
+    let flavor = kci.fw_info(dev, reg)?;
     dev_info!(dev, "edgetpu: *** KCI FW_INFO ok — fw_flavor={} ***\n", flavor);
+
+    // 9. M2: bring up + bind the VII inference mailbox (mailbox 1) via a KCI
+    //    OPEN_DEVICE. Success means the firmware accepted a per-context
+    //    inference queue — the substrate the SUBMIT ioctl drives.
+    vii.activate(dev, reg, kci)?;
 
     Ok(())
 }
