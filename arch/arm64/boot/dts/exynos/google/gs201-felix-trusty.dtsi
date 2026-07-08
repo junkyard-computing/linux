@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Trusty TEE + GSA (Google Security Authenticator) nodes for gs201/felix.
+ *
+ * Trusty is pure-SMC (no MMIO); pKVM forwards its Trusted-OS-owner SMCs to EL3.
+ * GSA drives the NS mailbox at 0x17c90000 and authenticates/starts secure IP
+ * firmware (Edge TPU). Ported from the AOSP gs101-trusty.dtsi / gs201-gsa.dtsi;
+ * the s2mpu ref is dropped (only needed with CONFIG_GSA_PKVM).
+ */
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/clock/google,gs201-acpm.h>
+
+/ {
+	trusty: trusty {
+		compatible = "android,trusty-smc-v1";
+
+		irq {
+			compatible = "android,trusty-irq-v1";
+			ipi-range = <8 15 8>;
+		};
+
+		log {
+			compatible = "android,trusty-log-v1";
+		};
+
+		virtio {
+			compatible = "android,trusty-virtio-v1";
+		};
+	};
+
+	gsa: gsa-ns@17c90000 {
+		compatible = "google,gs101-gsa-v1";
+		#address-cells = <2>;
+		#size-cells = <1>;
+
+		/* NS mailbox */
+		reg = <0x0 0x17c90000 0x1000>;
+		interrupts = <GIC_SPI 363 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	/*
+	 * Edge TPU (DarwiNN) accelerator. Driven by the mainline Rust accel
+	 * driver (drivers/accel/edgetpu, compatible "google,edgetpu-gs201").
+	 *
+	 * The TPU firmware is SECURE (privilege_level=1): GSA authenticates it
+	 * (gsa_load_tpu_fw_image) and releases the CPU (gsa_send_tpu_cmd
+	 * GSA_TPU_START) over Trusty IPC — hence gsa-device = <&gsa> and the
+	 * hard dependency on the trusty/gsa nodes above.
+	 *
+	 * M1a wires firmware-auth + power + TPU_START only; the TPU SysMMU
+	 * (samsung v9, unsupported by mainline exynos-iommu) is deliberately
+	 * omitted so no `iommus` phandle is present yet — KCI/DMA lands in M1b.
+	 *
+	 * reg/IRQ/carveout map from AOSP gs201-tpu.dtsi + gs201-rmem.dtsi.
+	 */
+	edgetpu: edgetpu@1ce00000 {
+		compatible = "google,edgetpu-gs201";
+		reg = <0x0 0x1ce00000 0x200000>,
+		      <0x0 0x1ccf0000 0x10000>;
+		reg-names = "tpu", "ssmt";
+		interrupts = <GIC_SPI 730 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 731 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 732 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 733 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 734 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 735 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 736 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 737 IRQ_TYPE_LEVEL_HIGH>;
+		memory-region = <&tpu_fw_reserved>, <&tpu_fw_ctx_reserved>;
+		edgetpu,shareability = <0x1cc20000>;
+		gsa-device = <&gsa>;
+		/*
+		 * TPU block power + DVFS is the ACPM DVFS channel 7 (matches AOSP
+		 * TPU_ACPM_DOMAIN=7). On mainline this is exposed through the clk
+		 * framework by clk-acpm.c; requesting a non-zero rate powers the
+		 * rail. The Rust driver clk_set_rate()s this before the GSA start.
+		 */
+		clocks = <&acpm_ipc GS201_CLK_ACPM_DVFS_TPU>;
+		clock-names = "tpu";
+		status = "okay";
+	};
+};

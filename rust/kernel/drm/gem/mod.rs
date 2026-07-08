@@ -403,3 +403,13 @@ pub(super) const fn create_fops(owner: *mut bindings::module) -> bindings::file_
 
     fops
 }
+
+/// Build the `file_operations` for a compute-accelerator (`DRIVER_COMPUTE_ACCEL`)
+/// node. Identical to [`create_fops`] except `open` routes through `accel_open`,
+/// which claims the minor from the accelerator minor xarray. Selected
+/// automatically when [`crate::drm::Driver::FEAT_ACCEL`] is set.
+pub(super) const fn create_accel_fops(owner: *mut bindings::module) -> bindings::file_operations {
+    let mut fops = create_fops(owner);
+    fops.open = Some(bindings::accel_open);
+    fops
+}

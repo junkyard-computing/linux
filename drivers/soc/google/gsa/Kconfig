@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
+config GSA
+	tristate "Google GSA (Google Security Authenticator) driver"
+	depends on TRUSTY
+	help
+	  Driver for the Google Security Authenticator (GSA/Titan M) coprocessor
+	  on Google Tensor (gs101/gs201/zuma) SoCs. Provides firmware image
+	  authentication for on-SoC IPs (TPU, AOC, DSP) via an MMIO mailbox and
+	  Trusty. Needed to authenticate + start the secure Edge TPU firmware.
