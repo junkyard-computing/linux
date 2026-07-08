@@ -1,0 +1,178 @@
+// SPDX-License-Identifier: GPL-2.0
+//! VII (Virtual Instruction Interface) mailbox — the per-context inference
+//! mailbox that carries the runtime's DarwiNN command elements.
+//!
+//! The felix TPU (janeiro) exposes 7 VII mailboxes at indices 1..7; we use
+//! index 1. Its CSR block sits at `0xa0000 + 1*0x2000 = 0xa2000` with the same
+//! field layout as KCI (mailbox 0). The cmd/resp queues live in the firmware
+//! carveout reached through the instruction remap, exactly like KCI — no
+//! SysMMU. The 48-byte command / 24-byte response element formats are the
+//! firmware↔runtime ABI; the kernel is oblivious to their contents and only
+//! moves elements + rings the doorbell.
+//!
+//! Two register paths: [`setup`] runs during probe on the probe-time `IoMem`
+//! (to program the queue-base CSRs before activation); [`submit`] runs from
+//! ioctls long after probe and therefore uses the module-lifetime CSR mapping
+//! in [`crate::csr`].
+
+use kernel::{
+    device::Device,
+    io::Io,
+    prelude::*,
+    time::{delay::fsleep, Delta},
+};
+
+use crate::bringup::TpuRegs;
+use crate::csr;
+use crate::kci::Kci;
+use crate::mem::{self, tpu_va};
+
+// --- VII mailbox #1 CSR bases (offsets from the main TPU CSR block) ----------
+const VII_CTX_BASE: usize = 0xa2000; // context CSRs (mailbox 1)
+const VII_CMD_BASE: usize = 0xa3000; // cmd-queue CSRs
+const VII_RESP_BASE: usize = 0xa3800; // resp-queue CSRs
+
+// Context CSR offsets (identical to KCI's layout).
+const CTX_ENABLE: usize = 0x00;
+const CTX_PRIORITY: usize = 0x04;
+const CTX_CMD_Q_DOORBELL_ENABLE: usize = 0x08;
+const CTX_CMD_Q_TAIL_DOORBELL_ENABLE: usize = 0x0c;
+const CTX_CMD_Q_DOORBELL_CLEAR: usize = 0x10;
+const CTX_CMD_Q_ADDR_LO: usize = 0x14;
+const CTX_CMD_Q_ADDR_HI: usize = 0x18;
+const CTX_CMD_Q_SIZE: usize = 0x1c;
+const CTX_RESP_Q_DOORBELL_ENABLE: usize = 0x20;
+const CTX_RESP_Q_ADDR_LO: usize = 0x28;
+const CTX_RESP_Q_ADDR_HI: usize = 0x2c;
+const CTX_RESP_Q_SIZE: usize = 0x30;
+
+// Cmd-queue CSR offsets.
+const CMD_DOORBELL_SET: usize = 0x00;
+const CMD_HEAD: usize = 0x08;
+const CMD_TAIL: usize = 0x0c;
+
+// Resp-queue CSR offsets.
+const RESP_DOORBELL_CLEAR: usize = 0x04;
+const RESP_HEAD: usize = 0x0c;
+const RESP_TAIL: usize = 0x10;
+
+// --- Queue geometry ---------------------------------------------------------
+const QUEUE_SIZE: u32 = 1023; // elements; wrap bit = 0x400
+pub(crate) const CMD_ELEM: usize = 48; // VII command element
+pub(crate) const RESP_ELEM: usize = 24; // VII response element
+
+// --- Carveout placement (see mem.rs) ----------------------------------------
+const CMD_Q_PHYS: u64 = 0x9313_0000; // TPU-VA 0x10130000
+const RESP_Q_PHYS: u64 = 0x9314_0000; // TPU-VA 0x10140000
+
+// --- Activation parameters --------------------------------------------------
+const VII_MAILBOX_ID: u32 = 1;
+const VII_VCID: u16 = 0;
+
+/// VII mailbox state (ring positions + activation status).
+pub(crate) struct Vii {
+    cmd_tail: u32,
+    resp_head: u32,
+    activated: bool,
+}
+
+impl Vii {
+    pub(crate) fn new() -> Self {
+        Self {
+            cmd_tail: 0,
+            resp_head: 0,
+            activated: false,
+        }
+    }
+
+    pub(crate) fn is_activated(&self) -> bool {
+        self.activated
+    }
+
+    /// Program the VII mailbox context/queue CSRs (probe-time, via `IoMem`).
+    /// The firmware reads these when the mailbox is activated by `OPEN_DEVICE`.
+    fn setup(&mut self, reg: &TpuRegs<'_>) -> Result {
+        let cmd_va = tpu_va(CMD_Q_PHYS);
+        let resp_va = tpu_va(RESP_Q_PHYS);
+
+        reg.try_write32(0, VII_CTX_BASE + CTX_PRIORITY)?;
+        // Explicit doorbell (like KCI) rather than tail-write auto-doorbell.
+        reg.try_write32(0, VII_CTX_BASE + CTX_CMD_Q_TAIL_DOORBELL_ENABLE)?;
+
+        // Cmd queue.
+        reg.try_write32((cmd_va & 0xffff_ffff) as u32, VII_CTX_BASE + CTX_CMD_Q_ADDR_LO)?;
+        reg.try_write32((cmd_va >> 32) as u32, VII_CTX_BASE + CTX_CMD_Q_ADDR_HI)?;
+        reg.try_write32(QUEUE_SIZE, VII_CTX_BASE + CTX_CMD_Q_SIZE)?;
+        reg.try_write32(0, VII_CMD_BASE + CMD_TAIL)?;
+        reg.try_write32(0, VII_CMD_BASE + CMD_HEAD)?;
+
+        // Resp queue.
+        reg.try_write32((resp_va & 0xffff_ffff) as u32, VII_CTX_BASE + CTX_RESP_Q_ADDR_LO)?;
+        reg.try_write32((resp_va >> 32) as u32, VII_CTX_BASE + CTX_RESP_Q_ADDR_HI)?;
+        reg.try_write32(QUEUE_SIZE, VII_CTX_BASE + CTX_RESP_Q_SIZE)?;
+        reg.try_write32(0, VII_RESP_BASE + RESP_HEAD)?;
+        reg.try_write32(0, VII_RESP_BASE + RESP_TAIL)?;
+
+        // Clear stale doorbells, enable doorbells, enable the context.
+        reg.try_write32(1, VII_RESP_BASE + RESP_DOORBELL_CLEAR)?;
+        reg.try_write32(1, VII_CTX_BASE + CTX_CMD_Q_DOORBELL_CLEAR)?;
+        reg.try_write32(1, VII_CTX_BASE + CTX_CMD_Q_DOORBELL_ENABLE)?;
+        reg.try_write32(1, VII_CTX_BASE + CTX_RESP_Q_DOORBELL_ENABLE)?;
+        reg.try_write32(1, VII_CTX_BASE + CTX_ENABLE)?;
+
+        self.cmd_tail = 0;
+        self.resp_head = 0;
+        Ok(())
+    }
+
+    /// Program the VII mailbox and bind it to a VCID via a KCI `OPEN_DEVICE`.
+    /// Runs during probe (both the CSR setup and the KCI command use `reg`).
+    pub(crate) fn activate(&mut self, dev: &Device, reg: &TpuRegs<'_>, kci: &mut Kci) -> Result {
+        self.setup(reg)?;
+        kci.open_device(dev, reg, VII_MAILBOX_ID, VII_VCID, true)?;
+        self.activated = true;
+        Ok(())
+    }
+
+    /// Submit one 48-byte VII command element and wait for its 24-byte response.
+    /// Runs from ioctls, so all CSR access goes through the persistent mapping.
+    pub(crate) fn submit(&mut self, command: &[u8; CMD_ELEM], timeout_ms: u32) -> Result<[u8; RESP_ELEM]> {
+        if !self.activated {
+            return Err(ENODEV);
+        }
+
+        let slot = (self.cmd_tail as usize) % (QUEUE_SIZE as usize);
+        mem::write(CMD_Q_PHYS + (slot * CMD_ELEM) as u64, command)?;
+        self.cmd_tail += 1;
+        csr::write(VII_CMD_BASE + CMD_TAIL, self.cmd_tail);
+        csr::write(VII_CMD_BASE + CMD_DOORBELL_SET, 1);
+
+        let budget = if timeout_ms == 0 { 1000 } else { timeout_ms as usize };
+        let mut got = false;
+        for _ in 0..budget {
+            if csr::read(VII_RESP_BASE + RESP_TAIL) != self.resp_head {
+                got = true;
+                break;
+            }
+            fsleep(Delta::from_millis(1));
+        }
+        if !got {
+            pr_err!(
+                "edgetpu: VII submit timeout: cmd[head={} tail={}] resp[tail={}]\n",
+                csr::read(VII_CMD_BASE + CMD_HEAD),
+                self.cmd_tail,
+                csr::read(VII_RESP_BASE + RESP_TAIL)
+            );
+            return Err(ETIMEDOUT);
+        }
+
+        let rslot = (self.resp_head as usize) % (QUEUE_SIZE as usize);
+        let mut resp = [0u8; RESP_ELEM];
+        mem::read(RESP_Q_PHYS + (rslot * RESP_ELEM) as u64, &mut resp)?;
+        self.resp_head += 1;
+        csr::write(VII_RESP_BASE + RESP_HEAD, self.resp_head);
+        csr::write(VII_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
+
+        Ok(resp)
+    }
+}

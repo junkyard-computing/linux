@@ -69,4 +69,14 @@ void edgetpu_enable_coherency(void);
 int edgetpu_mem_write(phys_addr_t phys, const void *src, size_t len);
 int edgetpu_mem_read(phys_addr_t phys, void *dst, size_t len);
 
+/*
+ * Module-lifetime mapping of the main TPU CSR block (0x1ce00000), used by the
+ * runtime VII mailbox path which outlives the Rust driver's probe-time IoMem.
+ * edgetpu_csr_init() is idempotent; call it once from probe. Offsets are from
+ * the block base and bounds-checked.
+ */
+int edgetpu_csr_init(void);
+u32 edgetpu_csr_read32(u32 off);
+void edgetpu_csr_write32(u32 off, u32 val);
+
 #endif /* __EDGETPU_GSA_H */
