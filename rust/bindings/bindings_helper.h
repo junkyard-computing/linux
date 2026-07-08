@@ -106,6 +106,11 @@
 #include <drm/drm_panic.h>
 #endif
 
+#if IS_ENABLED(CONFIG_DRM_ACCEL_EDGETPU)
+// GSA secure-firmware glue ABI called by the Rust gs201 Edge TPU driver.
+#include "../../drivers/accel/edgetpu/edgetpu_gsa.h"
+#endif
+
 /* `bindgen` gets confused at certain things. */
 const size_t RUST_CONST_HELPER_ARCH_SLAB_MINALIGN = ARCH_SLAB_MINALIGN;
 const size_t RUST_CONST_HELPER_ARCH_KMALLOC_MINALIGN = ARCH_KMALLOC_MINALIGN;
