@@ -11,6 +11,7 @@
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
+#include <linux/iommu.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -294,6 +295,36 @@ static void __exit edgetpu_gsa_exit(void)
 	}
 }
 module_exit(edgetpu_gsa_exit);
+
+/*
+ * TPU SysMMU mapping. The VII firmware validates inference-buffer addresses
+ * against the non-secure device window (the DT `dma-window` at 0x18000000+),
+ * so the driver maps each carveout-backed buffer object into the TPU's IOMMU
+ * domain at a chosen IOVA and hands the firmware that IOVA. The domain is the
+ * device's default (unmanaged) domain, attached by the IOMMU core via the
+ * `iommus = <&sysmmu_tpu>` DT link. @dev is the edgetpu platform device.
+ */
+int edgetpu_iommu_map(struct device *dev, u64 iova, phys_addr_t paddr, size_t size)
+{
+	struct iommu_domain *dom = iommu_get_domain_for_dev(dev);
+
+	if (!dom) {
+		dev_err(dev, "edgetpu: no IOMMU domain (sysmmu not attached?)\n");
+		return -ENODEV;
+	}
+	return iommu_map(dom, iova, paddr, size,
+			 IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE, GFP_KERNEL);
+}
+EXPORT_SYMBOL_GPL(edgetpu_iommu_map);
+
+void edgetpu_iommu_unmap(struct device *dev, u64 iova, size_t size)
+{
+	struct iommu_domain *dom = iommu_get_domain_for_dev(dev);
+
+	if (dom)
+		iommu_unmap(dom, iova, size);
+}
+EXPORT_SYMBOL_GPL(edgetpu_iommu_unmap);
 
 MODULE_DESCRIPTION("GSA secure-firmware glue for the gs201 Edge TPU accel driver");
 MODULE_LICENSE("GPL");
