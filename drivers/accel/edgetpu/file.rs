@@ -20,11 +20,12 @@ impl drm::file::DriverFile for EdgeTpuFileData {
     type Driver = EdgeTpuDriver;
 
     fn open(dev: &drm::Device<Self::Driver>) -> Result<Pin<KBox<Self>>> {
-        // Reclaim the carveout BO heap for the new client (map-once/submit-many
-        // means we never need to free individual BOs mid-session). This also
-        // unmaps the prior client's buffers from the SysMMU.
-        let raw = dev.pdev.as_ref().as_raw();
-        dev.mbox.lock().bo.reset(raw);
+        // Fresh session for the new client: reset the VII inference context (so
+        // the firmware's per-context registrations don't accumulate across
+        // inferences) and reclaim/unmap the carveout BO heap.
+        let pdev = dev.pdev.as_ref();
+        let raw = pdev.as_raw();
+        dev.mbox.lock().reset_client(pdev, raw);
         KBox::try_pin_init(try_pin_init!(Self {}), GFP_KERNEL)
     }
 }

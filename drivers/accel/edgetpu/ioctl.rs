@@ -8,6 +8,8 @@
 
 use kernel::{
     alloc::KVec,
+    bindings,
+    device::Device,
     prelude::*,
     uaccess::{UserPtr, UserSlice},
     uapi,
@@ -25,6 +27,18 @@ pub(crate) struct MailboxState {
     pub(crate) kci: Kci,
     pub(crate) vii: Vii,
     pub(crate) bo: BoAllocator,
+}
+
+impl MailboxState {
+    /// Prepare a fresh session for a new client: reset the VII inference context
+    /// (frees the firmware's accumulated per-context registrations, which
+    /// otherwise make every inference after the first fail) and reclaim the BO
+    /// heap. `dev`/`dev_raw` are the edgetpu platform device (for logging /
+    /// IOMMU unmap).
+    pub(crate) fn reset_client(&mut self, dev: &Device, dev_raw: *mut bindings::device) {
+        let _ = self.vii.reactivate(dev, &mut self.kci);
+        self.bo.reset(dev_raw);
+    }
 }
 
 /// Largest BO the heap could hold — used to reject absurd allocation requests
