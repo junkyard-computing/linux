@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#include <drm/drm_accel.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_vma_manager.h>
+#include <linux/errno.h>
+#include <linux/fs.h>
 
 #ifdef CONFIG_DRM
 
@@ -75,4 +78,24 @@ rust_helper_drm_gem_shmem_object_mmap(struct drm_gem_object *obj, struct vm_area
 }
 
 #endif /* CONFIG_DRM_GEM_SHMEM_HELPER */
+
+/*
+ * `accel_open` is only declared when CONFIG_DRM_ACCEL is enabled (the !ACCEL
+ * branch of <drm/drm_accel.h> omits it entirely). Wrap it so the Rust binding
+ * always resolves: real accelerator drivers `select DRM_ACCEL` and get the true
+ * accel_open, while non-accel kernels get a harmless stub that is never reached
+ * (no driver sets FEAT_ACCEL without DRM_ACCEL).
+ */
+#if IS_ENABLED(CONFIG_DRM_ACCEL)
+__rust_helper int rust_helper_accel_open(struct inode *inode, struct file *filp)
+{
+	return accel_open(inode, filp);
+}
+#else
+__rust_helper int rust_helper_accel_open(struct inode *inode, struct file *filp)
+{
+	return -EOPNOTSUPP;
+}
+#endif /* CONFIG_DRM_ACCEL */
+
 #endif /* CONFIG_DRM */

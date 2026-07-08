@@ -22,6 +22,8 @@ use core::{
 pub(crate) const FEAT_GEM: u32 = bindings::drm_driver_feature_DRIVER_GEM;
 /// Driver supports render nodes, i.e.: /dev/dri/renderDXX devices.
 pub(crate) const FEAT_RENDER: u32 = bindings::drm_driver_feature_DRIVER_RENDER;
+/// Driver is a compute accelerator, i.e.: exposes /dev/accel/accelXX nodes.
+pub(crate) const FEAT_ACCEL: u32 = bindings::drm_driver_feature_DRIVER_COMPUTE_ACCEL;
 
 /// Information data for a DRM Driver.
 pub struct DriverInfo {
@@ -131,6 +133,16 @@ pub trait Driver {
     /// usable from the render node (i.e. marked DRM_RENDER_ALLOW), whereas
     /// userspace processes using the master node can invoke any ioctl.
     const FEAT_RENDER: bool = false;
+
+    /// Sets the `DRIVER_COMPUTE_ACCEL` feature for this driver.
+    ///
+    /// When enabled, the device is registered as a compute accelerator and
+    /// exposes `/dev/accel/accelXX` nodes (major 261) instead of DRM card /
+    /// render nodes. Accelerator ioctls follow render-node semantics (mark them
+    /// `DRM_RENDER_ALLOW`). This is mutually exclusive with [`Self::FEAT_RENDER`]
+    /// and KMS: the DRM core rejects registration if both are set. Drivers using
+    /// this must `select DRM_ACCEL` in their Kconfig.
+    const FEAT_ACCEL: bool = false;
 }
 
 /// The registration type of a `drm::Device`.
