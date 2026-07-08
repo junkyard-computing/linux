@@ -7,15 +7,22 @@ use kernel::{
 
 use crate::driver::EdgeTpuDriver;
 
-/// Per-open client state. Empty for M0; M2 adds the per-fd IOMMU domain, the
-/// `drm_mm` VA allocator, and the scheduler entity.
+/// Per-open client state. The mailbox + BO heap are device-global (a single
+/// VII context), so the per-fd data is empty; opening a new fd reclaims the BO
+/// heap so a fresh client starts with an empty carveout.
 #[pin_data]
 pub(crate) struct EdgeTpuFileData {}
+
+/// Convenience type alias for our DRM `File` type.
+pub(crate) type EdgeTpuFile = drm::file::File<EdgeTpuFileData>;
 
 impl drm::file::DriverFile for EdgeTpuFileData {
     type Driver = EdgeTpuDriver;
 
-    fn open(_dev: &drm::Device<Self::Driver>) -> Result<Pin<KBox<Self>>> {
+    fn open(dev: &drm::Device<Self::Driver>) -> Result<Pin<KBox<Self>>> {
+        // Reclaim the carveout BO heap for the new client (map-once/submit-many
+        // means we never need to free individual BOs mid-session).
+        dev.mbox.lock().bo.reset();
         KBox::try_pin_init(try_pin_init!(Self {}), GFP_KERNEL)
     }
 }
