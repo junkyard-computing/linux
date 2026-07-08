@@ -275,7 +275,12 @@ impl Device<Bound> {
 
 impl<Ctx: DeviceContext> Device<Ctx> {
     /// Obtain the raw `struct device *`.
-    pub(crate) fn as_raw(&self) -> *mut bindings::device {
+    ///
+    /// Exposed publicly so out-of-`kernel`-crate drivers can hand the raw
+    /// pointer to C interfaces that do not yet have safe Rust abstractions
+    /// (e.g. the gs201 Edge TPU driver's GSA firmware-auth glue). The caller
+    /// must not use the pointer beyond the lifetime of `self`.
+    pub fn as_raw(&self) -> *mut bindings::device {
         self.0.get()
     }
 
