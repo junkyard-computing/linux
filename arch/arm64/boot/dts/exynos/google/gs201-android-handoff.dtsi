@@ -141,6 +141,28 @@
 			no-map;
 		};
 
+		/*
+		 * Edge TPU firmware context region. GSA locks this down when it
+		 * authenticates and starts the TPU firmware; the TPU keeps its
+		 * secure runtime context here. Addresses/sizes mirror AOSP
+		 * private/devices/google/gs201/dts/gs201-rmem.dtsi.
+		 */
+		tpu_fw_ctx_reserved: tpu_ctx@91e00000 {
+			reg = <0x0 0x91e00000 0x1200000>;
+			no-map;
+		};
+
+		/*
+		 * Edge TPU firmware body region. The signed firmware image body
+		 * (everything after the 4K header) is copied here and its base
+		 * must match firmware_base=0x93000000 encoded in the image; GSA
+		 * locks it during gsa_load_tpu_fw_image().
+		 */
+		tpu_fw_reserved: tpu_fw@93000000 {
+			reg = <0x0 0x93000000 0x1000000>;
+			no-map;
+		};
+
 		/* AoC (Always-on Compute) firmware region. */
 		aoc_reserve: aoc@94000000 {
 			reg = <0x0 0x94000000 0x03000000>;

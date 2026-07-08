@@ -29,6 +29,7 @@
 
 #include "gs201.dtsi"
 #include "gs201-android-handoff.dtsi"
+#include "gs201-felix-trusty.dtsi"
 #include <dt-bindings/usb/pd.h>
 
 / {
