@@ -40,6 +40,39 @@
 	};
 
 	/*
+	 * TPU SysMMU (samsung sysmmu-v8) — the stage-1 IOMMU that translates the
+	 * TPU's non-secure device addresses (the `dma-window` at 0x18000000+) to
+	 * physical memory. The secure firmware validates VII inference-buffer
+	 * addresses against this NS window, so buffers MUST be iommu_map'd here
+	 * (the fw-carveout instruction-remap window at 0x10000000 only carries the
+	 * mailbox queues). Ported to mainline as drivers/iommu/samsung-iommu.c.
+	 *
+	 * The AOSP node's power-domains=<&pd_tpu>/s2mpus=<&s2mpu_tpu> and the
+	 * secure IRQ are dropped: mainline has no pd_tpu/s2mpu_tpu, the rail is
+	 * already powered by the edgetpu ACPM clock, and secure-fault reporting is
+	 * not needed for bring-up. Only the NS fault IRQ (IRQ_SYSMMU_S1_NS_TPU_TPU
+	 * = GIC_SPI 741) is wired.
+	 */
+	sysmmu_tpu: sysmmu@1cc40000 {
+		compatible = "samsung,sysmmu-v8";
+		reg = <0x0 0x1cc40000 0x10000>;
+		interrupts = <GIC_SPI 741 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <0>;
+		port-name = "TPU";
+		status = "okay";
+	};
+
+	iommu_group_tpu: iommu-group-tpu {
+		compatible = "samsung,sysmmu-group";
+		/*
+		 * Unmanaged default domain: the edgetpu driver iommu_map()s buffers
+		 * at explicit IOVAs itself (like the AOSP GCIP path), rather than
+		 * letting the DMA layer own the aperture.
+		 */
+		samsung,unmanaged-domain;
+	};
+
+	/*
 	 * Edge TPU (DarwiNN) accelerator. Driven by the mainline Rust accel
 	 * driver (drivers/accel/edgetpu, compatible "google,edgetpu-gs201").
 	 *
@@ -48,9 +81,9 @@
 	 * GSA_TPU_START) over Trusty IPC — hence gsa-device = <&gsa> and the
 	 * hard dependency on the trusty/gsa nodes above.
 	 *
-	 * M1a wires firmware-auth + power + TPU_START only; the TPU SysMMU
-	 * (samsung v9, unsupported by mainline exynos-iommu) is deliberately
-	 * omitted so no `iommus` phandle is present yet — KCI/DMA lands in M1b.
+	 * The TPU SysMMU (sysmmu_tpu, samsung-v8) is wired via `iommus` +
+	 * `samsung,iommu-group`; `dma-window` defines the NS IOVA aperture the
+	 * driver maps VII inference buffers into.
 	 *
 	 * reg/IRQ/carveout map from AOSP gs201-tpu.dtsi + gs201-rmem.dtsi.
 	 */
@@ -59,6 +92,11 @@
 		reg = <0x0 0x1ce00000 0x200000>,
 		      <0x0 0x1ccf0000 0x10000>;
 		reg-names = "tpu", "ssmt";
+		#dma-address-cells = <1>;
+		#dma-size-cells = <1>;
+		dma-window = <0x18000000 0xe7fff000>;
+		iommus = <&sysmmu_tpu>;
+		samsung,iommu-group = <&iommu_group_tpu>;
 		interrupts = <GIC_SPI 730 IRQ_TYPE_LEVEL_HIGH>,
 			     <GIC_SPI 731 IRQ_TYPE_LEVEL_HIGH>,
 			     <GIC_SPI 732 IRQ_TYPE_LEVEL_HIGH>,

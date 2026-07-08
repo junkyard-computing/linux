@@ -41,10 +41,12 @@ impl EdgeTpuFileData {
         if args.size == 0 || args.size > BO_MAX {
             return Err(EINVAL);
         }
+        // The edgetpu platform device owns the SysMMU domain (via `iommus=`).
+        let dev = ddev.pdev.as_ref().as_raw();
         let mut st = ddev.mbox.lock();
-        let (handle, tpu_va) = st.bo.alloc(args.size)?;
+        let (handle, iova) = st.bo.alloc(args.size, dev)?;
         args.handle = handle;
-        args.tpu_va = tpu_va;
+        args.tpu_va = iova;
         args.pad = 0;
         Ok(0)
     }
