@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //! KCI (Kernel Control Interface) mailbox — the boot handshake and the VII
-//! mailbox activation command.
+//! mailbox activation/deactivation commands.
 //!
 //! KCI is mailbox index 0. Its cmd/resp circular queues live in the firmware
 //! carveout's remapped-data region (TPU-VA `0x10100000+`, phys `0x93100000+`),
@@ -9,18 +9,19 @@
 //! positions carry from the `FIRMWARE_INFO` liveness check into the
 //! `OPEN_DEVICE` command that binds the VII inference mailbox.
 //!
-//! Layout / protocol verified against the AOSP janeiro `edgetpu-kci.c` +
-//! `edgetpu-mailbox.c` (pre-gcip generation). All KCI traffic runs during
-//! probe, so it uses the probe-time [`TpuRegs`] `IoMem` directly.
+//! All CSR access goes through the persistent [`crate::csr`] mapping (the C
+//! companion's module-lifetime ioremap), so KCI works both during probe and
+//! afterwards — the runtime path re-issues `CLOSE_DEVICE`/`OPEN_DEVICE` to reset
+//! the VII context per client. Layout / protocol verified against the AOSP
+//! janeiro `edgetpu-kci.c` + `edgetpu-mailbox.c` (pre-gcip generation).
 
 use kernel::{
     device::Device,
-    io::Io,
     prelude::*,
     time::{delay::fsleep, Delta},
 };
 
-use crate::bringup::TpuRegs;
+use crate::csr;
 use crate::mem::{self, tpu_va};
 
 // --- Mailbox CSR bases (offsets from the main TPU CSR block, reg index 0) ----
@@ -76,7 +77,7 @@ const KCI_ERROR_UNIMPLEMENTED: u16 = 12;
 /// the firmware reads the AP-placed KCI queues as zeros; open it allow-all.
 const TPU_S2MPU_BASE: u64 = 0x1cc6_0000;
 
-/// KCI mailbox state, threaded across the boot sequence.
+/// KCI mailbox state, threaded across the boot sequence and the runtime.
 pub(crate) struct Kci {
     seq: u64,
     cmd_tail: u32,
@@ -95,44 +96,44 @@ impl Kci {
     /// Enable TPU IO-coherency + open the data-path S2MPU, then program the KCI
     /// mailbox context/queue CSRs. Must run BEFORE `GSA_TPU_START` — the
     /// firmware latches the KCI queue-base CSRs when it boots.
-    pub(crate) fn setup(&mut self, reg: &TpuRegs<'_>) -> Result {
+    pub(crate) fn setup(&mut self) -> Result {
         // SAFETY: raw MMIO pokes of unclaimed TPU sysreg / S2MPU blocks.
         unsafe {
             kernel::bindings::edgetpu_enable_coherency();
             kernel::bindings::edgetpu_s2mpu_allow_all(TPU_S2MPU_BASE);
         }
-        self.init_mailbox(reg)
+        self.init_mailbox();
+        Ok(())
     }
 
-    fn init_mailbox(&mut self, reg: &TpuRegs<'_>) -> Result {
+    fn init_mailbox(&mut self) {
         let cmd_va = tpu_va(CMD_Q_PHYS);
         let resp_va = tpu_va(RESP_Q_PHYS);
 
         // Cmd queue.
-        reg.try_write32((cmd_va & 0xffff_ffff) as u32, KCI_CTX_BASE + CTX_CMD_Q_ADDR_LO)?;
-        reg.try_write32((cmd_va >> 32) as u32, KCI_CTX_BASE + CTX_CMD_Q_ADDR_HI)?;
-        reg.try_write32(QUEUE_SIZE, KCI_CTX_BASE + CTX_CMD_Q_SIZE)?;
-        reg.try_write32(0, KCI_CMD_BASE + CMD_TAIL)?;
-        reg.try_write32(0, KCI_CMD_BASE + CMD_HEAD)?;
+        csr::write(KCI_CTX_BASE + CTX_CMD_Q_ADDR_LO, (cmd_va & 0xffff_ffff) as u32);
+        csr::write(KCI_CTX_BASE + CTX_CMD_Q_ADDR_HI, (cmd_va >> 32) as u32);
+        csr::write(KCI_CTX_BASE + CTX_CMD_Q_SIZE, QUEUE_SIZE);
+        csr::write(KCI_CMD_BASE + CMD_TAIL, 0);
+        csr::write(KCI_CMD_BASE + CMD_HEAD, 0);
 
         // Resp queue.
-        reg.try_write32((resp_va & 0xffff_ffff) as u32, KCI_CTX_BASE + CTX_RESP_Q_ADDR_LO)?;
-        reg.try_write32((resp_va >> 32) as u32, KCI_CTX_BASE + CTX_RESP_Q_ADDR_HI)?;
-        reg.try_write32(QUEUE_SIZE, KCI_CTX_BASE + CTX_RESP_Q_SIZE)?;
-        reg.try_write32(0, KCI_RESP_BASE + RESP_HEAD)?;
-        reg.try_write32(0, KCI_RESP_BASE + RESP_TAIL)?;
+        csr::write(KCI_CTX_BASE + CTX_RESP_Q_ADDR_LO, (resp_va & 0xffff_ffff) as u32);
+        csr::write(KCI_CTX_BASE + CTX_RESP_Q_ADDR_HI, (resp_va >> 32) as u32);
+        csr::write(KCI_CTX_BASE + CTX_RESP_Q_SIZE, QUEUE_SIZE);
+        csr::write(KCI_RESP_BASE + RESP_HEAD, 0);
+        csr::write(KCI_RESP_BASE + RESP_TAIL, 0);
 
         // Clear stale doorbells, enable doorbells, enable the mailbox context.
-        reg.try_write32(1, KCI_RESP_BASE + RESP_DOORBELL_CLEAR)?;
-        reg.try_write32(1, KCI_CTX_BASE + CTX_CMD_Q_DOORBELL_CLEAR)?;
-        reg.try_write32(1, KCI_CTX_BASE + CTX_CMD_Q_DOORBELL_ENABLE)?;
-        reg.try_write32(1, KCI_CTX_BASE + CTX_RESP_Q_DOORBELL_ENABLE)?;
-        reg.try_write32(1, KCI_CTX_BASE + CTX_ENABLE)?;
+        csr::write(KCI_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
+        csr::write(KCI_CTX_BASE + CTX_CMD_Q_DOORBELL_CLEAR, 1);
+        csr::write(KCI_CTX_BASE + CTX_CMD_Q_DOORBELL_ENABLE, 1);
+        csr::write(KCI_CTX_BASE + CTX_RESP_Q_DOORBELL_ENABLE, 1);
+        csr::write(KCI_CTX_BASE + CTX_ENABLE, 1);
 
         self.seq = 0;
         self.cmd_tail = 0;
         self.resp_head = 0;
-        Ok(())
     }
 
     /// Push one command element and wait for its response. Returns
@@ -141,7 +142,6 @@ impl Kci {
     fn transact(
         &mut self,
         dev: &Device,
-        reg: &TpuRegs<'_>,
         code: u16,
         dma_addr: u64,
         dma_size: u32,
@@ -160,26 +160,28 @@ impl Kci {
 
         mem::write(CMD_Q_PHYS + (slot * CMD_ELEM) as u64, &cmd)?;
         self.cmd_tail += 1;
-        reg.try_write32(self.cmd_tail, KCI_CMD_BASE + CMD_TAIL)?;
-        reg.try_write32(1, KCI_CMD_BASE + CMD_DOORBELL_SET)?;
+        csr::write(KCI_CMD_BASE + CMD_TAIL, self.cmd_tail);
+        csr::write(KCI_CMD_BASE + CMD_DOORBELL_SET, 1);
 
         // Poll the resp-queue tail for the reply (1 s budget, KCI_TIMEOUT).
         let mut got = false;
         for _ in 0..1000 {
-            if reg.try_read32(KCI_RESP_BASE + RESP_TAIL)? != self.resp_head {
+            if csr::read(KCI_RESP_BASE + RESP_TAIL) != self.resp_head {
                 got = true;
                 break;
             }
             fsleep(Delta::from_millis(1));
         }
         if !got {
-            let cmd_head = reg.try_read32(KCI_CMD_BASE + CMD_HEAD)?;
-            let cmd_err = reg.try_read32(KCI_CMD_BASE + CMD_ERROR_STATUS)?;
-            let resp_err = reg.try_read32(KCI_RESP_BASE + RESP_ERROR_STATUS)?;
             dev_err!(
                 dev,
                 "edgetpu: KCI timeout (code {}): cmd[head={} tail={} err={:#x}] resp[tail={} err={:#x}]\n",
-                code, cmd_head, self.cmd_tail, cmd_err, self.resp_head, resp_err
+                code,
+                csr::read(KCI_CMD_BASE + CMD_HEAD),
+                self.cmd_tail,
+                csr::read(KCI_CMD_BASE + CMD_ERROR_STATUS),
+                self.resp_head,
+                csr::read(KCI_RESP_BASE + RESP_ERROR_STATUS)
             );
             return Err(ETIMEDOUT);
         }
@@ -194,8 +196,8 @@ impl Kci {
 
         // Ack: advance resp head, clear the resp doorbell.
         self.resp_head += 1;
-        reg.try_write32(self.resp_head, KCI_RESP_BASE + RESP_HEAD)?;
-        reg.try_write32(1, KCI_RESP_BASE + RESP_DOORBELL_CLEAR)?;
+        csr::write(KCI_RESP_BASE + RESP_HEAD, self.resp_head);
+        csr::write(KCI_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
 
         if rseq != self.seq {
             dev_err!(dev, "edgetpu: KCI resp seq {} != {}\n", rseq, self.seq);
@@ -207,13 +209,12 @@ impl Kci {
 
     /// Send `FIRMWARE_INFO` and return the firmware flavor — proves the firmware
     /// is interactively processing mailbox commands.
-    pub(crate) fn fw_info(&mut self, dev: &Device, reg: &TpuRegs<'_>) -> Result<u32> {
+    pub(crate) fn fw_info(&mut self, dev: &Device) -> Result<u32> {
         let zeros = [0u8; FW_INFO_SIZE];
         mem::write(FW_INFO_PHYS, &zeros)?;
 
         let (rcode, _) = self.transact(
             dev,
-            reg,
             KCI_CODE_FIRMWARE_INFO,
             tpu_va(FW_INFO_PHYS),
             FW_INFO_SIZE as u32,
@@ -235,7 +236,6 @@ impl Kci {
     pub(crate) fn open_device(
         &mut self,
         dev: &Device,
-        reg: &TpuRegs<'_>,
         mailbox_id: u32,
         vcid: u16,
         first_open: bool,
@@ -250,7 +250,7 @@ impl Kci {
         mem::write(DETAIL_PHYS, &detail)?;
 
         let (rcode, _) =
-            self.transact(dev, reg, KCI_CODE_OPEN_DEVICE, tpu_va(DETAIL_PHYS), 8, map)?;
+            self.transact(dev, KCI_CODE_OPEN_DEVICE, tpu_va(DETAIL_PHYS), 8, map)?;
         if rcode != KCI_ERROR_OK {
             dev_err!(
                 dev,
@@ -260,20 +260,15 @@ impl Kci {
             );
             return Err(EIO);
         }
-        dev_info!(
-            dev,
-            "edgetpu: *** VII mailbox {} OPEN_DEVICE ok (vcid {}) ***\n",
-            mailbox_id,
-            vcid
-        );
         Ok(())
     }
 
-    /// Unbind a previously opened mailbox (best-effort; janeiro
-    /// `edgetpu_kci_close_device`). Only the mailbox bitmap is required.
-    pub(crate) fn close_device(&mut self, dev: &Device, reg: &TpuRegs<'_>, mailbox_id: u32) -> Result {
+    /// Unbind a previously opened mailbox (janeiro `edgetpu_kci_close_device`) —
+    /// frees the firmware's per-context state (registered scratch/executables).
+    /// Best-effort: only the mailbox bitmap is required.
+    pub(crate) fn close_device(&mut self, dev: &Device, mailbox_id: u32) -> Result {
         let map = 1u32 << mailbox_id;
-        let (_rcode, _) = self.transact(dev, reg, KCI_CODE_CLOSE_DEVICE, 0, 0, map)?;
+        let (_rcode, _) = self.transact(dev, KCI_CODE_CLOSE_DEVICE, 0, 0, map)?;
         Ok(())
     }
 }
