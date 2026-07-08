@@ -151,7 +151,7 @@ pub(crate) fn firmware_bringup(
 
     // 6. Program the KCI mailbox + open the TPU data-path S2MPU BEFORE start —
     //    the firmware latches the queue-base CSRs when it boots.
-    kci.setup(reg)?;
+    kci.setup()?;
 
     // 7. Release the R52 out of reset via GSA.
     let state = gsa.send_cmd(GSA_TPU_START)?;
@@ -166,13 +166,13 @@ pub(crate) fn firmware_bringup(
     //    processing mailbox commands, not just started. Give the R52 a moment
     //    to finish its own boot before the first command.
     fsleep(Delta::from_millis(50));
-    let flavor = kci.fw_info(dev, reg)?;
+    let flavor = kci.fw_info(dev)?;
     dev_info!(dev, "edgetpu: *** KCI FW_INFO ok — fw_flavor={} ***\n", flavor);
 
     // 9. M2: bring up + bind the VII inference mailbox (mailbox 1) via a KCI
     //    OPEN_DEVICE. Success means the firmware accepted a per-context
     //    inference queue — the substrate the SUBMIT ioctl drives.
-    vii.activate(dev, reg, kci)?;
+    vii.activate(dev, kci)?;
 
     Ok(())
 }

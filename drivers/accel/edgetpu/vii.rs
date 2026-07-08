@@ -17,12 +17,10 @@
 
 use kernel::{
     device::Device,
-    io::Io,
     prelude::*,
     time::{delay::fsleep, Delta},
 };
 
-use crate::bringup::TpuRegs;
 use crate::csr;
 use crate::kci::Kci;
 use crate::mem::{self, tpu_va};
@@ -89,47 +87,63 @@ impl Vii {
         self.activated
     }
 
-    /// Program the VII mailbox context/queue CSRs (probe-time, via `IoMem`).
+    /// Program the VII mailbox context/queue CSRs (via the persistent CSR map).
     /// The firmware reads these when the mailbox is activated by `OPEN_DEVICE`.
-    fn setup(&mut self, reg: &TpuRegs<'_>) -> Result {
+    fn setup(&mut self) {
         let cmd_va = tpu_va(CMD_Q_PHYS);
         let resp_va = tpu_va(RESP_Q_PHYS);
 
-        reg.try_write32(0, VII_CTX_BASE + CTX_PRIORITY)?;
+        csr::write(VII_CTX_BASE + CTX_PRIORITY, 0);
         // Explicit doorbell (like KCI) rather than tail-write auto-doorbell.
-        reg.try_write32(0, VII_CTX_BASE + CTX_CMD_Q_TAIL_DOORBELL_ENABLE)?;
+        csr::write(VII_CTX_BASE + CTX_CMD_Q_TAIL_DOORBELL_ENABLE, 0);
 
         // Cmd queue.
-        reg.try_write32((cmd_va & 0xffff_ffff) as u32, VII_CTX_BASE + CTX_CMD_Q_ADDR_LO)?;
-        reg.try_write32((cmd_va >> 32) as u32, VII_CTX_BASE + CTX_CMD_Q_ADDR_HI)?;
-        reg.try_write32(QUEUE_SIZE, VII_CTX_BASE + CTX_CMD_Q_SIZE)?;
-        reg.try_write32(0, VII_CMD_BASE + CMD_TAIL)?;
-        reg.try_write32(0, VII_CMD_BASE + CMD_HEAD)?;
+        csr::write(VII_CTX_BASE + CTX_CMD_Q_ADDR_LO, (cmd_va & 0xffff_ffff) as u32);
+        csr::write(VII_CTX_BASE + CTX_CMD_Q_ADDR_HI, (cmd_va >> 32) as u32);
+        csr::write(VII_CTX_BASE + CTX_CMD_Q_SIZE, QUEUE_SIZE);
+        csr::write(VII_CMD_BASE + CMD_TAIL, 0);
+        csr::write(VII_CMD_BASE + CMD_HEAD, 0);
 
         // Resp queue.
-        reg.try_write32((resp_va & 0xffff_ffff) as u32, VII_CTX_BASE + CTX_RESP_Q_ADDR_LO)?;
-        reg.try_write32((resp_va >> 32) as u32, VII_CTX_BASE + CTX_RESP_Q_ADDR_HI)?;
-        reg.try_write32(QUEUE_SIZE, VII_CTX_BASE + CTX_RESP_Q_SIZE)?;
-        reg.try_write32(0, VII_RESP_BASE + RESP_HEAD)?;
-        reg.try_write32(0, VII_RESP_BASE + RESP_TAIL)?;
+        csr::write(VII_CTX_BASE + CTX_RESP_Q_ADDR_LO, (resp_va & 0xffff_ffff) as u32);
+        csr::write(VII_CTX_BASE + CTX_RESP_Q_ADDR_HI, (resp_va >> 32) as u32);
+        csr::write(VII_CTX_BASE + CTX_RESP_Q_SIZE, QUEUE_SIZE);
+        csr::write(VII_RESP_BASE + RESP_HEAD, 0);
+        csr::write(VII_RESP_BASE + RESP_TAIL, 0);
 
         // Clear stale doorbells, enable doorbells, enable the context.
-        reg.try_write32(1, VII_RESP_BASE + RESP_DOORBELL_CLEAR)?;
-        reg.try_write32(1, VII_CTX_BASE + CTX_CMD_Q_DOORBELL_CLEAR)?;
-        reg.try_write32(1, VII_CTX_BASE + CTX_CMD_Q_DOORBELL_ENABLE)?;
-        reg.try_write32(1, VII_CTX_BASE + CTX_RESP_Q_DOORBELL_ENABLE)?;
-        reg.try_write32(1, VII_CTX_BASE + CTX_ENABLE)?;
+        csr::write(VII_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
+        csr::write(VII_CTX_BASE + CTX_CMD_Q_DOORBELL_CLEAR, 1);
+        csr::write(VII_CTX_BASE + CTX_CMD_Q_DOORBELL_ENABLE, 1);
+        csr::write(VII_CTX_BASE + CTX_RESP_Q_DOORBELL_ENABLE, 1);
+        csr::write(VII_CTX_BASE + CTX_ENABLE, 1);
 
         self.cmd_tail = 0;
         self.resp_head = 0;
-        Ok(())
     }
 
     /// Program the VII mailbox and bind it to a VCID via a KCI `OPEN_DEVICE`.
-    /// Runs during probe (both the CSR setup and the KCI command use `reg`).
-    pub(crate) fn activate(&mut self, dev: &Device, reg: &TpuRegs<'_>, kci: &mut Kci) -> Result {
-        self.setup(reg)?;
-        kci.open_device(dev, reg, VII_MAILBOX_ID, VII_VCID, true)?;
+    /// Called at probe (first_open) and on reactivate.
+    pub(crate) fn activate(&mut self, dev: &Device, kci: &mut Kci) -> Result {
+        self.setup();
+        kci.open_device(dev, VII_MAILBOX_ID, VII_VCID, true)?;
+        self.activated = true;
+        Ok(())
+    }
+
+    /// Reset the VII inference context for a new client: `CLOSE_DEVICE` frees the
+    /// firmware's per-context state (its registered scratch/executables, which
+    /// otherwise accumulate and get rejected after the first inference), then
+    /// re-program the queue CSRs and `OPEN_DEVICE` a fresh context. Mirrors
+    /// janeiro tearing down and re-creating a device group per run. Best-effort:
+    /// a failed close still proceeds to re-open.
+    pub(crate) fn reactivate(&mut self, dev: &Device, kci: &mut Kci) -> Result {
+        if self.activated {
+            let _ = kci.close_device(dev, VII_MAILBOX_ID);
+            self.activated = false;
+        }
+        self.setup();
+        kci.open_device(dev, VII_MAILBOX_ID, VII_VCID, false)?;
         self.activated = true;
         Ok(())
     }
