@@ -165,6 +165,10 @@ impl<T: drm::Driver> UnregisteredDevice<T> {
             features |= drm::driver::FEAT_RENDER;
         }
 
+        if T::FEAT_ACCEL {
+            features |= drm::driver::FEAT_ACCEL;
+        }
+
         features
     }
 
@@ -203,7 +207,13 @@ impl<T: drm::Driver> UnregisteredDevice<T> {
         fops: &Self::GEM_FOPS,
     };
 
-    const GEM_FOPS: bindings::file_operations = drm::gem::create_fops();
+    // Accelerator nodes must open via `accel_open` (which claims the minor from
+    // the accel minor xarray) rather than `drm_open`; everything else is shared.
+    const GEM_FOPS: bindings::file_operations = if T::FEAT_ACCEL {
+        drm::gem::create_accel_fops()
+    } else {
+        drm::gem::create_fops()
+    };
 
     /// Create a new `UnregisteredDevice` for a `drm::Driver`.
     ///

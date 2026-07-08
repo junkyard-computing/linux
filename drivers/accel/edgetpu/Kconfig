@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0
+config DRM_ACCEL_EDGETPU
+	tristate "Google Edge TPU (gs201) accelerator (Rust)"
+	depends on DRM_ACCEL
+	depends on RUST
+	depends on ARM64 || COMPILE_TEST
+	depends on GSA
+	select RUST_DRM_GEM_SHMEM_HELPER
+	help
+	  Rust DRM compute-accelerator driver for the Google Edge TPU built into
+	  the Tensor G2 (gs201) SoC, as found in the Pixel Fold (felix). Reuses the
+	  hardware knowledge of Google's out-of-tree edgetpu/rio stack but exposes a
+	  clean mainline /dev/accel/accelN interface; the DarwiNN/VII runtime lives
+	  in userspace.
+
+	  The secure firmware is authenticated and started by GSA over Trusty; the
+	  companion edgetpu_gsa module provides that glue, hence the GSA dependency.
+
+	  If M is selected, the modules are edgetpu and edgetpu_gsa.
