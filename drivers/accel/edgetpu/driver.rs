@@ -8,20 +8,29 @@ use kernel::{
         DmaMask, //
     },
     drm,
+    drm::ioctl,
+    new_mutex,
     of,
     platform,
     prelude::*,
     sizes::{SZ_2M, SZ_64K},
-    sync::aref::ARef,
+    sync::{
+        aref::ARef,
+        Mutex, //
+    },
 };
 
 use crate::file::EdgeTpuFileData;
 use crate::gem::BoData;
+use crate::ioctl::MailboxState;
+use crate::kci::Kci;
+use crate::mem::BoAllocator;
+use crate::vii::Vii;
 
-// The Edge TPU "TOP" CSR block is a single MMIO window; the highest register we
-// touch (LPM/PSM at ~0x1d0068) fits comfortably in 2 MiB. M1 will retain the
-// mapping (as `IoMem<'_, SZ_2M>`) via devres for the KCI/power path; M0 only
-// validates the resource, so no persistent alias is needed yet.
+// The Edge TPU "TOP" CSR block is a single MMIO window; the mailbox/power CSRs
+// we touch fit in 2 MiB. M2 drives the runtime VII mailbox from ioctls via a
+// module-lifetime CSR mapping in the C companion (see `csr` + `edgetpu_gsa.c`),
+// so this probe-time `IoMem` only needs to survive the boot bring-up.
 
 pub(crate) struct EdgeTpuDriver;
 
@@ -42,6 +51,10 @@ pub(crate) struct EdgeTpuPlatformData {
 #[pin_data]
 pub(crate) struct EdgeTpuData {
     pub(crate) pdev: ARef<platform::Device>,
+
+    /// Mailbox + buffer-object state, shared by the ioctl handlers.
+    #[pin]
+    pub(crate) mbox: Mutex<MailboxState>,
 }
 
 kernel::of_device_table!(
@@ -61,9 +74,8 @@ impl platform::Driver for EdgeTpuPlatformDriver {
         _info: Option<&'bound Self::IdInfo>,
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
         // Map the two reg windows: index 0 = main TPU CSR block (2 MiB),
-        // index 1 = SSMT stream-ID table (64 KiB). Both are used by the M1a
-        // power/SSMT sequence and dropped at the end of probe (M1b retains the
-        // CSR window via devres for the KCI mailbox).
+        // index 1 = SSMT stream-ID table (64 KiB). Used by the boot bring-up
+        // and dropped at the end of probe.
         let reg = pdev
             .io_request_by_index(0)
             .ok_or(ENODEV)?
@@ -84,24 +96,33 @@ impl platform::Driver for EdgeTpuPlatformDriver {
         clk.set_rate(Hertz::from_mhz(627))?;
         clk.prepare_enable()?;
 
+        // Map the persistent CSR window used by the runtime VII mailbox path.
+        crate::csr::init()?;
+
+        // Bring up the firmware (M1a/M1b) and activate the VII mailbox (M2).
+        // Non-fatal so the accel device stays bound for inspection on failure.
+        let mut kci = Kci::new();
+        let mut vii = Vii::new();
+        match crate::bringup::firmware_bringup(pdev.as_ref(), &reg, &ssmt, &mut kci, &mut vii) {
+            Ok(()) => dev_info!(pdev, "edgetpu: M2 bring-up complete\n"),
+            Err(e) => dev_err!(pdev, "edgetpu: bring-up failed: {:?}\n", e),
+        }
+
         let platform: ARef<platform::Device> = pdev.into();
 
         let data = try_pin_init!(EdgeTpuData {
             pdev: platform.clone(),
+            mbox <- new_mutex!(MailboxState {
+                kci,
+                vii,
+                bo: BoAllocator::new(),
+            }),
         });
 
         let tdev = drm::UnregisteredDevice::<EdgeTpuDriver>::new(pdev.as_ref(), data)?;
         let tdev = drm::driver::Registration::new_foreign_owned(tdev, pdev.as_ref(), 0)?;
 
         dev_info!(pdev, "Edge TPU (gs201): accel device registered.\n");
-
-        // M1a firmware bring-up: authenticate + start the secure firmware via
-        // GSA. Logged but non-fatal so the accel device stays bound for
-        // inspection even if the handshake fails.
-        match crate::bringup::firmware_bringup(pdev.as_ref(), &reg, &ssmt) {
-            Ok(()) => dev_info!(pdev, "edgetpu: M1a bring-up complete\n"),
-            Err(e) => dev_err!(pdev, "edgetpu: M1a bring-up failed: {:?}\n", e),
-        }
 
         Ok(EdgeTpuPlatformData {
             _device: tdev.into(),
@@ -117,7 +138,7 @@ impl PinnedDrop for EdgeTpuPlatformData {
 
 const INFO: drm::DriverInfo = drm::DriverInfo {
     major: 0,
-    minor: 1,
+    minor: 2,
     patchlevel: 0,
     name: c"edgetpu",
     desc: c"Google Edge TPU (gs201) accelerator",
@@ -132,6 +153,10 @@ impl drm::Driver for EdgeTpuDriver {
     const INFO: drm::DriverInfo = INFO;
     const FEAT_ACCEL: bool = true;
 
-    // M0 exposes no ioctls; the CREATE_BO/SUBMIT/PREP/FINI ABI lands in M2.
-    const IOCTLS: &'static [drm::ioctl::DrmIoctlDescriptor] = &[];
+    kernel::declare_drm_ioctls! {
+        (EDGETPU_CREATE_BO, drm_edgetpu_create_bo, ioctl::RENDER_ALLOW, EdgeTpuFileData::create_bo),
+        (EDGETPU_BO_WRITE, drm_edgetpu_bo_write, ioctl::RENDER_ALLOW, EdgeTpuFileData::bo_write),
+        (EDGETPU_BO_READ, drm_edgetpu_bo_read, ioctl::RENDER_ALLOW, EdgeTpuFileData::bo_read),
+        (EDGETPU_SUBMIT, drm_edgetpu_submit, ioctl::RENDER_ALLOW, EdgeTpuFileData::submit),
+    }
 }
