@@ -3,9 +3,15 @@
  * Minimal mainline stub for the AOSP/Google debug-snapshot (dss) API.
  *
  * The real header lives in the Pixel/Exynos vendor tree and is not present in
- * mainline Linux. The samsung-iommu driver only needs a handful of symbols to
- * build; provide no-op equivalents here so it links standalone. If the vendor
- * debug-snapshot subsystem is ever ported, replace this stub.
+ * mainline Linux. The samsung-iommu and drm/samsung-felix drivers only need a
+ * handful of symbols to build; provide no-op equivalents here so they link
+ * standalone. If the vendor debug-snapshot subsystem is ever ported, replace
+ * this stub.
+ *
+ * NOTE: this global header (on LINUXINCLUDE's search path) shadows any local
+ * per-driver <soc/google/debug-snapshot.h> stub, since -I$(srctree)/include is
+ * searched before a driver's ccflags-y -I. So every dss symbol any in-tree
+ * driver references must be declared HERE, not only in a driver-local stub.
  */
 #ifndef __SOC_GOOGLE_DEBUG_SNAPSHOT_STUB_H
 #define __SOC_GOOGLE_DEBUG_SNAPSHOT_STUB_H
@@ -24,6 +30,12 @@
 
 static inline void dbg_snapshot_do_dpm_policy(unsigned int policy,
 					      const char *str)
+{
+	/* no-op stub */
+}
+
+/* Referenced by drm/samsung-felix (exynos_drm_dpp.c) on an iDMA deadlock. */
+static inline void dbg_snapshot_emergency_reboot(const char *str)
 {
 	/* no-op stub */
 }
