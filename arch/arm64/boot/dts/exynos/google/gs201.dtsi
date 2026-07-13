@@ -27,6 +27,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/soc/samsung,exynos-usi.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/thermal/thermal.h>
 
 / {
 	compatible = "google,gs201";
@@ -83,6 +84,7 @@
 			dynamic-power-coefficient = <89>;
 			operating-points-v2 = <&cluster0_opp>;
 			clocks = <&acpm_ipc GS201_CLK_ACPM_DVFS_CPUCL0>;
+			#cooling-cells = <2>;
 		};
 		cpu1: cpu@100 {
 			device_type = "cpu";
@@ -129,6 +131,7 @@
 			dynamic-power-coefficient = <513>;
 			operating-points-v2 = <&cluster1_opp>;
 			clocks = <&acpm_ipc GS201_CLK_ACPM_DVFS_CPUCL1>;
+			#cooling-cells = <2>;
 		};
 		cpu5: cpu@500 {
 			device_type = "cpu";
@@ -153,6 +156,7 @@
 			dynamic-power-coefficient = <757>;
 			operating-points-v2 = <&cluster2_opp>;
 			clocks = <&acpm_ipc GS201_CLK_ACPM_DVFS_CPUCL2>;
+			#cooling-cells = <2>;
 		};
 		cpu7: cpu@700 {
 			device_type = "cpu";
@@ -851,6 +855,125 @@
 			#clock-cells = <1>;
 			mboxes = <&ap2apm_mailbox>;
 			shmem = <&apm_sram>;
+		};
+	};
+
+	/*
+	 * gs201 TMU is read over ACPM IPC (channel IPC_AP_TMU), not MMIO.
+	 * The gs201_acpm_thermal driver registers these sensors; the cell in a
+	 * thermal-zone's thermal-sensors phandle is the ACPM tz id:
+	 *   0=BIG 1=MID 2=LITTLE 3=G3D 4=ISP 5=TPU 6=AUR 7=...
+	 */
+	acpm_tmu: thermal-sensor {
+		compatible = "google,gs201-acpm-thermal";
+		samsung,acpm-ipc = <&acpm_ipc>;
+		samsung,tmu-channel = <9>;
+		#thermal-sensor-cells = <1>;
+	};
+
+	thermal-zones {
+		/*
+		 * Bring-up thermal management: the mainline port previously had
+		 * no sensors at all, so the SoC heated unthrottled under load
+		 * until a HW/PMIC cutoff hard-powered the device off. These
+		 * zones give the thermal core temperatures to act on — passive
+		 * trips throttle the matching CPU cluster / GPU DVFS, critical
+		 * trips are a graceful-shutdown backstop below the HW cutoff.
+		 */
+		big-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&acpm_tmu 0>;
+			trips {
+				big_alert: alert {
+					temperature = <90000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				big_crit: crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&big_alert>;
+					cooling-device = <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		mid-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&acpm_tmu 1>;
+			trips {
+				mid_alert: alert {
+					temperature = <90000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				mid_crit: crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&mid_alert>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		little-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&acpm_tmu 2>;
+			trips {
+				little_alert: alert {
+					temperature = <90000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				little_crit: crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&little_alert>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		g3d-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&acpm_tmu 3>;
+			trips {
+				g3d_alert: alert {
+					temperature = <90000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				g3d_crit: crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&g3d_alert>;
+					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
 		};
 	};
 

@@ -10,3 +10,15 @@ config EXYNOS_THERMAL
 	  the TMU, reports temperature and handles cooling action if defined.
 	  This driver uses the Exynos core thermal APIs and TMU configuration
 	  data from the supported SoCs.
+
+config GS201_ACPM_THERMAL
+	tristate "Google gs201 ACPM thermal sensor driver"
+	depends on THERMAL_OF
+	depends on EXYNOS_ACPM_PROTOCOL
+	default ARCH_EXYNOS
+	help
+	  Thermal sensor driver for the Google gs201 (Tensor G2) SoC, whose
+	  Thermal Management Unit is read over IPC to the ACPM power-management
+	  coprocessor rather than a memory-mapped register block. Registers the
+	  TMU sensors with the thermal framework so DT thermal-zones and cooling
+	  maps can throttle CPU cpufreq / GPU devfreq under load.
