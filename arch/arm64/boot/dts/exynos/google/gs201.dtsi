@@ -1776,6 +1776,20 @@
 		operating-points-v2 = <&gpu_opp>;
 		dynamic-power-coefficient = <625>;
 		#cooling-cells = <2>;
+
+		/*
+		 * Memory-bandwidth path GPU -> INT -> DRAM(MIF). The OPP core
+		 * (dev_pm_opp_of_add_table -> _of_find_icc_paths) picks this up
+		 * and, on each panthor DVFS transition, votes the active OPP's
+		 * opp-peak-kBps via icc_set_bw. exynos-generic-icc turns that
+		 * into MIN_FREQUENCY dev_pm_qos floors on BOTH bus_int and
+		 * bus_mif (a two-node path is required: the interconnect core's
+		 * apply_constraints() only calls the provider .set() for the
+		 * second node of a hop, so a single-node self-path is a no-op).
+		 * This is the mainline-idiomatic replacement for AOSP's mali
+		 * gpu_dvfs_qos int_min + mif_min PM_QoS votes.
+		 */
+		interconnects = <&bus_int &bus_mif>;
 	};
 
 	/*
@@ -1788,20 +1802,29 @@
 	 */
 	gpu_opp: opp-table-gpu {
 		compatible = "operating-points-v2";
-		/* G3D (shader core) frequencies in Hz */
-		opp-202000000 { opp-hz = /bits/ 64 <202000000>; opp-microvolt = <900000>; };
-		opp-251000000 { opp-hz = /bits/ 64 <251000000>; opp-microvolt = <900000>; };
-		opp-302000000 { opp-hz = /bits/ 64 <302000000>; opp-microvolt = <900000>; };
-		opp-351000000 { opp-hz = /bits/ 64 <351000000>; opp-microvolt = <900000>; };
-		opp-400000000 { opp-hz = /bits/ 64 <400000000>; opp-microvolt = <900000>; };
-		opp-434000000 { opp-hz = /bits/ 64 <434000000>; opp-microvolt = <900000>; };
-		opp-471000000 { opp-hz = /bits/ 64 <471000000>; opp-microvolt = <900000>; };
-		opp-510000000 { opp-hz = /bits/ 64 <510000000>; opp-microvolt = <900000>; };
-		opp-572000000 { opp-hz = /bits/ 64 <572000000>; opp-microvolt = <900000>; };
-		opp-633000000 { opp-hz = /bits/ 64 <633000000>; opp-microvolt = <900000>; };
-		opp-701000000 { opp-hz = /bits/ 64 <701000000>; opp-microvolt = <900000>; };
-		opp-762000000 { opp-hz = /bits/ 64 <762000000>; opp-microvolt = <900000>; };
-		opp-848000000 { opp-hz = /bits/ 64 <848000000>; opp-microvolt = <900000>; };
+		/*
+		 * G3D (shader core) frequencies in Hz. opp-peak-kBps is the DRAM
+		 * bandwidth voted through the interconnect at that OPP; with
+		 * bus_mif's data-clock-ratio=8 it maps to a MIF MIN_FREQUENCY of
+		 * peak_kBps/8 kHz (snapped up to a MIF OPP by devfreq). The ladder
+		 * keeps light GPU load near the MIF floor and pulls MIF to its
+		 * 3172MHz max only at the top shader clocks (measured ~1.4-1.5x on
+		 * llama.cpp/PanVK from MIF 421->3172). Tunable knob.
+		 *   MIF target:  421  546 1014 1014 1352 1352 1539 1539 2028 2028 2730 3172 3172
+		 */
+		opp-202000000 { opp-hz = /bits/ 64 <202000000>; opp-microvolt = <900000>; opp-peak-kBps = <3368000>; };
+		opp-251000000 { opp-hz = /bits/ 64 <251000000>; opp-microvolt = <900000>; opp-peak-kBps = <4368000>; };
+		opp-302000000 { opp-hz = /bits/ 64 <302000000>; opp-microvolt = <900000>; opp-peak-kBps = <8112000>; };
+		opp-351000000 { opp-hz = /bits/ 64 <351000000>; opp-microvolt = <900000>; opp-peak-kBps = <8112000>; };
+		opp-400000000 { opp-hz = /bits/ 64 <400000000>; opp-microvolt = <900000>; opp-peak-kBps = <10816000>; };
+		opp-434000000 { opp-hz = /bits/ 64 <434000000>; opp-microvolt = <900000>; opp-peak-kBps = <10816000>; };
+		opp-471000000 { opp-hz = /bits/ 64 <471000000>; opp-microvolt = <900000>; opp-peak-kBps = <12312000>; };
+		opp-510000000 { opp-hz = /bits/ 64 <510000000>; opp-microvolt = <900000>; opp-peak-kBps = <12312000>; };
+		opp-572000000 { opp-hz = /bits/ 64 <572000000>; opp-microvolt = <900000>; opp-peak-kBps = <16224000>; };
+		opp-633000000 { opp-hz = /bits/ 64 <633000000>; opp-microvolt = <900000>; opp-peak-kBps = <16224000>; };
+		opp-701000000 { opp-hz = /bits/ 64 <701000000>; opp-microvolt = <900000>; opp-peak-kBps = <21840000>; };
+		opp-762000000 { opp-hz = /bits/ 64 <762000000>; opp-microvolt = <900000>; opp-peak-kBps = <25376000>; };
+		opp-848000000 { opp-hz = /bits/ 64 <848000000>; opp-microvolt = <900000>; opp-peak-kBps = <25376000>; };
 	};
 
 	/* ------------------------------------------------------------------ */
@@ -1879,5 +1902,58 @@
 		 * memory load scales MIF up while idle (~0.4%) stays at minimum.
 		 */
 		exynos,saturation-ratio = <8>;
+
+		/*
+		 * Act as the DRAM/DMC interconnect provider so DMA masters can
+		 * vote memory bandwidth. The gs201-ppc counters above only see
+		 * CCI (CPU/coherent) traffic; the G710 GPU reaches DRAM on a path
+		 * they do NOT count, so without this a pure-GPU workload leaves
+		 * MIF at its 421MHz floor. exynos-generic-icc converts a
+		 * bandwidth vote to freq = peak_kBps / data-clock-ratio and drops
+		 * it in as a MIN_FREQUENCY dev_pm_qos request (a floor that
+		 * composes with simple_ondemand). ratio 8 => 3172MHz needs
+		 * 25.376 GB/s, matching the GPU OPP table's top opp-peak-kBps.
+		 */
+		#interconnect-cells = <0>;
+		samsung,data-clock-ratio = <8>;
+	};
+
+	/*
+	 * INT (internal NoC) devfreq. Sits between DMA masters (GPU, display)
+	 * and MIF on the path to DRAM. Modelled as a passive exynos-bus that
+	 * follows bus_mif, and as the source interconnect node for the GPU's
+	 * bandwidth path (GPU -> bus_int -> bus_mif). The ACPM INT clock does
+	 * freq+voltage DVFS (voltage coupled in firmware, same dummy-vdd story
+	 * as MIF). Frequencies are the AOSP gs201 INT DVFS span (100-533MHz);
+	 * ACPM snaps each request to its nearest ECT level.
+	 */
+	int_opp: opp-table-int {
+		compatible = "operating-points-v2";
+		opp-100000000 { opp-hz = /bits/ 64 <100000000>; opp-microvolt = <800000>; };
+		opp-133000000 { opp-hz = /bits/ 64 <133000000>; opp-microvolt = <800000>; };
+		opp-200000000 { opp-hz = /bits/ 64 <200000000>; opp-microvolt = <800000>; };
+		opp-267000000 { opp-hz = /bits/ 64 <267000000>; opp-microvolt = <800000>; };
+		opp-356000000 { opp-hz = /bits/ 64 <356000000>; opp-microvolt = <800000>; };
+		opp-400000000 { opp-hz = /bits/ 64 <400000000>; opp-microvolt = <800000>; };
+		opp-465000000 { opp-hz = /bits/ 64 <465000000>; opp-microvolt = <800000>; };
+		opp-533000000 { opp-hz = /bits/ 64 <533000000>; opp-microvolt = <800000>; };
+	};
+
+	bus_int: bus-int {
+		compatible = "samsung,exynos-bus";
+		clocks = <&acpm_ipc GS201_CLK_ACPM_DVFS_INT>;
+		clock-names = "bus";
+		operating-points-v2 = <&int_opp>;
+		vdd-supply = <&mif_dummy_vdd>;
+		/* Passive: track bus_mif (the DRAM-side load proxy). */
+		devfreq = <&bus_mif>;
+		/*
+		 * Source interconnect node for the GPU path; links up to bus_mif
+		 * (the DMC). ratio 8 => a peak-kBps vote maps to kHz/8; INT clamps
+		 * it to its own 533MHz max, so any GPU vote pulls INT toward max.
+		 */
+		#interconnect-cells = <0>;
+		interconnects = <&bus_mif>;
+		samsung,data-clock-ratio = <8>;
 	};
 };
