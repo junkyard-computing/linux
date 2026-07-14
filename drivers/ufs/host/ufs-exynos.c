@@ -959,18 +959,21 @@ static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
 	 * DME_HIBER_ENTER/EXIT cycles tripped HOST_BUS_FATAL_ERROR (IS BIT(17),
 	 * saved_err=0x20000) ~36s in — but only ever observed under the (g2)
 	 * PWM workaround. HS-G4 now runs (FORCE_PWM_GEAR=0, ~251 MB/s), so this
-	 * re-enables the inherited caps to test whether clk-gating hibern8 is
-	 * stable at HS. rpm/spm stay pinned at LVL_0 to ISOLATE the clk-gating
-	 * hibern8 path from runtime-PM autosuspend; if this is stable under
-	 * load, the follow-up is spm_lvl=UFS_PM_LVL_5 (AOSP override) + a
-	 * hibern8 rpm_lvl. WATCH: if the ~36s HOST_BUS_FATAL recurs at HS, the
-	 * H8-exit path has a gear-independent bug — re-add the strip below.
+	 * re-enables the inherited caps. Build #13 validated clk-gating hibern8
+	 * is stable at HS (220 burst/idle cycles, no bus-fatal), so the LVL_0
+	 * pin is now lifted for deeper PM: spm_lvl=UFS_PM_LVL_5 matches AOSP's
+	 * override_hba_params (system suspend → device POWERDOWN + link OFF),
+	 * and rpm_lvl=UFS_PM_LVL_3 lets runtime autosuspend take the device to
+	 * SLEEP + link HIBERN8 on idle (the runtime-PM half of the (g4) re-test
+	 * — its DME_HIBER cycles were the other trigger of the PWM-era
+	 * bus-fatal). WATCH: if HOST_BUS_FATAL / a resume wedge appears at HS,
+	 * the runtime-PM path has a gear-independent bug — revert to LVL_0.
 	 * See project_ufs_bringup_state.md.
 	 */
-	hba->rpm_lvl = UFS_PM_LVL_0;
-	hba->spm_lvl = UFS_PM_LVL_0;
+	hba->rpm_lvl = UFS_PM_LVL_3;	/* runtime idle: dev SLEEP + link HIBERN8 */
+	hba->spm_lvl = UFS_PM_LVL_5;	/* system suspend: dev POWERDOWN + link OFF (AOSP) */
 	dev_info(dev,
-		 "gs201 UFS: clk-gating + hibern8-with-clk-gating ENABLED (HS re-test); PM lvl pinned LVL_0 to isolate\n");
+		 "gs201 UFS: clk-gating + hibern8; deeper PM rpm_lvl=3 spm_lvl=5\n");
 
 	/*
 	 * (h7) Tried several ways to clamp SCSI queue depth to 1 to dodge the
