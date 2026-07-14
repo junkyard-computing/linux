@@ -944,22 +944,33 @@ static int gs201_ufs_drv_init(struct exynos_ufs *ufs)
 	}
 
 	/*
-	 * (g4) Manual DME_HIBER_ENTER/EXIT cycles (driven by clock-gating-on-idle
-	 * and runtime PM autosuspend) trigger HOST_BUS_FATAL_ERROR (IS BIT(17),
-	 * saved_err=0x20000) ~36s into operation under the (g2) PWM workaround.
-	 * The (g3) UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8 quirk only suppresses the
-	 * controller's auto-hibern8 timer, not these driver-initiated cycles.
-	 * Strip the gating caps inherited from gs101_ufs_drv_init and pin both
-	 * PM levels to ACTIVE/ACTIVE-LINK so the link never enters hibern8.
-	 * Costs power but avoids the bus-fatal trip; remove once HS-Rate-B
-	 * works and the H8-exit path is properly tested.
+	 * (g4) UFS idle-power re-test on HS (2026-07-13).
+	 *
+	 * Clock-gating + hibern8-with-clock-gating is exactly the idle-power
+	 * mechanism AOSP uses on gs201: its exynos_ufs_set_features does
+	 * `hba->caps = UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING`
+	 * (no board sets `samsung,support-ah8`, so ah8_ahit==0 and the vendor
+	 * auto-hibern8 path is NOT used — BROKEN_AUTO_HIBERN8 stays set on gs201,
+	 * which is also why the controller CAP 0x1303FF1F leaves bit 23 clear).
+	 * So the M-PHY idle power-down comes from the clk-gating framework
+	 * entering hibern8 on idle (ufshcd_can_hibern8_during_gating), NOT AH8.
+	 *
+	 * These caps were previously stripped because clock-gating-driven
+	 * DME_HIBER_ENTER/EXIT cycles tripped HOST_BUS_FATAL_ERROR (IS BIT(17),
+	 * saved_err=0x20000) ~36s in — but only ever observed under the (g2)
+	 * PWM workaround. HS-G4 now runs (FORCE_PWM_GEAR=0, ~251 MB/s), so this
+	 * re-enables the inherited caps to test whether clk-gating hibern8 is
+	 * stable at HS. rpm/spm stay pinned at LVL_0 to ISOLATE the clk-gating
+	 * hibern8 path from runtime-PM autosuspend; if this is stable under
+	 * load, the follow-up is spm_lvl=UFS_PM_LVL_5 (AOSP override) + a
+	 * hibern8 rpm_lvl. WATCH: if the ~36s HOST_BUS_FATAL recurs at HS, the
+	 * H8-exit path has a gear-independent bug — re-add the strip below.
+	 * See project_ufs_bringup_state.md.
 	 */
-	hba->caps &= ~(UFSHCD_CAP_CLK_GATING |
-		       UFSHCD_CAP_HIBERN8_WITH_CLK_GATING);
 	hba->rpm_lvl = UFS_PM_LVL_0;
 	hba->spm_lvl = UFS_PM_LVL_0;
-	dev_dbg(dev,
-		 "gs201 UFS: stripped clk-gating + hibern8-with-clk-gating; PM lvl pinned to LVL_0\n");
+	dev_info(dev,
+		 "gs201 UFS: clk-gating + hibern8-with-clk-gating ENABLED (HS re-test); PM lvl pinned LVL_0 to isolate\n");
 
 	/*
 	 * (h7) Tried several ways to clamp SCSI queue depth to 1 to dodge the
@@ -3505,11 +3516,25 @@ static const struct exynos_ufs_drv_data gs201_ufs_drvs = {
 				  UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR |
 				  UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
 				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING |
-				  /* (g3) Auto-hibern8 exit triggers HOST_BUS_FATAL_ERROR
-				   * (IS BIT(17), saved_err=0x20000) ~36s into operation
-				   * with the (g2) PWM workaround. Disable until either
-				   * HS-Rate-B works (and we re-test H8 there) or the H8
-				   * exit path on gs201 mainline is fully wired up. */
+				  /*
+				   * (g3) Auto-hibern8 stays disabled. Originally added
+				   * because an AH8 exit tripped HOST_BUS_FATAL_ERROR ~36s in
+				   * under the (g2) PWM workaround, with a note to re-test once
+				   * HS worked. HS-G4 now runs (FORCE_PWM_GEAR=0, ~251 MB/s),
+				   * so the re-test was done (2026-07-13): dropping this quirk
+				   * is NECESSARY BUT NOT SUFFICIENT. gs201's controller does
+				   * not advertise standard auto-hibern8 — live
+				   * REG_CONTROLLER_CAPABILITIES = 0x1303FF1F, bit 23
+				   * (MASK_AUTO_HIBERN8_SUPPORT, 0x00800000) is clear — so
+				   * ufshcd_is_auto_hibern8_supported() is false regardless of
+				   * this quirk and the core never arms the AHIT timer. AOSP
+				   * enables AH8 via a VENDOR mechanism this driver lacks:
+				   * force the cap, set ufs->ah8_ahit, and drive the Exynos
+				   * HCI_AH8 block (HCI_AH8_STATE FSM, AH8_ERR_REPORT_UE,
+				   * pre-pwr-change AH8-idle check). Until that port lands,
+				   * AH8 is genuinely unavailable — keep the quirk.
+				   * See project_ufs_bringup_state.md.
+				   */
 				  UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8,
 	.opts			= EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
 				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT,
