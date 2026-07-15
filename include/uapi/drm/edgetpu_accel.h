@@ -63,7 +63,7 @@ struct drm_edgetpu_submit {
 	__u8  command[48];	/* in:  VII command element */
 	__u8  response[24];	/* out: VII response element */
 	__u32 timeout_ms;	/* in:  0 => driver default (~1s) */
-	__u32 pad;
+	__u32 context;		/* in:  VII context/mailbox to submit to (0 or 1) */
 };
 
 /*
