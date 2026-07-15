@@ -84,13 +84,20 @@ const RESP_Q_PHYS: u64 = 0x9314_0000; // TPU-VA 0x10140000
 
 // --- Activation parameters --------------------------------------------------
 const VII_MAILBOX_ID: u32 = 1;
-const VII_VCID: u16 = 0;
+// The firmware keys registered scratch/executables by VCID and does NOT drop them on CLOSE_DEVICE
+// (only `first_open` clears a VCID's context). The AOSP driver therefore allocates a FRESH VCID per
+// device group and activates it with first_open=true (edgetpu-device-group.c:
+// `edgetpu_mailbox_activate(..., group->vcid, !group->activated)`), freeing it on group teardown.
+// We mirror that by rotating the VCID across sessions so each reset_client gets a fresh context
+// instead of resuming (and accumulating in) a single fixed VCID. gs201 has EDGETPU_NUM_VCIDS=16.
+const NUM_VCIDS: u16 = 16;
 
-/// VII mailbox state (ring positions + activation status).
+/// VII mailbox state (ring positions + activation status + rotating VCID).
 pub(crate) struct Vii {
     cmd_tail: u32,
     resp_head: u32,
     activated: bool,
+    vcid: u16,
 }
 
 impl Vii {
@@ -99,7 +106,15 @@ impl Vii {
             cmd_tail: 0,
             resp_head: 0,
             activated: false,
+            vcid: NUM_VCIDS - 1, // first `next_vcid()` rolls to 0
         }
+    }
+
+    /// Advance to the next VCID (round-robin over the pool). Each session binds a fresh VCID so
+    /// the firmware gives it a clean context rather than accumulating on a reused one.
+    fn next_vcid(&mut self) -> u16 {
+        self.vcid = (self.vcid + 1) % NUM_VCIDS;
+        self.vcid
     }
 
     pub(crate) fn is_activated(&self) -> bool {
@@ -141,28 +156,29 @@ impl Vii {
         self.resp_head = 0;
     }
 
-    /// Program the VII mailbox and bind it to a VCID via a KCI `OPEN_DEVICE`.
-    /// Called at probe (first_open) and on reactivate.
+    /// Program the VII mailbox and bind it to a fresh VCID via a KCI `OPEN_DEVICE` (first_open).
+    /// Called at probe.
     pub(crate) fn activate(&mut self, dev: &Device, kci: &mut Kci) -> Result {
         self.setup();
-        kci.open_device(dev, VII_MAILBOX_ID, VII_VCID, true)?;
+        let vcid = self.next_vcid();
+        kci.open_device(dev, VII_MAILBOX_ID, vcid, true)?;
         self.activated = true;
         Ok(())
     }
 
-    /// Reset the VII inference context for a new client: `CLOSE_DEVICE` frees the
-    /// firmware's per-context state (its registered scratch/executables, which
-    /// otherwise accumulate and get rejected after the first inference), then
-    /// re-program the queue CSRs and `OPEN_DEVICE` a fresh context. Mirrors
-    /// janeiro tearing down and re-creating a device group per run. Best-effort:
-    /// a failed close still proceeds to re-open.
+    /// Reset the VII inference context for a new client. The firmware retains a VCID's registered
+    /// scratch/executables across CLOSE_DEVICE, so resuming a single fixed VCID (first_open=false)
+    /// accumulates them until inferences are rejected after ~one model forward. Instead we CLOSE
+    /// the mailbox and re-`OPEN_DEVICE` on the NEXT VCID with first_open=true — a clean context per
+    /// session, exactly as the AOSP driver does per device group. Best-effort close.
     pub(crate) fn reactivate(&mut self, dev: &Device, kci: &mut Kci) -> Result {
         if self.activated {
             let _ = kci.close_device(dev, VII_MAILBOX_ID);
             self.activated = false;
         }
         self.setup();
-        kci.open_device(dev, VII_MAILBOX_ID, VII_VCID, false)?;
+        let vcid = self.next_vcid();
+        kci.open_device(dev, VII_MAILBOX_ID, vcid, true)?;
         self.activated = true;
         Ok(())
     }
