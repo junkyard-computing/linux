@@ -208,19 +208,62 @@ EXPORT_SYMBOL_GPL(edgetpu_gsa_unload);
 
 /*
  * Read/write a physically-contiguous region (the TPU firmware carveout, which
- * is no-map so it has no kernel linear alias) via a temporary write-combining
- * mapping. Used for the KCI cmd/resp queues + FW_INFO buffer, which live in the
- * carveout "remapped data region" the TPU reaches through the GSA-configured
- * instruction remap — no IOMMU/SysMMU mapping involved.
+ * is no-map so it has no kernel linear alias). Used for the KCI/VII cmd/resp
+ * queues, FW_INFO buffer, and the BO heap — all in the carveout "remapped data
+ * region" the TPU reaches through the GSA-configured instruction remap (no
+ * IOMMU/SysMMU mapping involved).
+ *
+ * Runtime inference rings the VII mailbox thousands of times per model forward,
+ * two of these accesses per submit (write the command element, read the
+ * response) plus BO reads. A memremap()+memunmap() per access was ~half the
+ * per-submit cost measured against the AOSP chardev (which mmaps the ring once
+ * from userspace). So the whole data region is memremap'd ONCE at probe
+ * (edgetpu_data_init) and every access memcpy's through that persistent mapping;
+ * the per-call memremap is kept only as a fallback for addresses outside the
+ * window or before init.
  */
+#define EDGETPU_DATA_PHYS	0x93100000UL /* KCI queues + VII queues + BO heap */
+#define EDGETPU_DATA_SIZE	0x100000     /* up to secure_data_start @0x93200000 */
+
+static void *edgetpu_data_va;
+
+int edgetpu_data_init(void)
+{
+	if (edgetpu_data_va)
+		return 0;
+	edgetpu_data_va = memremap(EDGETPU_DATA_PHYS, EDGETPU_DATA_SIZE, MEMREMAP_WC);
+	if (!edgetpu_data_va) {
+		pr_err("edgetpu_gsa: failed to map carveout data region@%lx\n",
+		       EDGETPU_DATA_PHYS);
+		return -ENOMEM;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(edgetpu_data_init);
+
+/* Persistent kernel VA for @phys if it lies within the mapped data window. */
+static void *edgetpu_data_ptr(phys_addr_t phys, size_t len)
+{
+	if (edgetpu_data_va && phys >= EDGETPU_DATA_PHYS &&
+	    phys + len <= EDGETPU_DATA_PHYS + EDGETPU_DATA_SIZE)
+		return edgetpu_data_va + (phys - EDGETPU_DATA_PHYS);
+	return NULL;
+}
+
 int edgetpu_mem_write(phys_addr_t phys, const void *src, size_t len)
 {
-	void *va = memremap(phys, len, MEMREMAP_WC);
+	void *va = edgetpu_data_ptr(phys, len);
 
+	if (va) {
+		memcpy(va, src, len);
+		/* Ensure the write lands before the caller rings the doorbell. */
+		wmb();
+		return 0;
+	}
+	va = memremap(phys, len, MEMREMAP_WC);
 	if (!va)
 		return -ENOMEM;
 	memcpy(va, src, len);
-	/* Ensure the write lands before the caller rings the TPU doorbell. */
 	wmb();
 	memunmap(va);
 	return 0;
@@ -229,11 +272,17 @@ EXPORT_SYMBOL_GPL(edgetpu_mem_write);
 
 int edgetpu_mem_read(phys_addr_t phys, void *dst, size_t len)
 {
-	void *va = memremap(phys, len, MEMREMAP_WC);
+	void *va = edgetpu_data_ptr(phys, len);
 
+	if (va) {
+		/* Observe the TPU's writes (e.g. the response element). */
+		rmb();
+		memcpy(dst, va, len);
+		return 0;
+	}
+	va = memremap(phys, len, MEMREMAP_WC);
 	if (!va)
 		return -ENOMEM;
-	/* Observe the TPU's writes (e.g. the response element / fw_info). */
 	rmb();
 	memcpy(dst, va, len);
 	memunmap(va);
@@ -287,11 +336,69 @@ void edgetpu_csr_write32(u32 off, u32 val)
 }
 EXPORT_SYMBOL_GPL(edgetpu_csr_write32);
 
+/*
+ * Pin the MIF (memory interface) and INT (interconnect) buses to their top
+ * frequencies while the TPU is in use.
+ *
+ * The firmware DMAs every VII mailbox op's executable, weights, scratch, and I/O
+ * through memory, but that traffic is invisible to the exynos-bus devfreq
+ * governor, so it idles the buses at their floor (MIF ~421 MHz of 3172, INT
+ * 100 MHz of 533 — ~13%) and every op runs ~5x slower. The AOSP driver requests
+ * these buses via exynos_pm_qos during inference; we do the mainline equivalent
+ * with a dev_pm_qos MIN_FREQUENCY request on each exynos-bus devfreq. Values are
+ * in kHz. Best-effort: if a bus isn't ready the TPU still runs, just slower.
+ */
+#include <linux/devfreq.h>
+#include <linux/pm_qos.h>
+
+static struct dev_pm_qos_request edgetpu_mif_qos;
+static struct dev_pm_qos_request edgetpu_int_qos;
+
+static int edgetpu_bus_pin(const char *name, struct dev_pm_qos_request *req, s32 freq_khz)
+{
+	struct device_node *np = of_find_node_by_name(NULL, name);
+	struct devfreq *df;
+	int ret;
+
+	if (!np)
+		return -ENODEV;
+	df = devfreq_get_devfreq_by_node(np);
+	of_node_put(np);
+	if (IS_ERR(df))
+		return PTR_ERR(df);
+	/* devfreq aggregates MIN_FREQUENCY qos on the bus's parent device (kHz). */
+	ret = dev_pm_qos_add_request(df->dev.parent, req, DEV_PM_QOS_MIN_FREQUENCY,
+				     freq_khz);
+	return ret < 0 ? ret : 0;
+}
+
+int edgetpu_bus_qos_init(void)
+{
+	int ret;
+
+	ret = edgetpu_bus_pin("bus-mif", &edgetpu_mif_qos, 3172000);
+	if (ret)
+		pr_warn("edgetpu_gsa: MIF bus qos not applied (%d); inference will be slow\n", ret);
+	ret = edgetpu_bus_pin("bus-int", &edgetpu_int_qos, 533000);
+	if (ret)
+		pr_warn("edgetpu_gsa: INT bus qos not applied (%d); inference will be slow\n", ret);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(edgetpu_bus_qos_init);
+
 static void __exit edgetpu_gsa_exit(void)
 {
+	if (dev_pm_qos_request_active(&edgetpu_mif_qos))
+		dev_pm_qos_remove_request(&edgetpu_mif_qos);
+	if (dev_pm_qos_request_active(&edgetpu_int_qos))
+		dev_pm_qos_remove_request(&edgetpu_int_qos);
 	if (edgetpu_tpu_csr) {
 		iounmap(edgetpu_tpu_csr);
 		edgetpu_tpu_csr = NULL;
+	}
+	if (edgetpu_data_va) {
+		memunmap(edgetpu_data_va);
+		edgetpu_data_va = NULL;
 	}
 }
 module_exit(edgetpu_gsa_exit);
