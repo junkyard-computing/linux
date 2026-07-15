@@ -1469,6 +1469,16 @@ config REGULATOR_S2MPS11
 	 Buck converters including Dual-Phase Buck converter, Buck-Boost
 	 converter, various LDOs.
 
+config S2MPG13_POWERMETER
+	tristate "Google gs201 s2mpg13 sub-PMIC ODPM power meter"
+	depends on MFD_SEC_CORE
+	depends on DEBUG_FS
+	help
+	  On-device power meter (ODPM) reader for the Google gs201 s2mpg13
+	  sub-PMIC. Reads the METER block's per-rail low-pass-filtered power
+	  and exposes it via debugfs. Covers the s2mpg13 sub-PMIC rails only
+	  (the main SoC rails live on the s2mpg12 main PMIC).
+
 config REGULATOR_S5M8767
 	tristate "Samsung S5M8767A voltage regulator"
 	depends on MFD_SEC_CORE || COMPILE_TEST
