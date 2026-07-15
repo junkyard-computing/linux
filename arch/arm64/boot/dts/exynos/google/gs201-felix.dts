@@ -586,3 +586,26 @@
 		label = "maxfg_secondary";
 	};
 };
+
+/*
+ * Turn off the inner (main fold) OLED at boot.
+ *
+ * felix's inner panel (samsung ana6707-f10, wired to the DSIM0 path that
+ * mainline does not bring up) is lit by the bootloader and never turned off:
+ * with no inner display driver it sits at full-brightness white showing the
+ * boot logo, drawing multiple watts and adding ~5-6 C to skin temperature
+ * (measured: idle skin zones dropped 53-55 C -> 48-49 C once blanked). Its
+ * power rails are s2mpg13 sub-PMIC LDOs we have no driver for, so we cannot
+ * cut them; instead hold its reset line (gpa7-1) asserted, which blanks the
+ * OLED (emission off) at negligible standby cost. Empirically confirmed on
+ * felix: driving gpa7-1 low turns the inner panel dark. The outer/cover panel
+ * (ea8182-f10, reset on gpp23) is on separate rails/GPIO and is unaffected.
+ */
+&gpa7 {
+	inner-panel-off-hog {
+		gpio-hog;
+		gpios = <1 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "inner-panel-reset";
+	};
+};
