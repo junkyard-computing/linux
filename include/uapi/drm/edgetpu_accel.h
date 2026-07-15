@@ -66,10 +66,25 @@ struct drm_edgetpu_submit {
 	__u32 pad;
 };
 
+/*
+ * Reset the client's VII inference context: rotate to a fresh VCID (freeing the
+ * firmware's accumulated per-context graph registrations) and reclaim the BO
+ * heap. This is exactly what opening a fresh fd does, exposed as an ioctl so a
+ * long-lived client (finch's batched session) can recycle the context mid-run —
+ * the carveout heap can't hold a whole model forward's executables at once, and
+ * reusing a BO's device-VA in the same VCID is rejected by the firmware, so the
+ * runtime registers a window of executables, then RESETs and continues.
+ */
+struct drm_edgetpu_reset {
+	__u32 flags;	/* in: reserved, must be 0 */
+	__u32 pad;
+};
+
 #define DRM_EDGETPU_CREATE_BO	0x00
 #define DRM_EDGETPU_BO_WRITE	0x01
 #define DRM_EDGETPU_BO_READ	0x02
 #define DRM_EDGETPU_SUBMIT	0x03
+#define DRM_EDGETPU_RESET	0x04
 
 /*
  * The DRM_IOCTL_EDGETPU_* values live in an enum (not #define) so that the
@@ -90,6 +105,8 @@ enum {
 		DRM_IOCTL_EDGETPU(W, BO_READ, bo_read),
 	DRM_IOCTL_EDGETPU_SUBMIT =
 		DRM_IOCTL_EDGETPU(WR, SUBMIT, submit),
+	DRM_IOCTL_EDGETPU_RESET =
+		DRM_IOCTL_EDGETPU(W, RESET, reset),
 };
 
 #if defined(__cplusplus)
