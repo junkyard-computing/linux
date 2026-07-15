@@ -61,13 +61,28 @@ pub(crate) fn init() -> Result {
     to_result(unsafe { bindings::edgetpu_data_init() })
 }
 
-/// Pin the MIF/INT memory buses to their top frequencies. The firmware DMAs
-/// every inference op through memory and the bus governor can't see that load,
-/// so without this the buses idle at ~13% and every op runs ~5x slower.
+/// Register the (inactive) MIF/INT bus bandwidth votes. The firmware DMAs every
+/// inference op through memory and the bus governor can't see that load, so
+/// without a vote the buses idle at ~13% and every op runs ~5x slower. The votes
+/// are raised/dropped per attached client by [`bus_qos_get`]/[`bus_qos_put`].
 /// Best-effort (never fails probe); call once during probe.
 pub(crate) fn bus_qos_init() {
     // SAFETY: FFI to the companion module; idempotent, best-effort, no arguments.
     unsafe { bindings::edgetpu_bus_qos_init() };
+}
+
+/// Raise MIF/INT to max for an attaching client (refcounted; only the first
+/// client actually raises the buses).
+pub(crate) fn bus_qos_get() {
+    // SAFETY: FFI to the companion module; internally refcounted, no arguments.
+    unsafe { bindings::edgetpu_bus_qos_get() };
+}
+
+/// Drop the MIF/INT vote for a detaching client (only the last client drops the
+/// buses back to the governor's floor).
+pub(crate) fn bus_qos_put() {
+    // SAFETY: FFI to the companion module; internally refcounted, no arguments.
+    unsafe { bindings::edgetpu_bus_qos_put() };
 }
 
 /// Write `bytes` into the carveout at `phys` via the C glue (persistent WC map).
