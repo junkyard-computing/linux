@@ -198,12 +198,17 @@ impl Vii {
 
         let budget = if timeout_ms == 0 { 1000 } else { timeout_ms as usize };
         let mut got = false;
-        for _ in 0..budget {
-            if csr::read(VII_RESP_BASE + RESP_TAIL) != self.resp_head {
-                got = true;
-                break;
+        // Spin-read before sleeping: inference ops complete in microseconds, so the old 1ms sleep
+        // per submit was the dominant per-op latency for a full model forward. ~20 short-sleep
+        // iters replace each former 1ms iter, preserving the overall timeout budget.
+        'poll: for _ in 0..(budget * 20) {
+            for _ in 0..2000 {
+                if csr::read(VII_RESP_BASE + RESP_TAIL) != self.resp_head {
+                    got = true;
+                    break 'poll;
+                }
             }
-            fsleep(Delta::from_millis(1));
+            fsleep(Delta::from_micros(50));
         }
         if !got {
             pr_err!(
