@@ -871,7 +871,7 @@
 		#thermal-sensor-cells = <1>;
 	};
 
-	thermal-zones {
+	thermal_zones: thermal-zones {
 		/*
 		 * Bring-up thermal management: the mainline port previously had
 		 * no sensors at all, so the SoC heated unthrottled under load
