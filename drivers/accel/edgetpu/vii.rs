@@ -59,6 +59,25 @@ const QUEUE_SIZE: u32 = 1023; // elements; wrap bit = 0x400
 pub(crate) const CMD_ELEM: usize = 48; // VII command element
 pub(crate) const RESP_ELEM: usize = 24; // VII response element
 
+// Circular-queue head/tail carry a real index (bits [0,10)) plus a wrap bit (bit 10), advanced by
+// the AOSP `circular_queue_inc`. The slot is the real index; the CSR gets the full `real | wrap`
+// word. A free-running `+= 1` / `% size` diverges at the first wrap (QUEUE_SIZE=1023 vs the 0x400
+// wrap bit) and wedges the ring once a submit stream exceeds the queue depth. See kci.rs.
+const WRAP_BIT: u32 = 1 << 10; // 0x400
+const INDEX_MASK: u32 = WRAP_BIT - 1; // 0x3ff
+
+fn real_index(idx: u32) -> usize {
+    (idx & INDEX_MASK) as usize
+}
+
+fn circ_inc(idx: u32, queue_size: u32) -> u32 {
+    if (idx & INDEX_MASK) + 1 >= queue_size {
+        (idx + 1 - queue_size) ^ WRAP_BIT
+    } else {
+        idx + 1
+    }
+}
+
 // --- Carveout placement (see mem.rs) ----------------------------------------
 const CMD_Q_PHYS: u64 = 0x9313_0000; // TPU-VA 0x10130000
 const RESP_Q_PHYS: u64 = 0x9314_0000; // TPU-VA 0x10140000
@@ -155,9 +174,9 @@ impl Vii {
             return Err(ENODEV);
         }
 
-        let slot = (self.cmd_tail as usize) % (QUEUE_SIZE as usize);
+        let slot = real_index(self.cmd_tail);
         mem::write(CMD_Q_PHYS + (slot * CMD_ELEM) as u64, command)?;
-        self.cmd_tail += 1;
+        self.cmd_tail = circ_inc(self.cmd_tail, QUEUE_SIZE);
         csr::write(VII_CMD_BASE + CMD_TAIL, self.cmd_tail);
         csr::write(VII_CMD_BASE + CMD_DOORBELL_SET, 1);
 
@@ -180,10 +199,10 @@ impl Vii {
             return Err(ETIMEDOUT);
         }
 
-        let rslot = (self.resp_head as usize) % (QUEUE_SIZE as usize);
+        let rslot = real_index(self.resp_head);
         let mut resp = [0u8; RESP_ELEM];
         mem::read(RESP_Q_PHYS + (rslot * RESP_ELEM) as u64, &mut resp)?;
-        self.resp_head += 1;
+        self.resp_head = circ_inc(self.resp_head, QUEUE_SIZE);
         csr::write(VII_RESP_BASE + RESP_HEAD, self.resp_head);
         csr::write(VII_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
 
