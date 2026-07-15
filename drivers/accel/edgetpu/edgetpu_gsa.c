@@ -337,24 +337,33 @@ void edgetpu_csr_write32(u32 off, u32 val)
 EXPORT_SYMBOL_GPL(edgetpu_csr_write32);
 
 /*
- * Pin the MIF (memory interface) and INT (interconnect) buses to their top
- * frequencies while the TPU is in use.
+ * Raise the MIF (memory interface) and INT (interconnect) buses to their top
+ * frequencies *while a client is attached*.
  *
  * The firmware DMAs every VII mailbox op's executable, weights, scratch, and I/O
  * through memory, but that traffic is invisible to the exynos-bus devfreq
- * governor, so it idles the buses at their floor (MIF ~421 MHz of 3172, INT
- * 100 MHz of 533 — ~13%) and every op runs ~5x slower. The AOSP driver requests
- * these buses via exynos_pm_qos during inference; we do the mainline equivalent
- * with a dev_pm_qos MIN_FREQUENCY request on each exynos-bus devfreq. Values are
- * in kHz. Best-effort: if a bus isn't ready the TPU still runs, just slower.
+ * governor (its gs201-ppc counters watch only CCI/CPU ports), so it idles the
+ * buses at their floor (MIF ~421 MHz of 3172, INT 100 MHz of 533 — ~13%) and
+ * every op runs ~5x slower. The AOSP driver requests these buses via
+ * exynos_pm_qos during inference; the mainline GPU does the equivalent by voting
+ * bandwidth through the interconnect framework, load-gated. We do the same with
+ * a dev_pm_qos MIN_FREQUENCY request on each exynos-bus devfreq, toggled by a
+ * client refcount (raise on first open, drop on last close) so an idle TPU
+ * doesn't pin DRAM at max. Values in kHz. Best-effort: if a bus isn't ready the
+ * TPU still runs, just slower.
  */
 #include <linux/devfreq.h>
 #include <linux/pm_qos.h>
 
+#define EDGETPU_MIF_MAX_KHZ	3172000
+#define EDGETPU_INT_MAX_KHZ	533000
+
 static struct dev_pm_qos_request edgetpu_mif_qos;
 static struct dev_pm_qos_request edgetpu_int_qos;
+static atomic_t edgetpu_bus_users = ATOMIC_INIT(0);
 
-static int edgetpu_bus_pin(const char *name, struct dev_pm_qos_request *req, s32 freq_khz)
+/* Add an inactive (MIN_FREQUENCY 0) qos request on a bus's exynos-bus devfreq. */
+static int edgetpu_bus_add(const char *name, struct dev_pm_qos_request *req)
 {
 	struct device_node *np = of_find_node_by_name(NULL, name);
 	struct devfreq *df;
@@ -367,8 +376,7 @@ static int edgetpu_bus_pin(const char *name, struct dev_pm_qos_request *req, s32
 	if (IS_ERR(df))
 		return PTR_ERR(df);
 	/* devfreq aggregates MIN_FREQUENCY qos on the bus's parent device (kHz). */
-	ret = dev_pm_qos_add_request(df->dev.parent, req, DEV_PM_QOS_MIN_FREQUENCY,
-				     freq_khz);
+	ret = dev_pm_qos_add_request(df->dev.parent, req, DEV_PM_QOS_MIN_FREQUENCY, 0);
 	return ret < 0 ? ret : 0;
 }
 
@@ -376,15 +384,39 @@ int edgetpu_bus_qos_init(void)
 {
 	int ret;
 
-	ret = edgetpu_bus_pin("bus-mif", &edgetpu_mif_qos, 3172000);
+	ret = edgetpu_bus_add("bus-mif", &edgetpu_mif_qos);
 	if (ret)
-		pr_warn("edgetpu_gsa: MIF bus qos not applied (%d); inference will be slow\n", ret);
-	ret = edgetpu_bus_pin("bus-int", &edgetpu_int_qos, 533000);
+		pr_warn("edgetpu_gsa: MIF bus qos unavailable (%d); inference will be slow\n", ret);
+	ret = edgetpu_bus_add("bus-int", &edgetpu_int_qos);
 	if (ret)
-		pr_warn("edgetpu_gsa: INT bus qos not applied (%d); inference will be slow\n", ret);
+		pr_warn("edgetpu_gsa: INT bus qos unavailable (%d); inference will be slow\n", ret);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(edgetpu_bus_qos_init);
+
+/* First attached client raises MIF/INT to max; subsequent clients just refcount. */
+void edgetpu_bus_qos_get(void)
+{
+	if (atomic_inc_return(&edgetpu_bus_users) != 1)
+		return;
+	if (dev_pm_qos_request_active(&edgetpu_mif_qos))
+		dev_pm_qos_update_request(&edgetpu_mif_qos, EDGETPU_MIF_MAX_KHZ);
+	if (dev_pm_qos_request_active(&edgetpu_int_qos))
+		dev_pm_qos_update_request(&edgetpu_int_qos, EDGETPU_INT_MAX_KHZ);
+}
+EXPORT_SYMBOL_GPL(edgetpu_bus_qos_get);
+
+/* Last client detaching drops the buses back to the governor's floor. */
+void edgetpu_bus_qos_put(void)
+{
+	if (atomic_dec_if_positive(&edgetpu_bus_users) != 0)
+		return;
+	if (dev_pm_qos_request_active(&edgetpu_mif_qos))
+		dev_pm_qos_update_request(&edgetpu_mif_qos, 0);
+	if (dev_pm_qos_request_active(&edgetpu_int_qos))
+		dev_pm_qos_update_request(&edgetpu_int_qos, 0);
+}
+EXPORT_SYMBOL_GPL(edgetpu_bus_qos_put);
 
 static void __exit edgetpu_gsa_exit(void)
 {
