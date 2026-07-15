@@ -19,6 +19,7 @@
 #include <linux/mfd/samsung/core.h>
 #include <linux/mfd/samsung/s2mpg10.h>
 #include <linux/mfd/samsung/s2mpg11.h>
+#include <linux/mfd/samsung/s2mpg13.h>
 #include <linux/mfd/samsung/s2mps11.h>
 #include <linux/mfd/samsung/s2mps13.h>
 #include <linux/mfd/samsung/s2mps14.h>
@@ -1257,6 +1258,35 @@ static const struct s2mpg10_regulator_desc s2mpg11_regulators[] = {
 	s2mpg11_regulator_desc_ldo(15, "vinl3s", s2mpg11_ldo_vranges3)
 };
 
+/*
+ * s2mpg13 (gs201 sub-PMIC).  Bring-up currently exposes only the two inner-
+ * display rails LDO4 (vddi) and LDO28 (vci) so the panel can be powered down
+ * via the regulator core; the remaining rails (incl. the SoC bucks) are left
+ * unmanaged on purpose - exposing them without their DT supply tree would let
+ * the unused-regulator cleanup gate a critical rail.  Both are the simple
+ * self-contained LDO case (enable = BIT(7) in their own LxS_CTRL register).
+ * Not indexed by regulator id, so the table stays dense for the probe loop.
+ */
+#define s2mpg13_regulator_desc_ldo(_num, _supply, _vrange) {		\
+	.desc = regulator_desc_s2mpg1x_ldo_cmn(#_num "s",		\
+			S2MPG13_LDO##_num, _supply,			\
+			s2mpg10_reg_ldo_ops, _vrange,			\
+			S2MPG13_PMIC_L##_num##S_CTRL, GENMASK(5, 0),	\
+			S2MPG13_PMIC_L##_num##S_CTRL, BIT(7),		\
+			0, 0, 0, NULL, 0),				\
+}
+
+/* voltage range for s2mpg13 LDO4 (group 6) */
+S2MPG10_VOLTAGE_RANGE(s2mpg13_ldo, 4, 700000, 700000, 2275000, STEP_25_MV);
+
+/* voltage range for s2mpg13 LDO28 (group 7) */
+S2MPG10_VOLTAGE_RANGE(s2mpg13_ldo, 28, 1800000, 1800000, 3375000, STEP_25_MV);
+
+static const struct s2mpg10_regulator_desc s2mpg13_regulators[] = {
+	s2mpg13_regulator_desc_ldo(4, NULL, s2mpg13_ldo_vranges4),
+	s2mpg13_regulator_desc_ldo(28, NULL, s2mpg13_ldo_vranges28),
+};
+
 static const struct regulator_ops s2mps11_ldo_ops = {
 	.list_voltage		= regulator_list_voltage_linear,
 	.map_voltage		= regulator_map_voltage_linear,
@@ -2187,6 +2217,11 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 		s2mpg1x_regulators = s2mpg11_regulators;
 		BUILD_BUG_ON(ARRAY_SIZE(s2mpg11_regulators) > S2MPS_REGULATOR_MAX);
 		break;
+	case S2MPG13:
+		rdev_num = ARRAY_SIZE(s2mpg13_regulators);
+		s2mpg1x_regulators = s2mpg13_regulators;
+		BUILD_BUG_ON(ARRAY_SIZE(s2mpg13_regulators) > S2MPS_REGULATOR_MAX);
+		break;
 	case S2MPS11X:
 		rdev_num = ARRAY_SIZE(s2mps11_regulators);
 		regulators = s2mps11_regulators;
@@ -2268,6 +2303,7 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 static const struct platform_device_id s2mps11_pmic_id[] = {
 	{ .name = "s2mpg10-regulator", .driver_data = S2MPG10 },
 	{ .name = "s2mpg11-regulator", .driver_data = S2MPG11 },
+	{ .name = "s2mpg13-regulator", .driver_data = S2MPG13 },
 	{ .name = "s2mps11-regulator", .driver_data = S2MPS11X },
 	{ .name = "s2mps13-regulator", .driver_data = S2MPS13X },
 	{ .name = "s2mps14-regulator", .driver_data = S2MPS14X },
