@@ -198,11 +198,11 @@ impl Vii {
 
         let budget = if timeout_ms == 0 { 1000 } else { timeout_ms as usize };
         let mut got = false;
-        // Spin-read before sleeping: inference ops complete in microseconds, so the old 1ms sleep
-        // per submit was the dominant per-op latency for a full model forward. ~20 short-sleep
-        // iters replace each former 1ms iter, preserving the overall timeout budget.
+        // Hard-spin the response CSR before falling back to a short sleep: an in-kernel fsleep can
+        // overshoot a sub-millisecond firmware response by its own granularity, so spin long enough
+        // to catch the common case in-loop; the sleep tail only covers the (error) timeout budget.
         'poll: for _ in 0..(budget * 20) {
-            for _ in 0..2000 {
+            for _ in 0..60000 {
                 if csr::read(VII_RESP_BASE + RESP_TAIL) != self.resp_head {
                     got = true;
                     break 'poll;
