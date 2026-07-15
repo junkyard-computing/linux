@@ -92,12 +92,25 @@ impl platform::Driver for EdgeTpuPlatformDriver {
         // Power the TPU rail via the ACPM DVFS channel (clk "tpu"). Requesting a
         // non-zero rate is what actually powers the block on this port — there is
         // no genpd yet (same as the mainline GPU). Kept alive in the driver data.
+        //
+        // Run at NOM (1066 MHz) — the janeiro TPU's DVFS ceiling (TPU_POLICY_MAX,
+        // config-pwr-state.h: UUD 226 / SUD 627 / UD 845 / NOM 1066 MHz). The AOSP
+        // driver ramps to NOM under inference; we have no DVFS governor, so pin the
+        // top state directly. At the previous fixed 627 MHz (SUD) the firmware ran
+        // every mailbox op ~1.7× slower — the entire measured per-submit gap vs the
+        // AOSP chardev was this clock, not driver overhead (which profiles at ~1 µs).
         let clk = Clk::get(pdev.as_ref(), Some(c"tpu"))?;
-        clk.set_rate(Hertz::from_mhz(627))?;
+        clk.set_rate(Hertz::from_mhz(1066))?;
         clk.prepare_enable()?;
 
-        // Map the persistent CSR window used by the runtime VII mailbox path.
+        // Map the persistent CSR window + carveout data region used by the runtime VII mailbox path
+        // (so per-submit queue access memcpy's through a held mapping, not a memremap per call).
         crate::csr::init()?;
+        crate::mem::init()?;
+        // Pin MIF/INT to top frequency — the firmware DMAs every inference op through memory and the
+        // bus governor can't see that load, so the buses otherwise idle at ~13% and each op runs ~5x
+        // slower (measured: 154 us vs 731 us per submit). Best-effort; never blocks bring-up.
+        crate::mem::bus_qos_init();
 
         // Bring up the firmware (M1a/M1b) and activate the VII mailbox (M2).
         // Non-fatal so the accel device stays bound for inspection on failure.

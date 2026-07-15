@@ -62,12 +62,24 @@ void edgetpu_s2mpu_allow_all(phys_addr_t base_phys);
 void edgetpu_enable_coherency(void);
 
 /*
- * Read/write a physically-contiguous no-map region (the TPU firmware carveout)
- * via a temporary write-combining mapping. Used for the KCI queues + FW_INFO
- * buffer that live in the carveout's remapped data region.
+ * Read/write a physically-contiguous no-map region (the TPU firmware carveout):
+ * the KCI/VII queues, FW_INFO buffer, and BO heap in the carveout's remapped
+ * data region. edgetpu_data_init() memremap's the whole window once (call from
+ * probe, before any queue access) so runtime accesses memcpy through a
+ * persistent mapping instead of a memremap()/memunmap() per call; the accessors
+ * fall back to a temporary mapping for addresses outside the window.
  */
+int edgetpu_data_init(void);
 int edgetpu_mem_write(phys_addr_t phys, const void *src, size_t len);
 int edgetpu_mem_read(phys_addr_t phys, void *dst, size_t len);
+
+/*
+ * Pin the MIF/INT buses to their top frequencies (dev_pm_qos MIN_FREQUENCY on
+ * the exynos-bus devfreqs). The firmware DMAs every inference op through memory
+ * and the bus governor can't see that load, so without this the buses idle at
+ * ~13% and every op runs ~5x slower. Call once from probe; best-effort.
+ */
+int edgetpu_bus_qos_init(void);
 
 /*
  * Module-lifetime mapping of the main TPU CSR block (0x1ce00000), used by the
