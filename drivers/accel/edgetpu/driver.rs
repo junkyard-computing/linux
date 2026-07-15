@@ -115,7 +115,7 @@ impl platform::Driver for EdgeTpuPlatformDriver {
         // Bring up the firmware (M1a/M1b) and activate the VII mailbox (M2).
         // Non-fatal so the accel device stays bound for inspection on failure.
         let mut kci = Kci::new();
-        let mut vii = Vii::new();
+        let mut vii = [Vii::new(0), Vii::new(1)];
         match crate::bringup::firmware_bringup(pdev.as_ref(), &reg, &ssmt, &mut kci, &mut vii) {
             Ok(()) => dev_info!(pdev, "edgetpu: M2 bring-up complete\n"),
             Err(e) => dev_err!(pdev, "edgetpu: bring-up failed: {:?}\n", e),
@@ -127,6 +127,8 @@ impl platform::Driver for EdgeTpuPlatformDriver {
             pdev: platform.clone(),
             mbox <- new_mutex!(MailboxState {
                 kci,
+                // Each mailbox keeps the FIXED VCID it was activated on at bring-up (slot i -> VCID
+                // i); every reset reuses it with first_open=true so registrations never accumulate.
                 vii,
                 bo: BoAllocator::new(),
             }),
