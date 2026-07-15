@@ -2,13 +2,18 @@
 //! VII (Virtual Instruction Interface) mailbox — the per-context inference
 //! mailbox that carries the runtime's DarwiNN command elements.
 //!
-//! The felix TPU (janeiro) exposes 7 VII mailboxes at indices 1..7; we use
-//! index 1. Its CSR block sits at `0xa0000 + 1*0x2000 = 0xa2000` with the same
-//! field layout as KCI (mailbox 0). The cmd/resp queues live in the firmware
-//! carveout reached through the instruction remap, exactly like KCI — no
-//! SysMMU. The 48-byte command / 24-byte response element formats are the
-//! firmware↔runtime ABI; the kernel is oblivious to their contents and only
-//! moves elements + rings the doorbell.
+//! The felix TPU (janeiro) exposes 7 VII mailboxes at indices 1..7. Each
+//! mailbox binds to its own VCID (virtual context), and the firmware caps the
+//! number of graphs registered in ONE VCID at ~158 — a whole model forward is
+//! more executables than that. To keep a whole forward's executables resident
+//! (register-once-dispatch) we drive TWO VII mailboxes (indices 1 and 2) as two
+//! concurrent VCID contexts, so registrations spread across ~2×150 slots. Each
+//! mailbox's CSR block sits at `0xa0000 + index*0x2000` with the same field
+//! layout as KCI (mailbox 0); its cmd/resp queues live in the firmware carveout
+//! reached through the instruction remap, exactly like KCI — no SysMMU. The
+//! 48-byte command / 24-byte response element formats are the firmware↔runtime
+//! ABI; the kernel is oblivious to their contents and only moves elements + rings
+//! the doorbell.
 //!
 //! Two register paths: [`setup`] runs during probe on the probe-time `IoMem`
 //! (to program the queue-base CSRs before activation); [`submit`] runs from
@@ -25,10 +30,14 @@ use crate::csr;
 use crate::kci::Kci;
 use crate::mem::{self, tpu_va};
 
-// --- VII mailbox #1 CSR bases (offsets from the main TPU CSR block) ----------
-const VII_CTX_BASE: usize = 0xa2000; // context CSRs (mailbox 1)
-const VII_CMD_BASE: usize = 0xa3000; // cmd-queue CSRs
-const VII_RESP_BASE: usize = 0xa3800; // resp-queue CSRs
+// --- VII mailbox CSR geometry (offsets from the main TPU CSR block) ----------
+// Mailbox N's context CSRs are at 0xa0000 + N*0x2000 (janeiro config-mailbox.h
+// `edgetpu_mailbox_get_context_csr_base`); the cmd/resp queue CSRs are at
+// +0x1000 / +0x1800 within that block.
+const MBOX_CSR_BASE: usize = 0xa0000;
+const MBOX_CSR_STRIDE: usize = 0x2000;
+const CMD_CSR_OFF: usize = 0x1000;
+const RESP_CSR_OFF: usize = 0x1800;
 
 // Context CSR offsets (identical to KCI's layout).
 const CTX_ENABLE: usize = 0x00;
@@ -79,21 +88,31 @@ fn circ_inc(idx: u32, queue_size: u32) -> u32 {
 }
 
 // --- Carveout placement (see mem.rs) ----------------------------------------
-const CMD_Q_PHYS: u64 = 0x9313_0000; // TPU-VA 0x10130000
-const RESP_Q_PHYS: u64 = 0x9314_0000; // TPU-VA 0x10140000
+// Two VII mailboxes, each with its own cmd/resp queues. Mailbox 1's queues sit
+// where they always did; mailbox 2's live in the region freed by moving buffer
+// objects to system memory (0x93150000+ was the carveout BO heap).
+pub(crate) const NUM_VII: usize = 2;
+const VII_CMD_Q_PHYS: [u64; NUM_VII] = [0x9313_0000, 0x9315_0000]; // TPU-VA 0x1013/0x1015 0000
+const VII_RESP_Q_PHYS: [u64; NUM_VII] = [0x9314_0000, 0x9316_0000]; // TPU-VA 0x1014/0x1016 0000
 
 // --- Activation parameters --------------------------------------------------
-const VII_MAILBOX_ID: u32 = 1;
-// The firmware keys registered scratch/executables by VCID and does NOT drop them on CLOSE_DEVICE
-// (only `first_open` clears a VCID's context). The AOSP driver therefore allocates a FRESH VCID per
-// device group and activates it with first_open=true (edgetpu-device-group.c:
-// `edgetpu_mailbox_activate(..., group->vcid, !group->activated)`), freeing it on group teardown.
-// We mirror that by rotating the VCID across sessions so each reset_client gets a fresh context
-// instead of resuming (and accumulating in) a single fixed VCID. gs201 has EDGETPU_NUM_VCIDS=16.
-const NUM_VCIDS: u16 = 16;
+// The firmware keys registered scratch/executables by VCID and does NOT drop them on CLOSE_DEVICE;
+// only `first_open` clears a VCID's context. Each mailbox therefore keeps a FIXED VCID (slot 0 ->
+// VCID 0, slot 1 -> VCID 1) and re-activates it with first_open=true every session, which clears the
+// prior session's registrations. Rotating to a fresh VCID per session instead would LEAK the old
+// VCID's registrations (never re-opened → never cleared), exhausting the firmware's global
+// registration pool after a couple of register-once sessions. gs201 has EDGETPU_NUM_VCIDS=16, far
+// more than the two fixed VCIDs we use.
 
-/// VII mailbox state (ring positions + activation status + rotating VCID).
+/// VII mailbox state (mailbox index + derived CSR bases + its own queues + ring positions +
+/// activation status + the VCID it is currently bound to).
 pub(crate) struct Vii {
+    mailbox_id: u32,
+    ctx_base: usize,
+    cmd_base: usize,
+    resp_base: usize,
+    cmd_q_phys: u64,
+    resp_q_phys: u64,
     cmd_tail: u32,
     resp_head: u32,
     activated: bool,
@@ -101,67 +120,66 @@ pub(crate) struct Vii {
 }
 
 impl Vii {
-    pub(crate) fn new() -> Self {
+    /// Build the `slot`-th VII mailbox (0 -> mailbox index 1, 1 -> index 2, …). Derives the CSR
+    /// bases from the mailbox index and takes its dedicated cmd/resp queues from the tables above.
+    pub(crate) fn new(slot: usize) -> Self {
+        let mailbox_id = (slot + 1) as u32; // VII mailboxes are 1..7 (KCI is mailbox 0)
+        let ctx_base = MBOX_CSR_BASE + (mailbox_id as usize) * MBOX_CSR_STRIDE;
         Self {
+            mailbox_id,
+            ctx_base,
+            cmd_base: ctx_base + CMD_CSR_OFF,
+            resp_base: ctx_base + RESP_CSR_OFF,
+            cmd_q_phys: VII_CMD_Q_PHYS[slot],
+            resp_q_phys: VII_RESP_Q_PHYS[slot],
             cmd_tail: 0,
             resp_head: 0,
             activated: false,
-            vcid: NUM_VCIDS - 1, // first `next_vcid()` rolls to 0
+            vcid: 0,
         }
-    }
-
-    /// Advance to the next VCID (round-robin over the pool). Each session binds a fresh VCID so
-    /// the firmware gives it a clean context rather than accumulating on a reused one.
-    fn next_vcid(&mut self) -> u16 {
-        self.vcid = (self.vcid + 1) % NUM_VCIDS;
-        self.vcid
-    }
-
-    pub(crate) fn is_activated(&self) -> bool {
-        self.activated
     }
 
     /// Program the VII mailbox context/queue CSRs (via the persistent CSR map).
     /// The firmware reads these when the mailbox is activated by `OPEN_DEVICE`.
     fn setup(&mut self) {
-        let cmd_va = tpu_va(CMD_Q_PHYS);
-        let resp_va = tpu_va(RESP_Q_PHYS);
+        let cmd_va = tpu_va(self.cmd_q_phys);
+        let resp_va = tpu_va(self.resp_q_phys);
 
-        csr::write(VII_CTX_BASE + CTX_PRIORITY, 0);
+        csr::write(self.ctx_base + CTX_PRIORITY, 0);
         // Explicit doorbell (like KCI) rather than tail-write auto-doorbell.
-        csr::write(VII_CTX_BASE + CTX_CMD_Q_TAIL_DOORBELL_ENABLE, 0);
+        csr::write(self.ctx_base + CTX_CMD_Q_TAIL_DOORBELL_ENABLE, 0);
 
         // Cmd queue.
-        csr::write(VII_CTX_BASE + CTX_CMD_Q_ADDR_LO, (cmd_va & 0xffff_ffff) as u32);
-        csr::write(VII_CTX_BASE + CTX_CMD_Q_ADDR_HI, (cmd_va >> 32) as u32);
-        csr::write(VII_CTX_BASE + CTX_CMD_Q_SIZE, QUEUE_SIZE);
-        csr::write(VII_CMD_BASE + CMD_TAIL, 0);
-        csr::write(VII_CMD_BASE + CMD_HEAD, 0);
+        csr::write(self.ctx_base + CTX_CMD_Q_ADDR_LO, (cmd_va & 0xffff_ffff) as u32);
+        csr::write(self.ctx_base + CTX_CMD_Q_ADDR_HI, (cmd_va >> 32) as u32);
+        csr::write(self.ctx_base + CTX_CMD_Q_SIZE, QUEUE_SIZE);
+        csr::write(self.cmd_base + CMD_TAIL, 0);
+        csr::write(self.cmd_base + CMD_HEAD, 0);
 
         // Resp queue.
-        csr::write(VII_CTX_BASE + CTX_RESP_Q_ADDR_LO, (resp_va & 0xffff_ffff) as u32);
-        csr::write(VII_CTX_BASE + CTX_RESP_Q_ADDR_HI, (resp_va >> 32) as u32);
-        csr::write(VII_CTX_BASE + CTX_RESP_Q_SIZE, QUEUE_SIZE);
-        csr::write(VII_RESP_BASE + RESP_HEAD, 0);
-        csr::write(VII_RESP_BASE + RESP_TAIL, 0);
+        csr::write(self.ctx_base + CTX_RESP_Q_ADDR_LO, (resp_va & 0xffff_ffff) as u32);
+        csr::write(self.ctx_base + CTX_RESP_Q_ADDR_HI, (resp_va >> 32) as u32);
+        csr::write(self.ctx_base + CTX_RESP_Q_SIZE, QUEUE_SIZE);
+        csr::write(self.resp_base + RESP_HEAD, 0);
+        csr::write(self.resp_base + RESP_TAIL, 0);
 
         // Clear stale doorbells, enable doorbells, enable the context.
-        csr::write(VII_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
-        csr::write(VII_CTX_BASE + CTX_CMD_Q_DOORBELL_CLEAR, 1);
-        csr::write(VII_CTX_BASE + CTX_CMD_Q_DOORBELL_ENABLE, 1);
-        csr::write(VII_CTX_BASE + CTX_RESP_Q_DOORBELL_ENABLE, 1);
-        csr::write(VII_CTX_BASE + CTX_ENABLE, 1);
+        csr::write(self.resp_base + RESP_DOORBELL_CLEAR, 1);
+        csr::write(self.ctx_base + CTX_CMD_Q_DOORBELL_CLEAR, 1);
+        csr::write(self.ctx_base + CTX_CMD_Q_DOORBELL_ENABLE, 1);
+        csr::write(self.ctx_base + CTX_RESP_Q_DOORBELL_ENABLE, 1);
+        csr::write(self.ctx_base + CTX_ENABLE, 1);
 
         self.cmd_tail = 0;
         self.resp_head = 0;
     }
 
-    /// Program the VII mailbox and bind it to a fresh VCID via a KCI `OPEN_DEVICE` (first_open).
-    /// Called at probe.
-    pub(crate) fn activate(&mut self, dev: &Device, kci: &mut Kci) -> Result {
+    /// Program the VII mailbox and bind it to `vcid` via a KCI `OPEN_DEVICE` (first_open). Called at
+    /// probe; the caller supplies a VCID distinct from every other mailbox's.
+    pub(crate) fn activate(&mut self, dev: &Device, kci: &mut Kci, vcid: u16) -> Result {
         self.setup();
-        let vcid = self.next_vcid();
-        kci.open_device(dev, VII_MAILBOX_ID, vcid, true)?;
+        kci.open_device(dev, self.mailbox_id, vcid, true)?;
+        self.vcid = vcid;
         self.activated = true;
         Ok(())
     }
@@ -169,16 +187,17 @@ impl Vii {
     /// Reset the VII inference context for a new client. The firmware retains a VCID's registered
     /// scratch/executables across CLOSE_DEVICE, so resuming a single fixed VCID (first_open=false)
     /// accumulates them until inferences are rejected after ~one model forward. Instead we CLOSE
-    /// the mailbox and re-`OPEN_DEVICE` on the NEXT VCID with first_open=true — a clean context per
-    /// session, exactly as the AOSP driver does per device group. Best-effort close.
-    pub(crate) fn reactivate(&mut self, dev: &Device, kci: &mut Kci) -> Result {
+    /// the mailbox and re-`OPEN_DEVICE` on `vcid` (a fresh one, supplied by the caller) with
+    /// first_open=true — a clean context per session, as the AOSP driver does per device group.
+    /// Best-effort close.
+    pub(crate) fn reactivate(&mut self, dev: &Device, kci: &mut Kci, vcid: u16) -> Result {
         if self.activated {
-            let _ = kci.close_device(dev, VII_MAILBOX_ID);
+            let _ = kci.close_device(dev, self.mailbox_id);
             self.activated = false;
         }
         self.setup();
-        let vcid = self.next_vcid();
-        kci.open_device(dev, VII_MAILBOX_ID, vcid, true)?;
+        kci.open_device(dev, self.mailbox_id, vcid, true)?;
+        self.vcid = vcid;
         self.activated = true;
         Ok(())
     }
@@ -191,10 +210,10 @@ impl Vii {
         }
 
         let slot = real_index(self.cmd_tail);
-        mem::write(CMD_Q_PHYS + (slot * CMD_ELEM) as u64, command)?;
+        mem::write(self.cmd_q_phys + (slot * CMD_ELEM) as u64, command)?;
         self.cmd_tail = circ_inc(self.cmd_tail, QUEUE_SIZE);
-        csr::write(VII_CMD_BASE + CMD_TAIL, self.cmd_tail);
-        csr::write(VII_CMD_BASE + CMD_DOORBELL_SET, 1);
+        csr::write(self.cmd_base + CMD_TAIL, self.cmd_tail);
+        csr::write(self.cmd_base + CMD_DOORBELL_SET, 1);
 
         let budget = if timeout_ms == 0 { 1000 } else { timeout_ms as usize };
         let mut got = false;
@@ -203,7 +222,7 @@ impl Vii {
         // to catch the common case in-loop; the sleep tail only covers the (error) timeout budget.
         'poll: for _ in 0..(budget * 20) {
             for _ in 0..60000 {
-                if csr::read(VII_RESP_BASE + RESP_TAIL) != self.resp_head {
+                if csr::read(self.resp_base + RESP_TAIL) != self.resp_head {
                     got = true;
                     break 'poll;
                 }
@@ -212,20 +231,21 @@ impl Vii {
         }
         if !got {
             pr_err!(
-                "edgetpu: VII submit timeout: cmd[head={} tail={}] resp[tail={}]\n",
-                csr::read(VII_CMD_BASE + CMD_HEAD),
+                "edgetpu: VII mailbox {} submit timeout: cmd[head={} tail={}] resp[tail={}]\n",
+                self.mailbox_id,
+                csr::read(self.cmd_base + CMD_HEAD),
                 self.cmd_tail,
-                csr::read(VII_RESP_BASE + RESP_TAIL)
+                csr::read(self.resp_base + RESP_TAIL)
             );
             return Err(ETIMEDOUT);
         }
 
         let rslot = real_index(self.resp_head);
         let mut resp = [0u8; RESP_ELEM];
-        mem::read(RESP_Q_PHYS + (rslot * RESP_ELEM) as u64, &mut resp)?;
+        mem::read(self.resp_q_phys + (rslot * RESP_ELEM) as u64, &mut resp)?;
         self.resp_head = circ_inc(self.resp_head, QUEUE_SIZE);
-        csr::write(VII_RESP_BASE + RESP_HEAD, self.resp_head);
-        csr::write(VII_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
+        csr::write(self.resp_base + RESP_HEAD, self.resp_head);
+        csr::write(self.resp_base + RESP_DOORBELL_CLEAR, 1);
 
         Ok(resp)
     }
