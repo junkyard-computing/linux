@@ -188,12 +188,17 @@ impl Kci {
 
         // Poll the resp-queue tail for the reply (1 s budget, KCI_TIMEOUT).
         let mut got = false;
-        for _ in 0..1000 {
-            if csr::read(KCI_RESP_BASE + RESP_TAIL) != self.resp_head {
-                got = true;
-                break;
+        // Firmware responds in microseconds; spin-read first, then fall back to a short sleep.
+        // The old 1ms sleep per mailbox round-trip dominated per-op latency (a full model forward
+        // is hundreds of ops × several KCI/VII round-trips), so a tight read loop is a big win.
+        'poll: for _ in 0..2000 {
+            for _ in 0..2000 {
+                if csr::read(KCI_RESP_BASE + RESP_TAIL) != self.resp_head {
+                    got = true;
+                    break 'poll;
+                }
             }
-            fsleep(Delta::from_millis(1));
+            fsleep(Delta::from_micros(50));
         }
         if !got {
             dev_err!(
