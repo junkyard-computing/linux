@@ -134,4 +134,19 @@ impl EdgeTpuFileData {
         args.pad = 0;
         Ok(0)
     }
+
+    /// Reset the client's VII context (fresh VCID) and reclaim the BO heap — the
+    /// same work done on a fresh DRM open, exposed as an ioctl so a long-lived
+    /// client can recycle mid-run without re-opening the fd. See
+    /// [`MailboxState::reset_client`].
+    pub(crate) fn reset(
+        ddev: &EdgeTpuDevice,
+        _args: &mut uapi::drm_edgetpu_reset,
+        _file: &EdgeTpuFile,
+    ) -> Result<u32> {
+        let pdev = ddev.pdev.as_ref();
+        let raw = pdev.as_raw();
+        ddev.mbox.lock().reset_client(pdev, raw);
+        Ok(0)
+    }
 }
