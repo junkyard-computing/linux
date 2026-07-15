@@ -74,12 +74,16 @@ int edgetpu_mem_write(phys_addr_t phys, const void *src, size_t len);
 int edgetpu_mem_read(phys_addr_t phys, void *dst, size_t len);
 
 /*
- * Pin the MIF/INT buses to their top frequencies (dev_pm_qos MIN_FREQUENCY on
- * the exynos-bus devfreqs). The firmware DMAs every inference op through memory
- * and the bus governor can't see that load, so without this the buses idle at
- * ~13% and every op runs ~5x slower. Call once from probe; best-effort.
+ * MIF/INT bus bandwidth votes (dev_pm_qos MIN_FREQUENCY on the exynos-bus
+ * devfreqs). The firmware DMAs every inference op through memory and the bus
+ * governor can't see that load, so without this the buses idle at ~13% and every
+ * op runs ~5x slower. edgetpu_bus_qos_init() adds the (inactive) requests once at
+ * probe; get/put raise the buses to max while ≥1 client is attached and drop
+ * them at idle (load-gated, so an idle TPU doesn't pin DRAM). Best-effort.
  */
 int edgetpu_bus_qos_init(void);
+void edgetpu_bus_qos_get(void);
+void edgetpu_bus_qos_put(void);
 
 /*
  * Module-lifetime mapping of the main TPU CSR block (0x1ce00000), used by the
