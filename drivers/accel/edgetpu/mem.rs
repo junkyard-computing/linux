@@ -9,8 +9,8 @@
 //! Within that window only the region between the end of the firmware body and
 //! the firmware's own `secure_data_start` (phys `0x93200000`) is free for the
 //! driver to use — the AP and the TPU both reach it without the SysMMU, exactly
-//! like the KCI queues. That 1 MiB gap holds the KCI queues, the VII mailbox
-//! queues, and the M2 buffer-object heap:
+//! like the KCI queues. That 1 MiB gap holds the KCI queues and the VII mailbox
+//! queues:
 //!
 //! ```text
 //!   0x93100000  KCI cmd queue      (kci.rs)
@@ -18,8 +18,15 @@
 //!   0x93120000  KCI fw_info + OPEN_DEVICE detail scratch (kci.rs)
 //!   0x93130000  VII cmd queue      (vii.rs)
 //!   0x93140000  VII resp queue     (vii.rs)
-//!   0x93150000  BO heap  ── grows up to ──  0x93200000 (secure_data_start)
+//!   0x93150000..0x93200000  free (was the carveout BO heap; now spare — a
+//!                           second VII mailbox's queues can live here)
 //! ```
+//!
+//! Buffer objects are NO LONGER carveout-backed: the ~704 KiB gap could not hold
+//! a whole model forward's executables, forcing a VCID recycle every ~35 ops. BOs
+//! are now backed by physically-contiguous system memory (`BoAllocator`), mapped
+//! into the SysMMU at IOVAs in the 128 MiB `IOVA_BASE..IOVA_END` window, so the
+//! whole forward's executables can stay resident (register-once-dispatch).
 
 use kernel::{
     alloc::KVec,
@@ -38,17 +45,10 @@ pub(crate) const fn tpu_va(phys: u64) -> u64 {
     phys - CARVEOUT_PHYS_BASE + TPU_REMAP_BASE
 }
 
-/// Buffer-object heap: from `0x93150000` up to `secure_data_start`
-/// (`0x93200000`) — ~720 KiB. BOs are carveout-backed (so BO_WRITE/BO_READ keep
-/// using the memremap path) but are SysMMU-mapped into the non-secure device
-/// window, so the firmware reaches them via valid IOVAs. A larger heap would
-/// mean backing BOs with normal pages; the carveout is enough for small models.
-pub(crate) const BO_HEAP_PHYS: u64 = 0x9315_0000;
-pub(crate) const BO_HEAP_END: u64 = 0x9320_0000;
-
 /// TPU SysMMU device-address (IOVA) window for inference buffers — inside the
 /// DT `dma-window` (`0x18000000..0xFFFFF000`). We hand these IOVAs to the
-/// firmware; the SysMMU translates them back to the carveout backing.
+/// firmware; the SysMMU translates them back to each BO's system-memory backing.
+/// 128 MiB — enough to keep a whole model forward's executables resident.
 pub(crate) const IOVA_BASE: u64 = 0x1800_0000;
 pub(crate) const IOVA_END: u64 = 0x2000_0000;
 
@@ -86,6 +86,7 @@ pub(crate) fn bus_qos_put() {
 }
 
 /// Write `bytes` into the carveout at `phys` via the C glue (persistent WC map).
+/// Used for the KCI/VII mailbox queues (BOs use [`BoEntry`] system memory now).
 pub(crate) fn write(phys: u64, bytes: &[u8]) -> Result {
     // SAFETY: `bytes` is a valid slice; the glue memremaps `phys` for `len`.
     to_result(unsafe { bindings::edgetpu_mem_write(phys, bytes.as_ptr().cast(), bytes.len()) })
@@ -97,19 +98,38 @@ pub(crate) fn read(phys: u64, bytes: &mut [u8]) -> Result {
     to_result(unsafe { bindings::edgetpu_mem_read(phys, bytes.as_mut_ptr().cast(), bytes.len()) })
 }
 
-/// A buffer object: a page-aligned carveout range, mapped into the SysMMU at
-/// `iova`. Host access (BO_WRITE/BO_READ) uses `phys`; the firmware uses `iova`.
+/// A buffer object: physically-contiguous system memory mapped into the SysMMU
+/// at `iova`. Host access (BO_WRITE/BO_READ) memcpy's through `cpu_va` (the
+/// backing pages' kernel VA); the firmware reaches it via `iova`. `size` is the
+/// page-aligned allocation the SysMMU mapping and free must both use.
 pub(crate) struct BoEntry {
-    pub(crate) phys: u64,
+    pub(crate) cpu_va: u64,
     pub(crate) iova: u64,
     pub(crate) size: u64,
 }
 
-/// Trivial bump allocator over the carveout BO heap + the SysMMU IOVA window.
-/// No per-BO free (a whole client's BOs are reclaimed at once by [`reset`],
-/// called on each DRM open), which suits the map-once/submit-many pattern.
+/// Copy `bytes` into the system-memory BO at kernel VA `cpu_va` + `offset`.
+pub(crate) fn bo_write(cpu_va: u64, offset: u64, bytes: &[u8]) {
+    // SAFETY: `cpu_va`+`offset`..+len is inside a live BO (bounds-checked by the
+    // caller against `BoEntry::size`); `bytes` is a valid slice.
+    unsafe {
+        bindings::edgetpu_bo_write_bytes(cpu_va as *mut _, offset, bytes.as_ptr().cast(), bytes.len())
+    };
+}
+
+/// Copy `bytes.len()` out of the system-memory BO at `cpu_va` + `offset`.
+pub(crate) fn bo_read(cpu_va: u64, offset: u64, bytes: &mut [u8]) {
+    // SAFETY: same in-bounds guarantee as [`bo_write`]; `bytes` is a valid slice.
+    unsafe {
+        bindings::edgetpu_bo_read_bytes(cpu_va as *const _, offset, bytes.as_mut_ptr().cast(), bytes.len())
+    };
+}
+
+/// Trivial bump allocator over the SysMMU IOVA window, backing each BO with
+/// physically-contiguous system memory. No per-BO free (a whole client's BOs are
+/// reclaimed at once by [`reset`], on each DRM open / RESET ioctl), which suits
+/// the map-once/submit-many pattern.
 pub(crate) struct BoAllocator {
-    next_phys: u64,
     next_iova: u64,
     table: KVec<BoEntry>,
 }
@@ -117,34 +137,29 @@ pub(crate) struct BoAllocator {
 impl BoAllocator {
     pub(crate) fn new() -> Self {
         Self {
-            next_phys: BO_HEAP_PHYS,
             next_iova: IOVA_BASE,
             table: KVec::new(),
         }
     }
 
-    /// Allocate a page-aligned BO of `size` bytes, map its carveout backing into
-    /// the TPU SysMMU domain, and return `(handle, iova)`. `dev` is the edgetpu
-    /// platform device (whose default domain the IOMMU core attached).
+    /// Allocate a page-aligned BO of `size` bytes backed by system memory, map it
+    /// into the TPU SysMMU domain, and return `(handle, iova)`. `dev` is the
+    /// edgetpu platform device (whose default domain the IOMMU core attached).
     pub(crate) fn alloc(&mut self, size: u64, dev: *mut bindings::device) -> Result<(u32, u64)> {
         let aligned = size.checked_add(0xfff).ok_or(EINVAL)? & !0xfff;
-        if aligned == 0 || self.next_phys + aligned > BO_HEAP_END {
+        if aligned == 0 || self.next_iova + aligned > IOVA_END {
             return Err(ENOMEM);
         }
-        if self.next_iova + aligned > IOVA_END {
-            return Err(ENOMEM);
-        }
-        let phys = self.next_phys;
         let iova = self.next_iova;
-        // Map carveout phys -> IOVA so the firmware can reach the buffer.
-        // SAFETY: `dev` is the live edgetpu device; the glue looks up its domain.
-        to_result(unsafe {
-            bindings::edgetpu_iommu_map(dev, iova, phys, aligned as usize)
-        })?;
-        self.next_phys += aligned;
+        // Allocate system pages + SysMMU-map them so the firmware can reach the buffer.
+        // SAFETY: `dev` is the live edgetpu device; the glue allocates + maps `aligned` bytes.
+        let cpu_va = unsafe { bindings::edgetpu_bo_sysmem_alloc(dev, iova, aligned as usize) };
+        if cpu_va.is_null() {
+            return Err(ENOMEM);
+        }
         self.next_iova += aligned;
         let handle = self.table.len() as u32;
-        self.table.push(BoEntry { phys, iova, size: aligned }, GFP_KERNEL)?;
+        self.table.push(BoEntry { cpu_va: cpu_va as u64, iova, size: aligned }, GFP_KERNEL)?;
         Ok((handle, iova))
     }
 
@@ -153,13 +168,14 @@ impl BoAllocator {
         self.table.get(handle as usize)
     }
 
-    /// Reclaim the whole heap: unmap every BO from the SysMMU, reset the bumps.
+    /// Reclaim the whole heap: unmap + free every BO's system memory, reset the bump.
     pub(crate) fn reset(&mut self, dev: *mut bindings::device) {
         for e in self.table.iter() {
-            // SAFETY: `dev` is the live edgetpu device; iova/size were mapped here.
-            unsafe { bindings::edgetpu_iommu_unmap(dev, e.iova, e.size as usize) };
+            // SAFETY: `dev` is live; cpu_va/iova/size were returned by edgetpu_bo_sysmem_alloc.
+            unsafe {
+                bindings::edgetpu_bo_sysmem_free(dev, e.cpu_va as *mut _, e.iova, e.size as usize)
+            };
         }
-        self.next_phys = BO_HEAP_PHYS;
         self.next_iova = IOVA_BASE;
         self.table = KVec::new();
     }
