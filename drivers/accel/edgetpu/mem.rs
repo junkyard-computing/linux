@@ -52,7 +52,25 @@ pub(crate) const BO_HEAP_END: u64 = 0x9320_0000;
 pub(crate) const IOVA_BASE: u64 = 0x1800_0000;
 pub(crate) const IOVA_END: u64 = 0x2000_0000;
 
-/// Write `bytes` into the carveout at `phys` via the C glue (memremap WC).
+/// Map the carveout data region (KCI/VII queues + BO heap) once, so runtime
+/// [`write`]/[`read`] memcpy through a persistent mapping instead of a
+/// memremap()/memunmap() per access. Idempotent; call once during probe before
+/// any queue access.
+pub(crate) fn init() -> Result {
+    // SAFETY: FFI to the companion module; idempotent, no arguments.
+    to_result(unsafe { bindings::edgetpu_data_init() })
+}
+
+/// Pin the MIF/INT memory buses to their top frequencies. The firmware DMAs
+/// every inference op through memory and the bus governor can't see that load,
+/// so without this the buses idle at ~13% and every op runs ~5x slower.
+/// Best-effort (never fails probe); call once during probe.
+pub(crate) fn bus_qos_init() {
+    // SAFETY: FFI to the companion module; idempotent, best-effort, no arguments.
+    unsafe { bindings::edgetpu_bus_qos_init() };
+}
+
+/// Write `bytes` into the carveout at `phys` via the C glue (persistent WC map).
 pub(crate) fn write(phys: u64, bytes: &[u8]) -> Result {
     // SAFETY: `bytes` is a valid slice; the glue memremaps `phys` for `len`.
     to_result(unsafe { bindings::edgetpu_mem_write(phys, bytes.as_ptr().cast(), bytes.len()) })
