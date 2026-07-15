@@ -14,6 +14,7 @@
 #include <linux/mfd/samsung/rtc.h>
 #include <linux/mfd/samsung/s2mpg10.h>
 #include <linux/mfd/samsung/s2mpg11.h>
+#include <linux/mfd/samsung/s2mpg13.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -365,6 +366,103 @@ static const struct regmap_config s2mpg11_regmap_config_meter = {
 	.cache_type = REGCACHE_FLAT,
 };
 
+/*
+ * s2mpg13 (gs201 sub-PMIC). Uncached (REGCACHE_NONE) for bring-up: every
+ * access hits the ACPM bus, so there is no cache-staleness risk while only
+ * the LDO control registers are exercised. The wr/rd tables just bound the
+ * valid address space per bank.
+ */
+static const struct regmap_range s2mpg13_common_registers[] = {
+	regmap_reg_range(0x00, 0x10), /* VGPIO, I3C, CHIPID, IBI */
+};
+
+static const struct regmap_range s2mpg13_common_ro_registers[] = {
+	regmap_reg_range(0x0b, 0x0b), /* CHIPID */
+};
+
+static const struct regmap_access_table s2mpg13_common_rd_table = {
+	.yes_ranges = s2mpg13_common_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg13_common_registers),
+};
+
+static const struct regmap_access_table s2mpg13_common_wr_table = {
+	.yes_ranges = s2mpg13_common_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg13_common_registers),
+	.no_ranges = s2mpg13_common_ro_registers,
+	.n_no_ranges = ARRAY_SIZE(s2mpg13_common_ro_registers),
+};
+
+static const struct regmap_config s2mpg13_regmap_config_common = {
+	.name = "common",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG13_COMMON_IBIM2,
+	.wr_table = &s2mpg13_common_wr_table,
+	.rd_table = &s2mpg13_common_rd_table,
+	.cache_type = REGCACHE_NONE,
+};
+
+static const struct regmap_range s2mpg13_pmic_registers[] = {
+	regmap_reg_range(0x00, 0xc1), /* All PMIC registers */
+};
+
+static const struct regmap_range s2mpg13_pmic_ro_registers[] = {
+	regmap_reg_range(0x00, 0x03), /* INTx */
+	regmap_reg_range(0x0a, 0x0a), /* OFFSRC */
+};
+
+static const struct regmap_access_table s2mpg13_pmic_rd_table = {
+	.yes_ranges = s2mpg13_pmic_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg13_pmic_registers),
+};
+
+static const struct regmap_access_table s2mpg13_pmic_wr_table = {
+	.yes_ranges = s2mpg13_pmic_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg13_pmic_registers),
+	.no_ranges = s2mpg13_pmic_ro_registers,
+	.n_no_ranges = ARRAY_SIZE(s2mpg13_pmic_ro_registers),
+};
+
+static const struct regmap_config s2mpg13_regmap_config_pmic = {
+	.name = "pmic",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG13_PMIC_L26S_CTRL2,
+	.wr_table = &s2mpg13_pmic_wr_table,
+	.rd_table = &s2mpg13_pmic_rd_table,
+	.cache_type = REGCACHE_NONE,
+};
+
+static const struct regmap_range s2mpg13_meter_registers[] = {
+	regmap_reg_range(0x00, 0xe5), /* Meter config + data */
+};
+
+static const struct regmap_range s2mpg13_meter_ro_registers[] = {
+	regmap_reg_range(0x1d, 0xe5), /* Meter data (LPF / ACC / NTC) */
+};
+
+static const struct regmap_access_table s2mpg13_meter_rd_table = {
+	.yes_ranges = s2mpg13_meter_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg13_meter_registers),
+};
+
+static const struct regmap_access_table s2mpg13_meter_wr_table = {
+	.yes_ranges = s2mpg13_meter_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg13_meter_registers),
+	.no_ranges = s2mpg13_meter_ro_registers,
+	.n_no_ranges = ARRAY_SIZE(s2mpg13_meter_ro_registers),
+};
+
+static const struct regmap_config s2mpg13_regmap_config_meter = {
+	.name = "meter",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG13_METER_EXT_SIGNED_DATA2,
+	.wr_table = &s2mpg13_meter_wr_table,
+	.rd_table = &s2mpg13_meter_rd_table,
+	.cache_type = REGCACHE_NONE,
+};
+
 struct sec_pmic_acpm_shared_bus_context {
 	struct acpm_handle *acpm;
 	unsigned int acpm_chan_id;
@@ -559,9 +657,25 @@ static const struct sec_pmic_acpm_platform_data s2mpg11_data = {
 	.regmap_cfg_meter = &s2mpg11_regmap_config_meter,
 };
 
+/*
+ * gs201 sub-PMIC. The ACPM PMIC IPC channel + speedy sub-channel are assumed
+ * to mirror the gs101 layout (main = speedy 0, sub = speedy 1 on chan 2); this
+ * matches the AOSP s2mpg13 "channel 1" and is the first thing to check if the
+ * chip-id read fails at probe.
+ */
+static const struct sec_pmic_acpm_platform_data s2mpg13_data = {
+	.device_type = S2MPG13,
+	.acpm_chan_id = 2,
+	.speedy_channel = 1,
+	.regmap_cfg_common = &s2mpg13_regmap_config_common,
+	.regmap_cfg_pmic = &s2mpg13_regmap_config_pmic,
+	.regmap_cfg_meter = &s2mpg13_regmap_config_meter,
+};
+
 static const struct of_device_id sec_pmic_acpm_of_match[] = {
 	{ .compatible = "samsung,s2mpg10-pmic", .data = &s2mpg10_data, },
 	{ .compatible = "samsung,s2mpg11-pmic", .data = &s2mpg11_data, },
+	{ .compatible = "samsung,s2mpg13-pmic", .data = &s2mpg13_data, },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, sec_pmic_acpm_of_match);
