@@ -203,7 +203,10 @@ impl Kci {
             dev_err!(dev, "edgetpu: KCI resp seq {} != {}\n", rseq, self.seq);
             return Err(EIO);
         }
-        self.seq += 1;
+        // The firmware echoes the ring-slot seq, which wraps at QUEUE_SIZE (0..QUEUE_SIZE-1).
+        // Wrap our expected seq the same way so command streams longer than the queue depth
+        // (e.g. a whole model forward = hundreds of ops) don't trip a false seq mismatch.
+        self.seq = (self.seq + 1) % QUEUE_SIZE as u64;
         Ok((rcode, retval))
     }
 
