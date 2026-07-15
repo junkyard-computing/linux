@@ -978,6 +978,41 @@
 				};
 			};
 		};
+
+		/*
+		 * On-die ISP (4) and TPU (5) TMU sensors. The ACPM TMU exposes
+		 * 6 sensors (BIG/MID/LIT/GPU/ISP/TPU); these two are diagnostic-
+		 * only - a headless felix drives neither block, but their power
+		 * domains sit ungated (no genpd on mainline), so these zones
+		 * instrument that idle-heat contribution and any future power-
+		 * domain gating. No cooling-map: no DVFS knob throttles them.
+		 * Critical trip kept as a graceful-shutdown backstop.
+		 */
+		isp-thermal {
+			polling-delay-passive = <0>;
+			polling-delay = <1000>;
+			thermal-sensors = <&acpm_tmu 4>;
+			trips {
+				isp_crit: crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		tpu-thermal {
+			polling-delay-passive = <0>;
+			polling-delay = <1000>;
+			thermal-sensors = <&acpm_tmu 5>;
+			trips {
+				tpu_crit: crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
 	};
 
 	/* ------------------------------------------------------------------ */
