@@ -103,4 +103,23 @@ void edgetpu_csr_write32(u32 off, u32 val);
 int edgetpu_iommu_map(struct device *dev, u64 iova, phys_addr_t paddr, size_t size);
 void edgetpu_iommu_unmap(struct device *dev, u64 iova, size_t size);
 
+/*
+ * System-memory buffer objects. Instead of bump-allocating from the tiny (~704
+ * KiB) firmware carveout, back each BO with physically-contiguous kernel pages
+ * and SysMMU-map them at @iova (the driver's IOVA bump, 0x18000000+). This lifts
+ * the heap ceiling to the whole 128 MiB IOVA window, so a whole model forward's
+ * executables can stay resident (register-once-dispatch) instead of being
+ * recycled every ~35 ops. The TPU is IO-coherent (edgetpu_enable_coherency +
+ * IOMMU_CACHE), so the CPU's cached writes are snooped — no explicit cache
+ * maintenance, just a barrier before the doorbell / after the response.
+ *
+ * edgetpu_bo_sysmem_alloc allocates + maps @size bytes and returns the kernel VA
+ * for host copies (NULL on failure); edgetpu_bo_sysmem_free unmaps + frees it.
+ * edgetpu_bo_write_bytes / edgetpu_bo_read_bytes memcpy through that kernel VA.
+ */
+void *edgetpu_bo_sysmem_alloc(struct device *dev, u64 iova, size_t size);
+void edgetpu_bo_sysmem_free(struct device *dev, void *cpu_va, u64 iova, size_t size);
+void edgetpu_bo_write_bytes(void *cpu_va, u64 offset, const void *src, size_t len);
+void edgetpu_bo_read_bytes(const void *cpu_va, u64 offset, void *dst, size_t len);
+
 #endif /* __EDGETPU_GSA_H */

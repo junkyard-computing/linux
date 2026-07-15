@@ -18,7 +18,7 @@ use kernel::{
 use crate::driver::EdgeTpuDevice;
 use crate::file::{EdgeTpuFile, EdgeTpuFileData};
 use crate::kci::Kci;
-use crate::mem::{self, BoAllocator, BO_HEAP_END, BO_HEAP_PHYS};
+use crate::mem::{self, BoAllocator};
 use crate::vii::{Vii, CMD_ELEM, RESP_ELEM};
 
 /// Device-global mailbox + buffer state, guarded by a mutex in the DRM device
@@ -41,9 +41,10 @@ impl MailboxState {
     }
 }
 
-/// Largest BO the heap could hold — used to reject absurd allocation requests
-/// before touching the allocator.
-const BO_MAX: u64 = BO_HEAP_END - BO_HEAP_PHYS;
+/// Largest single BO we allow — a sanity bound on one allocation, well under the
+/// page allocator's `MAX_ORDER` block (a contiguous system-memory BO). The whole
+/// forward's worth of BOs is bounded instead by the 128 MiB IOVA window.
+const BO_MAX: u64 = 4 * 1024 * 1024;
 
 impl EdgeTpuFileData {
     /// Allocate a carveout BO and return its handle + TPU device-VA.
@@ -82,13 +83,18 @@ impl EdgeTpuFileData {
             .reader()
             .read_slice(&mut buf)?;
 
-        let st = ddev.mbox.lock();
-        let bo = st.bo.get(args.handle).ok_or(EINVAL)?;
-        let end = args.offset.checked_add(args.size).ok_or(EINVAL)?;
-        if end > bo.size {
-            return Err(EINVAL);
-        }
-        mem::write(bo.phys + args.offset, &buf)?;
+        let cpu_va = {
+            let st = ddev.mbox.lock();
+            let bo = st.bo.get(args.handle).ok_or(EINVAL)?;
+            let end = args.offset.checked_add(args.size).ok_or(EINVAL)?;
+            if end > bo.size {
+                return Err(EINVAL);
+            }
+            bo.cpu_va
+        };
+        // Copy after dropping the lock: the memcpy can be large and the backing
+        // memory is stable for this client (only its own RESET/close frees it).
+        mem::bo_write(cpu_va, args.offset, &buf);
         Ok(0)
     }
 
@@ -102,19 +108,19 @@ impl EdgeTpuFileData {
             return Err(EINVAL);
         }
         let len = args.size as usize;
-        let phys = {
+        let cpu_va = {
             let st = ddev.mbox.lock();
             let bo = st.bo.get(args.handle).ok_or(EINVAL)?;
             let end = args.offset.checked_add(args.size).ok_or(EINVAL)?;
             if end > bo.size {
                 return Err(EINVAL);
             }
-            bo.phys + args.offset
+            bo.cpu_va
         };
 
         let mut buf = KVec::with_capacity(len, GFP_KERNEL)?;
         buf.resize(len, 0, GFP_KERNEL)?;
-        mem::read(phys, &mut buf)?;
+        mem::bo_read(cpu_va, args.offset, &mut buf);
         UserSlice::new(UserPtr::from_addr(args.user_ptr as usize), len)
             .writer()
             .write_slice(&buf)?;

@@ -10,8 +10,10 @@
 
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
+#include <linux/gfp.h>
 #include <linux/io.h>
 #include <linux/iommu.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -464,6 +466,68 @@ void edgetpu_iommu_unmap(struct device *dev, u64 iova, size_t size)
 		iommu_unmap(dom, iova, size);
 }
 EXPORT_SYMBOL_GPL(edgetpu_iommu_unmap);
+
+/*
+ * System-memory buffer objects (see edgetpu_gsa.h). Back a BO with
+ * physically-contiguous kernel pages and SysMMU-map them at @iova, so BOs are no
+ * longer bounded by the ~704 KiB carveout. @size is page-aligned by the caller.
+ * The TPU is IO-coherent, so the CPU's cacheable pages are snooped — no cache
+ * maintenance needed, only a barrier around host access (write/read helpers).
+ */
+void *edgetpu_bo_sysmem_alloc(struct device *dev, u64 iova, size_t size)
+{
+	unsigned int order = get_order(size);
+	struct page *pg;
+	void *va;
+	int ret;
+
+	pg = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+	if (!pg) {
+		dev_err(dev, "edgetpu: BO alloc_pages(order=%u) failed\n", order);
+		return NULL;
+	}
+	va = page_address(pg);
+	/*
+	 * Map exactly @size (the caller's page-aligned request), NOT the
+	 * order-rounded allocation: the driver's IOVA bump advances by @size, so
+	 * mapping the larger 2^order block would overlap the next BO's IOVA and
+	 * iommu_map would reject it (-EADDRINUSE). The extra tail pages of the
+	 * allocation are simply left unmapped. @size is a multiple of PAGE_SIZE.
+	 */
+	ret = edgetpu_iommu_map(dev, iova, page_to_phys(pg), size);
+	if (ret) {
+		dev_err(dev, "edgetpu: BO SysMMU map iova=%#llx failed (%d)\n", iova, ret);
+		__free_pages(pg, order);
+		return NULL;
+	}
+	return va;
+}
+EXPORT_SYMBOL_GPL(edgetpu_bo_sysmem_alloc);
+
+void edgetpu_bo_sysmem_free(struct device *dev, void *cpu_va, u64 iova, size_t size)
+{
+	/* Unmap the same @size that was mapped in alloc, then free the pages. */
+	edgetpu_iommu_unmap(dev, iova, size);
+	if (cpu_va)
+		__free_pages(virt_to_page(cpu_va), get_order(size));
+}
+EXPORT_SYMBOL_GPL(edgetpu_bo_sysmem_free);
+
+void edgetpu_bo_write_bytes(void *cpu_va, u64 offset, const void *src, size_t len)
+{
+	memcpy((u8 *)cpu_va + offset, src, len);
+	/* Ensure the write is visible before the caller rings the doorbell. */
+	wmb();
+}
+EXPORT_SYMBOL_GPL(edgetpu_bo_write_bytes);
+
+void edgetpu_bo_read_bytes(const void *cpu_va, u64 offset, void *dst, size_t len)
+{
+	/* Observe the TPU's writes (IO-coherent, so a barrier suffices). */
+	rmb();
+	memcpy(dst, (const u8 *)cpu_va + offset, len);
+}
+EXPORT_SYMBOL_GPL(edgetpu_bo_read_bytes);
 
 MODULE_DESCRIPTION("GSA secure-firmware glue for the gs201 Edge TPU accel driver");
 MODULE_LICENSE("GPL");
