@@ -35,7 +35,7 @@ use crate::gsa::{
 };
 use crate::kci::Kci;
 use crate::regs;
-use crate::vii::Vii;
+use crate::vii::{Vii, NUM_VII};
 
 /// Main TPU CSR block window (reg index 0).
 pub(crate) type TpuRegs<'a> = IoMem<'a, SZ_2M>;
@@ -97,7 +97,7 @@ pub(crate) fn firmware_bringup(
     reg: &TpuRegs<'_>,
     ssmt: &SsmtRegs<'_>,
     kci: &mut Kci,
-    vii: &mut Vii,
+    vii: &mut [Vii; NUM_VII],
 ) -> Result {
     // 1. Power state machines up (rail/clock already enabled by the caller).
     lpm_up(reg)?;
@@ -169,10 +169,14 @@ pub(crate) fn firmware_bringup(
     let flavor = kci.fw_info(dev)?;
     dev_info!(dev, "edgetpu: *** KCI FW_INFO ok — fw_flavor={} ***\n", flavor);
 
-    // 9. M2: bring up + bind the VII inference mailbox (mailbox 1) via a KCI
-    //    OPEN_DEVICE. Success means the firmware accepted a per-context
-    //    inference queue — the substrate the SUBMIT ioctl drives.
-    vii.activate(dev, kci)?;
+    // 9. M2: bring up + bind BOTH VII inference mailboxes (indices 1 and 2) via
+    //    KCI OPEN_DEVICE, each on its own VCID (slot 0 -> vcid 0, slot 1 -> vcid
+    //    1). Two concurrent contexts let >158 graphs register across them
+    //    (register-once-dispatch). Success means the firmware accepted each
+    //    per-context inference queue — the substrate the SUBMIT ioctl drives.
+    for (i, v) in vii.iter_mut().enumerate() {
+        v.activate(dev, kci, i as u16)?;
+    }
 
     Ok(())
 }
