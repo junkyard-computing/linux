@@ -609,3 +609,38 @@
 		line-name = "inner-panel-reset";
 	};
 };
+
+/*
+ * s2mpg13 sub-PMIC bring-up (Phase 1). Only the two inner-display rails are
+ * exposed for now: LDO4S (vddi) and LDO28S (vci). IRQ line + ACPM PMIC channel
+ * mirror gs101 / AOSP gs201 (sub = gpa0-7, chan 2).
+ *
+ * Phase 1a keeps regulator-boot-on so the regulator core does NOT disable them
+ * yet: this build only proves the driver probes and the rails register while
+ * the inner panel stays dark via the gpa7-1 reset hog above. Dropping boot-on
+ * (so the unused-regulator cleanup powers them off, replacing the hog) is the
+ * follow-up step, to be validated with the device in hand.
+ */
+&acpm_ipc {
+	s2mpg13: pmic-2 {
+		compatible = "samsung,s2mpg13-pmic";
+		interrupts-extended = <&gpa0 7 IRQ_TYPE_LEVEL_LOW>;
+		wakeup-source;
+
+		regulators {
+			ldo4s: ldo4s {
+				regulator-name = "s2mpg13_ldo4s_inner_vddi";
+				regulator-min-microvolt = <700000>;
+				regulator-max-microvolt = <2275000>;
+				regulator-boot-on;
+			};
+
+			ldo28s: ldo28s {
+				regulator-name = "s2mpg13_ldo28s_inner_vci";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3375000>;
+				regulator-boot-on;
+			};
+		};
+	};
+};
