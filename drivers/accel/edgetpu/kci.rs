@@ -58,6 +58,29 @@ const QUEUE_SIZE: u32 = 1023; // elements; wrap bit = 0x400
 const CMD_ELEM: usize = 32;
 const RESP_ELEM: usize = 16;
 
+// Circular-queue head/tail pointers are NOT free-running counters: they carry a real index in
+// bits [0,10) plus a wrap bit (bit 10) that toggles each traversal, matching the firmware and the
+// AOSP `circular_queue_inc` (edgetpu-mailbox.h). The slot to read/write is the real index; the
+// value written to the tail/head CSR is the full `real | wrap` word. A plain `+= 1` / `% size`
+// diverges from this at the first wrap (QUEUE_SIZE=1023 vs the 0x400 wrap bit), corrupting the ring
+// once a command stream exceeds the queue depth (a whole model forward = hundreds of activations).
+const WRAP_BIT: u32 = 1 << 10; // 0x400
+const INDEX_MASK: u32 = WRAP_BIT - 1; // 0x3ff
+
+/// The real ring slot for a wrap-encoded head/tail pointer.
+fn real_index(idx: u32) -> usize {
+    (idx & INDEX_MASK) as usize
+}
+
+/// Advance a wrap-encoded circular-queue pointer by one, per the AOSP `circular_queue_inc`.
+fn circ_inc(idx: u32, queue_size: u32) -> u32 {
+    if (idx & INDEX_MASK) + 1 >= queue_size {
+        (idx + 1 - queue_size) ^ WRAP_BIT
+    } else {
+        idx + 1
+    }
+}
+
 // --- Carveout placement (see mem.rs for the full map) -----------------------
 const CMD_Q_PHYS: u64 = 0x9310_0000; // TPU-VA 0x10100000
 const RESP_Q_PHYS: u64 = 0x9311_0000; // TPU-VA 0x10110000
@@ -150,7 +173,7 @@ impl Kci {
         // Build the 32-byte command element:
         //   seq u64@0, code u16@8, dma.address u64@16, dma.size u32@24,
         //   dma.flags u32@28.
-        let slot = (self.cmd_tail as usize) % (QUEUE_SIZE as usize);
+        let slot = real_index(self.cmd_tail);
         let mut cmd = [0u8; CMD_ELEM];
         cmd[0..8].copy_from_slice(&self.seq.to_le_bytes());
         cmd[8..10].copy_from_slice(&code.to_le_bytes());
@@ -159,7 +182,7 @@ impl Kci {
         cmd[28..32].copy_from_slice(&dma_flags.to_le_bytes());
 
         mem::write(CMD_Q_PHYS + (slot * CMD_ELEM) as u64, &cmd)?;
-        self.cmd_tail += 1;
+        self.cmd_tail = circ_inc(self.cmd_tail, QUEUE_SIZE);
         csr::write(KCI_CMD_BASE + CMD_TAIL, self.cmd_tail);
         csr::write(KCI_CMD_BASE + CMD_DOORBELL_SET, 1);
 
@@ -187,26 +210,25 @@ impl Kci {
         }
 
         // Read the 16-byte response element (seq u64@0, code u16@8, retval u32@12).
-        let rslot = (self.resp_head as usize) % (QUEUE_SIZE as usize);
+        let rslot = real_index(self.resp_head);
         let mut resp = [0u8; RESP_ELEM];
         mem::read(RESP_Q_PHYS + (rslot * RESP_ELEM) as u64, &mut resp)?;
         let rseq = u64::from_le_bytes(resp[0..8].try_into().map_err(|_| EINVAL)?);
         let rcode = u16::from_le_bytes(resp[8..10].try_into().map_err(|_| EINVAL)?);
         let retval = u32::from_le_bytes(resp[12..16].try_into().map_err(|_| EINVAL)?);
 
-        // Ack: advance resp head, clear the resp doorbell.
-        self.resp_head += 1;
+        // Ack: advance resp head (wrap-encoded), clear the resp doorbell.
+        self.resp_head = circ_inc(self.resp_head, QUEUE_SIZE);
         csr::write(KCI_RESP_BASE + RESP_HEAD, self.resp_head);
         csr::write(KCI_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
 
+        // The firmware echoes the command's seq verbatim; it's a plain monotonic counter (the earlier
+        // "resp seq 0 != N" at the wrap was a stale read from the wrong ring slot, now fixed above).
         if rseq != self.seq {
             dev_err!(dev, "edgetpu: KCI resp seq {} != {}\n", rseq, self.seq);
             return Err(EIO);
         }
-        // The firmware echoes the ring-slot seq, which wraps at QUEUE_SIZE (0..QUEUE_SIZE-1).
-        // Wrap our expected seq the same way so command streams longer than the queue depth
-        // (e.g. a whole model forward = hundreds of ops) don't trip a false seq mismatch.
-        self.seq = (self.seq + 1) % QUEUE_SIZE as u64;
+        self.seq += 1;
         Ok((rcode, retval))
     }
 
