@@ -494,6 +494,15 @@ struct regmap_irq_chip_data *sec_irq_init(struct sec_pmic_dev *sec_pmic)
 	case S2MPG10:
 	case S2MPG11:
 		return sec_irq_init_s2mpg1x(sec_pmic);
+	case S2MPG13:
+		/*
+		 * Phase 1 s2mpg13 sub-PMIC bring-up: the regulator path does not
+		 * need PMIC event interrupts (OCP/UVLO/etc.) and no s2mpg13
+		 * regmap_irq chip is defined yet. Skip IRQ setup (like the other
+		 * no-IRQ SEC devices) - a NULL irq_data flows safely through
+		 * regmap_irq_get_domain() and regulators register without it.
+		 */
+		return NULL;
 	case S2MPS11X:
 		sec_irq_chip = &s2mps11_irq_chip;
 		break;
