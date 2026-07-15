@@ -22,3 +22,15 @@ config GS201_ACPM_THERMAL
 	  coprocessor rather than a memory-mapped register block. Registers the
 	  TMU sensors with the thermal framework so DT thermal-zones and cooling
 	  maps can throttle CPU cpufreq / GPU devfreq under load.
+
+config S2MPG13_SPMIC_THERMAL
+	tristate "Google gs201 s2mpg13 sub-PMIC NTC thermal sensor driver"
+	depends on THERMAL_OF
+	depends on MFD_SEC_CORE
+	default ARCH_EXYNOS
+	help
+	  Thermal sensor driver for the off-die NTC thermistors sampled by the
+	  Google gs201 s2mpg13 sub-PMIC METER block (skin, USB, display, GNSS).
+	  Reads the low-pass-filtered ADC codes over the sec-acpm "meter" regmap
+	  and registers them with the thermal framework so DT thermal-zones such
+	  as skin_therm can act on board-surface temperature.
