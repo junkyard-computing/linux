@@ -57,13 +57,15 @@ static const struct mfd_cell s2mpg11_devs[] = {
 };
 
 /*
- * gs201 sub-PMIC: regulator + the NTC thermistor sensor (spmic-thermal). The
- * ODPM power-meter leaf driver is still follow-up work.
+ * gs201 sub-PMIC: regulator, the NTC thermistor sensor (spmic-thermal) and the
+ * ODPM power meter.
  */
 static const struct mfd_cell s2mpg13_devs[] = {
 	MFD_CELL_NAME("s2mpg13-regulator"),
 	MFD_CELL_OF("s2mpg13-spmic-thermal", NULL, NULL, 0, 0,
 		    "google,s2mpg13-spmic-thermal"),
+	MFD_CELL_OF("s2mpg13-powermeter", NULL, NULL, 0, 0,
+		    "google,s2mpg13-powermeter"),
 };
 
 static const struct resource s2mps11_rtc_resources[] = {
