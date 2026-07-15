@@ -19,24 +19,33 @@ use crate::driver::EdgeTpuDevice;
 use crate::file::{EdgeTpuFile, EdgeTpuFileData};
 use crate::kci::Kci;
 use crate::mem::{self, BoAllocator};
-use crate::vii::{Vii, CMD_ELEM, RESP_ELEM};
+use crate::vii::{Vii, CMD_ELEM, NUM_VII, RESP_ELEM};
 
 /// Device-global mailbox + buffer state, guarded by a mutex in the DRM device
-/// data. A single client (finch) drives one VII context at a time.
+/// data. A single client (finch) drives the `NUM_VII` VII contexts (mailboxes 1
+/// and 2), each bound to a FIXED VCID (slot 0 -> VCID 0, slot 1 -> VCID 1) so
+/// >158 graph registrations fit across them (register-once-dispatch).
 pub(crate) struct MailboxState {
     pub(crate) kci: Kci,
-    pub(crate) vii: Vii,
+    pub(crate) vii: [Vii; NUM_VII],
     pub(crate) bo: BoAllocator,
 }
 
 impl MailboxState {
-    /// Prepare a fresh session for a new client: reset the VII inference context
-    /// (frees the firmware's accumulated per-context registrations, which
-    /// otherwise make every inference after the first fail) and reclaim the BO
-    /// heap. `dev`/`dev_raw` are the edgetpu platform device (for logging /
-    /// IOMMU unmap).
+    /// Prepare a fresh session for a new client: reset EVERY VII context onto its FIXED VCID with
+    /// first_open=true (which clears that VCID's prior registrations) and reclaim the shared BO heap.
+    ///
+    /// Each mailbox reuses the SAME VCID every session rather than rotating through the pool. Rotation
+    /// (a fresh VCID per open) LEAKS the previous session's registrations: the firmware only clears a
+    /// VCID's context on first_open of THAT VCID, so an abandoned VCID keeps its ~263 registrations
+    /// live, and after a couple of sessions the firmware's global registration pool is exhausted —
+    /// exec-register then silently fails and the next dispatch returns NOT_FOUND. Reusing a fixed VCID
+    /// means first_open=true clears last session's registrations, so nothing accumulates.
+    /// `dev`/`dev_raw` are the edgetpu platform device (for logging / IOMMU unmap).
     pub(crate) fn reset_client(&mut self, dev: &Device, dev_raw: *mut bindings::device) {
-        let _ = self.vii.reactivate(dev, &mut self.kci);
+        for i in 0..NUM_VII {
+            let _ = self.vii[i].reactivate(dev, &mut self.kci, i as u16);
+        }
         self.bo.reset(dev_raw);
     }
 }
@@ -127,17 +136,24 @@ impl EdgeTpuFileData {
         Ok(0)
     }
 
-    /// Submit one VII command element and return its response.
+    /// Submit one VII command element to the mailbox selected by `args.context`
+    /// (0 or 1) and return its response. Routing by context lets a client keep
+    /// two concurrent VCID contexts and dispatch each registered graph to the
+    /// mailbox that holds its registration (register-once-dispatch).
     pub(crate) fn submit(
         ddev: &EdgeTpuDevice,
         args: &mut uapi::drm_edgetpu_submit,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
+        let ctx = args.context as usize;
+        if ctx >= NUM_VII {
+            return Err(EINVAL);
+        }
         let cmd: [u8; CMD_ELEM] = args.command;
         let mut st = ddev.mbox.lock();
-        let resp: [u8; RESP_ELEM] = st.vii.submit(&cmd, args.timeout_ms)?;
+        let resp: [u8; RESP_ELEM] = st.vii[ctx].submit(&cmd, args.timeout_ms)?;
         args.response = resp;
-        args.pad = 0;
+        args.context = 0;
         Ok(0)
     }
 
