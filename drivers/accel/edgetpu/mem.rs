@@ -48,9 +48,18 @@ pub(crate) const fn tpu_va(phys: u64) -> u64 {
 /// TPU SysMMU device-address (IOVA) window for inference buffers — inside the
 /// DT `dma-window` (`0x18000000..0xFFFFF000`). We hand these IOVAs to the
 /// firmware; the SysMMU translates them back to each BO's system-memory backing.
-/// 128 MiB — enough to keep a whole model forward's executables resident.
+///
+/// The bump is monotonic across clients (never reused until it wraps at
+/// [`IOVA_END`], see `BoAllocator::reset`), because the firmware deduplicates a
+/// graph registration by (IOVA, executable content) and hands back the *previous*
+/// session's token — which still references that session's now-freed backing page
+/// — when the same executable is re-registered at the same IOVA. Distinct IOVAs
+/// per session dodge the stale dedup. At ~11 MiB of resident BOs per register-once
+/// forward, this ~2 GiB window holds ~180 sessions before wrapping (far past any
+/// realistic run count against one driver load); a wrap re-poisons only if the
+/// exact same executable lands on a recycled IOVA.
 pub(crate) const IOVA_BASE: u64 = 0x1800_0000;
-pub(crate) const IOVA_END: u64 = 0x2000_0000;
+pub(crate) const IOVA_END: u64 = 0x8000_0000;
 
 /// Map the carveout data region (KCI/VII queues + BO heap) once, so runtime
 /// [`write`]/[`read`] memcpy through a persistent mapping instead of a
@@ -147,8 +156,15 @@ impl BoAllocator {
     /// edgetpu platform device (whose default domain the IOMMU core attached).
     pub(crate) fn alloc(&mut self, size: u64, dev: *mut bindings::device) -> Result<(u32, u64)> {
         let aligned = size.checked_add(0xfff).ok_or(EINVAL)? & !0xfff;
-        if aligned == 0 || self.next_iova + aligned > IOVA_END {
-            return Err(ENOMEM);
+        if aligned == 0 || aligned > IOVA_END - IOVA_BASE {
+            return Err(EINVAL);
+        }
+        // Wrap the monotonic IOVA bump only when this allocation would overrun the window. The bump
+        // is NOT reset per client (see `reset`), so distinct sessions get distinct IOVAs — the TPU
+        // otherwise serves stale content from a just-freed page when an IOVA is reused across an fd
+        // close/reopen (register-once keeps a whole forward's BOs resident, so this bites).
+        if self.next_iova + aligned > IOVA_END {
+            self.next_iova = IOVA_BASE;
         }
         let iova = self.next_iova;
         // Allocate system pages + SysMMU-map them so the firmware can reach the buffer.
@@ -168,7 +184,13 @@ impl BoAllocator {
         self.table.get(handle as usize)
     }
 
-    /// Reclaim the whole heap: unmap + free every BO's system memory, reset the bump.
+    /// Reclaim the whole heap: unmap + free every BO's system memory. The IOVA bump is deliberately
+    /// NOT reset — a fresh client continues from where the last left off (wrapping in [`alloc`] only
+    /// at window-end), so an IOVA is not reused across an fd close/reopen. Reusing one there makes
+    /// the TPU read stale content from the freed page (register-once keeps a forward's BOs resident,
+    /// so the reused-IOVA window is a whole model of buffers), producing wrong output on the 2nd+
+    /// session against one driver load. The 128 MiB window holds ~25 register-once sessions' BOs
+    /// before wrapping, by which point the old sessions are long torn down.
     pub(crate) fn reset(&mut self, dev: *mut bindings::device) {
         for e in self.table.iter() {
             // SAFETY: `dev` is live; cpu_va/iova/size were returned by edgetpu_bo_sysmem_alloc.
@@ -176,7 +198,6 @@ impl BoAllocator {
                 bindings::edgetpu_bo_sysmem_free(dev, e.cpu_va as *mut _, e.iova, e.size as usize)
             };
         }
-        self.next_iova = IOVA_BASE;
         self.table = KVec::new();
     }
 }
