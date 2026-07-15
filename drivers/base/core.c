@@ -1824,7 +1824,14 @@ static int fw_devlink_no_driver(struct device *dev, void *data)
 {
 	struct device_link *link = to_devlink(dev);
 
-	if (!dev_can_match(link->supplier))
+	/*
+	 * An orphaned managed link can end up with a NULL supplier (observed on
+	 * gs201/felix when a cmdline-named panel — e.g. an inner dsim0 panel with
+	 * no driver or DT node — leaves a dangling fwnode link). Dereferencing it
+	 * via dev_can_match() faults at the deferred-probe timeout and wedges the
+	 * boot, so skip such links rather than crash finalizing them.
+	 */
+	if (link->supplier && !dev_can_match(link->supplier))
 		fw_devlink_relax_link(link);
 
 	return 0;
