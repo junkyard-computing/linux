@@ -1559,6 +1559,44 @@
 	pmu_alive: pmu@18060000 {
 		compatible = "google,gs201-pmu";
 		reg = <0x0 0x18060000 0x10000>;
+
+		/*
+		 * reboot-to-bootloader support. Only reboot-mode is wired here;
+		 * the actual reset is left to PSCI, deliberately.
+		 *
+		 * syscon-reboot-mode writes the reboot reason to SYSIP_DAT0
+		 * (0x0810) on the reboot notifier — 0xfc = bootloader. This
+		 * lands through the SMC-routed regmap exynos-pmu.c registers
+		 * for this node (via BL31), the same privileged path AOSP uses
+		 * (set_priv_reg). The felix bootloader reads SYSIP_DAT0 on the
+		 * next boot and enters fastboot when it sees 0xfc. Offset and
+		 * value are gs201-exact (AOSP pixel-gs201-reboot.c).
+		 *
+		 * We do NOT instantiate google,gs101-reboot here (unlike
+		 * gs101.dtsi). On gs201 its PMU SWRESET_SYSTEM write via the SMC
+		 * does not reset the SoC: it falls through after the driver's
+		 * 1s mdelay ("Unable to restart system"), the device then dies
+		 * via a dirty UVLO power-cycle, and that power-cycle clears
+		 * SYSIP_DAT0 back to 0 — so the bootloader reads "Normal Boot"
+		 * (empirically confirmed on .138). Letting PSCI SYSTEM_RESET do
+		 * the reset instead (as AOSP does — its restart handler is a
+		 * no-op) is a clean warm reset that preserves SYSIP_DAT0. The
+		 * syscon-poweroff node is likewise omitted: it drives the same
+		 * PWR_HOLD path and PSCI SYSTEM_OFF handles power-off.
+		 */
+		reboot-mode {
+			compatible = "syscon-reboot-mode";
+			offset = <0x0810>; /* EXYNOS_PMU_SYSIP_DAT0 */
+			mode-bootloader = <0xfc>;
+			mode-charge = <0x0a>;
+			mode-dm-verity-device-corrupted = <0x50>;
+			mode-fastboot = <0xfa>;
+			mode-reboot-ab-update = <0x52>;
+			mode-recovery = <0xff>;
+			mode-rescue = <0xf9>;
+			mode-shutdown-thermal = <0x51>;
+			mode-shutdown-thermal-battery = <0x51>;
+		};
 	};
 
 	/* ------------------------------------------------------------------ */
