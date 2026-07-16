@@ -100,6 +100,37 @@
 };
 
 /*
+ * Power button.
+ *
+ * On felix the power key is the s2mpg12 main-PMIC PWRON output, routed to the
+ * SoC alive EINT gpa10-0 (PMIC_PWRON_OD_L, active-low; AOSP gs201-common.dtsi
+ * names this pin and reads the key via its s2mpg12 PMIC power-key driver
+ * (KEYBOARD_S2MPG12), which mainline doesn't have). The same signal is a plain
+ * alive EINT here, so the in-tree gpio-keys driver (CONFIG_KEYBOARD_GPIO=y)
+ * picks it up directly — no PMIC power-key port needed. It emits KEY_POWER
+ * (116); systemd-logind's default HandlePowerKey=poweroff then cleanly powers
+ * the device off on a press, matching AOSP's power-button-shuts-down behaviour.
+ *
+ * The gpa10 alive bank is referenced directly as the gpio/EINT provider (the
+ * same idiom felix already uses for the TCPC / if-PMIC interrupts on &gpa9);
+ * the mainline gs201 pinctrl has no gs101-style samsung,pins pin-function block,
+ * and the bootloader already leaves this pad in its alive-EINT mode. Volume keys
+ * (gpa10-1 VOL_DN, VOL_UP) are intentionally left out — only power is wanted.
+ */
+/ {
+	gpio_keys {
+		compatible = "gpio-keys";
+
+		button-power {
+			label = "KEY_POWER";
+			linux,code = <116>; /* KEY_POWER */
+			gpios = <&gpa10 0 GPIO_ACTIVE_LOW>;
+			wakeup-source;
+		};
+	};
+};
+
+/*
  * OUTER/cover panel ea8182-f10 on DSIM1. drmdsim1 itself stays disabled
  * (see gs201.dtsi) until the pd_dpu power-on + DSIM D-PHY shim land, so this
  * panel child does not probe yet.
