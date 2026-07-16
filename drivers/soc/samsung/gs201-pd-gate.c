@@ -28,7 +28,7 @@ static const struct { u32 cfg; const char *name; } gs201_unused_pd[] = {
 	{ 0x2380, "mfc"  }, { 0x2400, "csis" }, { 0x2480, "pdp"  },
 	{ 0x2500, "dns"  }, { 0x2580, "g3aa" }, { 0x2600, "ipp"  },
 	{ 0x2680, "itp"  }, { 0x2700, "mcsc" }, { 0x2780, "gdc"  },
-	{ 0x2800, "tnr"  },
+	{ 0x2800, "tnr"  }, { 0x2980, "aur"  }, /* aur = GXP/Aurora, no mainline driver */
 };
 
 static int __init gs201_pd_gate_init(void)
@@ -49,7 +49,7 @@ static int __init gs201_pd_gate_init(void)
 			pr_warn("gs201-pd-gate: %s SMC failed: %ld\n",
 				gs201_unused_pd[i].name, (long)res.a0);
 	}
-	pr_info("gs201-pd-gate: powered off %d/%d never-used imaging/video domains\n",
+	pr_info("gs201-pd-gate: powered off %d/%d never-used SoC domains\n",
 		gated, (int)ARRAY_SIZE(gs201_unused_pd));
 	return 0;
 }
