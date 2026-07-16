@@ -639,9 +639,19 @@
 			#thermal-sensor-cells = <1>;
 		};
 
-		/* ODPM per-rail power meter (debugfs), sub-PMIC rails only. */
+		/*
+		 * ODPM per-rail power meter (debugfs), sub-PMIC rails only.
+		 * Firmware leaves the 12 METER channels unassigned, so pick the
+		 * rails to monitor here. Codes are MUXSEL selectors; this set
+		 * mirrors the AOSP felix s2mpg13 ODPM assignment:
+		 *   vsen_c4, vsen_c5, ldo9s, buck1s, buck2s, buck4s, buck5s,
+		 *   buck8s, buck9s, ldo7s, ldo14s, ldo2s.
+		 */
 		s2mpg13_odpm: powermeter {
 			compatible = "google,s2mpg13-powermeter";
+			google,channel-muxsel = /bits/ 8 <
+				0x5c 0x5d 0x29 0x01 0x02 0x04
+				0x05 0x08 0x09 0x27 0x2e 0x22>;
 		};
 
 		regulators {
