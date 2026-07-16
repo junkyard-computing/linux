@@ -15,3 +15,4 @@ obj-$(CONFIG_EXYNOS_REGULATOR_COUPLER) += exynos-regulator-coupler.o
 obj-$(CONFIG_GS201_S2MPU_STUB)	+= gs201-s2mpu-stub.o
 
 obj-$(CONFIG_SAMSUNG_PM_CHECK)	+= s3c-pm-check.o
+obj-$(CONFIG_EXYNOS_PMU) += gs201-pd-gate.o
