@@ -24,6 +24,7 @@
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/seq_file.h>
 
@@ -97,6 +98,10 @@ enum s2mpg13_muxsel {
 	MUXSEL_LDO26	= 0x3a,
 	MUXSEL_LDO27	= 0x3b,
 	MUXSEL_LDO28	= 0x3c,
+	/* Voltage-sense channels (measure voltage, not power). */
+	MUXSEL_VSEN1	= 0x5c,
+	MUXSEL_VSEN2	= 0x5d,
+	MUXSEL_VSEN3	= 0x5e,
 };
 
 /* Power resolution (mW/LSB, Q30) for a given rail selector. */
@@ -174,6 +179,11 @@ static const char *s2mpg13_muxsel_name(u8 m)
 		return "buckboost";
 	if (m == MUXSEL_VBAT)
 		return "vbat";
+	if (m >= MUXSEL_VSEN1 && m <= MUXSEL_VSEN3) {
+		static const char * const vsen[] = { "vsen1", "vsen2", "vsen3" };
+
+		return vsen[m - MUXSEL_VSEN1];
+	}
 	if (m >= MUXSEL_LDO1 && m <= MUXSEL_LDO28) {
 		static char ldo[8];
 
@@ -225,7 +235,7 @@ static int s2mpg13_powermeter_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct s2mpg13_powermeter *pm;
 	unsigned int val;
-	int i, ret;
+	int i, ret, n;
 
 	pm = devm_kzalloc(dev, sizeof(*pm), GFP_KERNEL);
 	if (!pm)
@@ -251,7 +261,32 @@ static int s2mpg13_powermeter_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	/* Read the per-channel rail selection the firmware left configured. */
+	/*
+	 * Program the per-channel rail selection. Firmware leaves the MUXSEL
+	 * registers cleared on this port, so unless DT assigns rails every
+	 * channel reads "none". "google,channel-muxsel" is a list of up to 12
+	 * MUXSEL codes (see enum s2mpg13_muxsel), one per channel; absent means
+	 * leave whatever firmware set.
+	 */
+	n = device_property_count_u8(dev, "google,channel-muxsel");
+	if (n > 0) {
+		u8 cfg[S2MPG13_METER_CHANNELS];
+
+		n = min(n, S2MPG13_METER_CHANNELS);
+		ret = device_property_read_u8_array(dev, "google,channel-muxsel",
+						    cfg, n);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "bad google,channel-muxsel\n");
+		for (i = 0; i < n; i++) {
+			ret = regmap_write(pm->meter,
+					   S2MPG13_METER_MUXSEL0 + i, cfg[i]);
+			if (ret)
+				return ret;
+		}
+	}
+
+	/* Read back the (now-configured) rail selection for reporting. */
 	for (i = 0; i < S2MPG13_METER_CHANNELS; i++) {
 		ret = regmap_read(pm->meter, S2MPG13_METER_MUXSEL0 + i, &val);
 		if (ret)
