@@ -276,8 +276,15 @@ enum {
  * a scsi_change_queue_depth(sdev, 1) here actually sticks per device.
  * If h15b lets boot survive past 38s, the trigger is back-to-back
  * commands queued at the controller, not the 64KB transfer length.
+ *
+ * RESOLVED (2026-07-16): the back-to-back wedge was a PWM-gear controller
+ * bug. With FORCE_PWM_GEAR=0 the link now runs HS-Rate-B G4 L2, where the
+ * controller handles a full queue cleanly — measured 12 concurrent readers
+ * on one LU at qd=31 → ~1.7 GB/s, 0 errors, vs ~150 MB/s serialized at
+ * qd=1. This clamp is now pure throughput loss; disabled. Re-enable only
+ * alongside GS201_MAINLINE_FORCE_PWM_GEAR (PWM fallback path).
  */
-#define GS201_FORCE_QDEPTH_1		1
+#define GS201_FORCE_QDEPTH_1		0
 
 /*
  * (h15a) Clamp per-LU max_hw_sectors to GS201_MAX_HW_SECTORS_KB at PWM
@@ -289,6 +296,17 @@ enum {
  * disappears, the trigger is the 64KB transfer length itself at PWM. If
  * it persists, the trigger is reading near end-of-device at PWM, regardless
  * of length. Set to 0 to disable; set to 64 (=32KB) or 32 (=16KB) to test.
+ *
+ * RE-EVALUATED (2026-07-16): the queue-depth clamp (GS201_FORCE_QDEPTH_1)
+ * was safe to drop at HS — runtime-proven at qd=31 with 32KB transfers
+ * (12 concurrent readers → ~1.7 GB/s, 0 errors). But dropping THIS clamp
+ * too (unclamped native-max transfers) HARD-WEDGED the controller at
+ * HS-Rate-B G4 under a concurrent large-transfer read stress: bus state
+ * lost, all UFS I/O hung, no recovery without a power-cycle. So the
+ * transfer-size ceiling is load-bearing at HS as well, not PWM-only — the
+ * h6-class "controller loses bus state on large transfers" bug survives
+ * the gear change. Kept at 32KB (proven-safe with deep queue). A larger
+ * safe ceiling could be bisected later; 32KB stays until then.
  */
 #define GS201_MAX_HW_SECTORS_KB		32
 
