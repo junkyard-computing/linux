@@ -1600,6 +1600,174 @@
 	};
 
 	/* ------------------------------------------------------------------ */
+	/* SoC power domains (google,gs201-pd — drivers/pmdomain/samsung)      */
+	/*                                                                    */
+	/* felix's bootloader leaves every SoC domain powered and, with no    */
+	/* genpd provider, mainline never turned any of them off: measured    */
+	/* ~5C hotter at idle than stock (tpu +6, g3d +5, mid/little +5..6).  */
+	/* AOSP powers 18 of 20 domains off at idle via its exynos-pd. The    */
+	/* CPUs were never the problem — stock spends 99.95% of idle in plain */
+	/* WFI just like us — this is static leakage from energised blocks.   */
+	/*                                                                    */
+	/* Registering a domain is enough to reclaim it: genpd's own          */
+	/* late_initcall_sync(genpd_power_off_unused) drops anything with no  */
+	/* in-use device. A block that later grows a driver just adds         */
+	/* power-domains = <&pd_x> and is powered on demand — which is why    */
+	/* this supersedes the boot-time force-gate (gs201-pd-gate.c): that   */
+	/* could only gate blocks nobody wanted, and needed editing whenever  */
+	/* a driver landed.                                                   */
+	/*                                                                    */
+	/* Offsets are PMU CONFIGURATION registers (STATUS = +4), from AOSP   */
+	/* gs201-pm-domains.dtsi.                                             */
+	/*                                                                    */
+	/* DELIBERATELY ABSENT — do not add without wiring a consumer first:  */
+	/*   hsi0 (0x2080) USB and hsi2 (0x2180) UFS are load-bearing: the    */
+	/*     dongle we SSH over, and the rootfs. AOSP keeps hsi0 on and     */
+	/*     leaves hsi2 out of genpd entirely. Registering either with no  */
+	/*     consumer would let genpd power off the link we depend on.      */
+	/*   g3d (0x1E00) + embedded_g3d (0x2000): GPU is in use, so these    */
+	/*     must land together with power-domains on the mali node so      */
+	/*     panthor's runtime PM owns them. Worth ~5C — separate step.     */
+	/*   aoc (0x1880): AOSP marks its node disabled.                      */
+	/*   eh (0x1C00): Emerald Hill compression; AOSP keeps it on.         */
+	/* ------------------------------------------------------------------ */
+	pd_dpu: power-domain-dpu {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2200>;
+		label = "pd-dpu";
+		#power-domain-cells = <0>;
+	};
+
+	pd_disp: power-domain-disp {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2280>;
+		label = "pd-disp";
+		#power-domain-cells = <0>;
+	};
+
+	pd_g2d: power-domain-g2d {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2300>;
+		label = "pd-g2d";
+		#power-domain-cells = <0>;
+	};
+
+	pd_mfc: power-domain-mfc {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2380>;
+		label = "pd-mfc";
+		#power-domain-cells = <0>;
+	};
+
+	pd_csis: power-domain-csis {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2400>;
+		label = "pd-csis";
+		#power-domain-cells = <0>;
+	};
+
+	pd_pdp: power-domain-pdp {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2480>;
+		label = "pd-pdp";
+		#power-domain-cells = <0>;
+	};
+
+	pd_dns: power-domain-dns {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2500>;
+		label = "pd-dns";
+		#power-domain-cells = <0>;
+	};
+
+	pd_g3aa: power-domain-g3aa {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2580>;
+		label = "pd-g3aa";
+		#power-domain-cells = <0>;
+	};
+
+	pd_ipp: power-domain-ipp {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2600>;
+		label = "pd-ipp";
+		#power-domain-cells = <0>;
+	};
+
+	pd_itp: power-domain-itp {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2680>;
+		label = "pd-itp";
+		#power-domain-cells = <0>;
+	};
+
+	pd_mcsc: power-domain-mcsc {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2700>;
+		label = "pd-mcsc";
+		#power-domain-cells = <0>;
+	};
+
+	pd_gdc: power-domain-gdc {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2780>;
+		label = "pd-gdc";
+		#power-domain-cells = <0>;
+	};
+
+	pd_tnr: power-domain-tnr {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2800>;
+		label = "pd-tnr";
+		#power-domain-cells = <0>;
+	};
+
+	pd_bo: power-domain-bo {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2880>;
+		label = "pd-bo";
+		#power-domain-cells = <0>;
+	};
+
+	/*
+	 * The single biggest idle win (~6C: tpu-thermal reads 44C here vs 38C
+	 * on stock, which keeps this domain off). NOTE for the edgetpu work:
+	 * once a TPU driver exists it must add power-domains = <&pd_tpu> to
+	 * its node, or it will find the block unpowered. That is the intended
+	 * contract — the domain then follows the driver's runtime PM instead
+	 * of burning ~6C whenever nobody is using the TPU.
+	 */
+	pd_tpu: power-domain-tpu {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2900>;
+		label = "pd-tpu";
+		#power-domain-cells = <0>;
+	};
+
+	pd_aur: power-domain-aur {
+		compatible = "google,gs201-pd";
+		samsung,pmu-syscon = <&pmu_alive>;
+		samsung,pmu-offset = <0x2980>;
+		label = "pd-aur";
+		#power-domain-cells = <0>;
+	};
+
+	/* ------------------------------------------------------------------ */
 	/* USB 3.1 (HSI0 subsystem) — type-C port on the Pixel Fold           */
 	/*                                                                    */
 	/* Layout mirrors gs101.dtsi (Pixel 6) at 0x1100_0000 — gs201 reuses  */
