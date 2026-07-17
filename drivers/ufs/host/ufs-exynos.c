@@ -283,6 +283,11 @@ enum {
  * on one LU at qd=31 → ~1.7 GB/s, 0 errors, vs ~150 MB/s serialized at
  * qd=1. This clamp is now pure throughput loss; disabled. Re-enable only
  * alongside GS201_MAINLINE_FORCE_PWM_GEAR (PWM fallback path).
+ *
+ * The serialization also masked how fast the link really is: with qd=1 even
+ * a big read was chopped into 32KB commands issued one at a time. With the
+ * queue restored AND the quirk fix below (which removed the need for the
+ * transfer-size clamp), single-stream reads now run at 2.0 GB/s.
  */
 #define GS201_FORCE_QDEPTH_1		0
 
@@ -297,18 +302,40 @@ enum {
  * it persists, the trigger is reading near end-of-device at PWM, regardless
  * of length. Set to 0 to disable; set to 64 (=32KB) or 32 (=16KB) to test.
  *
- * RE-EVALUATED (2026-07-16): the queue-depth clamp (GS201_FORCE_QDEPTH_1)
- * was safe to drop at HS — runtime-proven at qd=31 with 32KB transfers
- * (12 concurrent readers → ~1.7 GB/s, 0 errors). But dropping THIS clamp
- * too (unclamped native-max transfers) HARD-WEDGED the controller at
- * HS-Rate-B G4 under a concurrent large-transfer read stress: bus state
- * lost, all UFS I/O hung, no recovery without a power-cycle. So the
- * transfer-size ceiling is load-bearing at HS as well, not PWM-only — the
- * h6-class "controller loses bus state on large transfers" bug survives
- * the gear change. Kept at 32KB (proven-safe with deep queue). A larger
- * safe ceiling could be bisected later; 32KB stays until then.
+ * RESOLVED (2026-07-16): this clamp is NO LONGER NEEDED — disabled (0).
+ *
+ * The "large transfers wedge the controller" bug was never about transfer
+ * size at all. It was the three quirks gs201 wrongly inherited from gs101
+ * and kept (SKIP_RESET_INTR_AGGR / BROKEN_REQ_LIST_CLR /
+ * BROKEN_OCS_FATAL_ERROR) — see the gs201_ufs_drvs comment. AOSP clears
+ * all of them on felix. With those dropped, unclamped native-max (256KB)
+ * transfers are stable.
+ *
+ * Chain of events with the quirks in place: a large transfer trips a
+ * recoverable controller error; BROKEN_OCS_FATAL_ERROR force-remaps it to
+ * OCS_SUCCESS so the driver never sees it (hence every h6/h9/h15 log
+ * reading "saved_err=0x0 ... No record of pa_err/dl_err/fatal_err"); and
+ * when the command then times out, BROKEN_REQ_LIST_CLR inverts the UTRLCLR
+ * mask so the error handler clears every slot EXCEPT the stuck one — which
+ * both fails to recover and destroys the other in-flight commands. That
+ * cascade is the "controller loses bus state, no recovery without a
+ * power-cycle" wedge chased since (h6). Small/serialized transfers just
+ * tripped the initial error rarely enough to look like a size threshold.
+ *
+ * Measured after the quirk fix (max_hw uncapped at 256KB, qd=31,
+ * HS_RATE_B/HS_GEAR4/L2, OCS unmasked so real errors WOULD surface):
+ *
+ *   single-stream 4GB read  bs=8M   2.0 GB/s   (this exact pattern was fatal)
+ *   16 concurrent readers, 8GB      1724 MB/s
+ *   single-stream 1.6GB write bs=8M 1.1 GB/s
+ *   8 concurrent writers            1398 MB/s
+ *   read-back integrity             verified (sha matches)
+ *   UFS errors                      0
+ *
+ * Re-enable only alongside GS201_MAINLINE_FORCE_PWM_GEAR (PWM fallback),
+ * where the gear's own back-to-back bug is a separate problem.
  */
-#define GS201_MAX_HW_SECTORS_KB		32
+#define GS201_MAX_HW_SECTORS_KB		0
 
 /*
  * (h16) Port AOSP `ufs_cal_post_pmc` semantics for forced-PWM. Mainline
@@ -3532,10 +3559,37 @@ static const struct exynos_ufs_drv_data gs201_ufs_drvs = {
 	 * UIC errors, but RSP UPIU appears empty (it's actually at
 	 * UCD+0x800 instead of UCD+0x200, confirmed via dump).
 	 */
-	.quirks			= UFSHCI_QUIRK_SKIP_RESET_INTR_AGGR |
-				  UFSHCI_QUIRK_BROKEN_REQ_LIST_CLR |
-				  UFSHCD_QUIRK_BROKEN_OCS_FATAL_ERROR |
-				  UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
+	/*
+	 * (2026-07-16) Match AOSP's EFFECTIVE felix quirk set.
+	 *
+	 * AOSP gates a bundle of FOUR quirks behind the DT property
+	 * `fixed-prdt-req_list-ocs` ("this controller has working prdt,
+	 * req_list clear and ocs"), which felix's gs201-ufs.dtsi:82 DOES
+	 * set — so on felix AOSP clears all four. Mainline only ever
+	 * dropped the first (PRDT_BYTE_GRAN, see comment above) and kept
+	 * the other three, inherited from the gs101 drv_data:
+	 *
+	 *  - SKIP_RESET_INTR_AGGR: inert here (UFSHCD_CAP_INTR_AGGR is
+	 *    never set for exynos, so ufshcd_is_intr_aggr_allowed() is
+	 *    false and the reset is already skipped). Dropped for parity.
+	 *  - BROKEN_REQ_LIST_CLR: NOT inert. ufshcd_utrl_clear() pre-
+	 *    inverts the mask when set, so the final writel(~mask) becomes
+	 *    inverted: asking to clear stuck slot N instead clears every
+	 *    OTHER slot and leaves N. Per the UFSHCI spec quoted in that
+	 *    function, 0 = clear, 1 = no change, so the un-quirked path is
+	 *    the spec-correct one. This is why a wedged controller never
+	 *    recovered: the error handler was clearing the wrong slots.
+	 *  - BROKEN_OCS_FATAL_ERROR: NOT inert. It force-remaps a non-zero
+	 *    response/status to OCS_SUCCESS, throwing away the controller's
+	 *    fatal-error report. This is why every wedge in the bring-up log
+	 *    reads "saved_err=0x0 ... No record of pa_err/dl_err/fatal_err":
+	 *    the error was being reported and masked.
+	 *
+	 * Kept (AOSP keeps these; they are NOT in the DT-gated bundle):
+	 * SKIP_MANUAL_WB_FLUSH_CTRL, SKIP_DEF_UNIPRO_TIMEOUT_SETTING and
+	 * BROKEN_AUTO_HIBERN8 (g3, below).
+	 */
+	.quirks			= UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
 				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING |
 				  /*
 				   * (g3) Auto-hibern8 stays disabled. Originally added
