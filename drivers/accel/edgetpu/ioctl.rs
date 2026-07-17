@@ -25,10 +25,17 @@ use crate::vii::{Vii, CMD_ELEM, NUM_VII, RESP_ELEM};
 /// data. A single client (finch) drives the `NUM_VII` VII contexts (mailboxes 1
 /// and 2), each bound to a FIXED VCID (slot 0 -> VCID 0, slot 1 -> VCID 1) so
 /// >158 graph registrations fit across them (register-once-dispatch).
+///
+/// "A single client" is an invariant, not a hope: because this state is device-global, admitting a
+/// second client would mean [`reset_client`](Self::reset_client) wiping a live one's registrations
+/// and heap. `file.rs` enforces it via `client_attached` (`EBUSY` on a second open).
 pub(crate) struct MailboxState {
     pub(crate) kci: Kci,
     pub(crate) vii: [Vii; NUM_VII],
     pub(crate) bo: BoAllocator,
+    /// Whether a client currently holds the device: set by `file.rs` on open (which refuses a
+    /// second attach with `EBUSY`) and cleared when the fd closes.
+    pub(crate) client_attached: bool,
 }
 
 impl MailboxState {
