@@ -131,6 +131,8 @@ impl platform::Driver for EdgeTpuPlatformDriver {
                 // i); every reset reuses it with first_open=true so registrations never accumulate.
                 vii,
                 bo: BoAllocator::new(),
+                // Nobody holds the device until the node is opened; `file.rs` admits exactly one.
+                client_attached: false,
             }),
         });
 
