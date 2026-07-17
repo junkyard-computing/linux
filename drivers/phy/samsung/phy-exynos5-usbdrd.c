@@ -1755,6 +1755,47 @@ static int exynos5_usbdrd_gs101_phy_init(struct phy *phy)
 				"Failed to enable PHY regulator(s)\n");
 			return ret;
 		}
+
+		/*
+		 * Enable the PHY reference clock ("ref", i.e. core_clks) and
+		 * keep it running for as long as the PHY is initialised.
+		 *
+		 * Upstream only ever enables core_clks from
+		 * exynos5_usbdrd_phy_power_on(), but gs101_usbdrd_phy_ops has
+		 * no .power_on/.power_off callback (every other variant --
+		 * exynos5, exynos7870, exynos850, exynosautov920 -- installs
+		 * them). So on gs101/gs201 the reference clock is never
+		 * claimed by anyone, and whether it runs at all is left to
+		 * however the bootloader happened to leave the gate.
+		 *
+		 * On gs201/felix the bootloader leaves it OFF, which kills
+		 * SuperSpeed: the SS PMA's LCPLL has no reference, so the link
+		 * can never detect a far-end receiver and the port oscillates
+		 * RX.Detect <-> SS.Disabled forever (LTSTATE_HIS reads
+		 * 0x00054545, LINKTRN_DONE clear) while an SS-capable device
+		 * silently falls back to the USB2 bus. HS is unaffected and so
+		 * hid this for a long time: its refclk parent
+		 * (mout_hsi0_usb20_ref) is held up by dwc3's own "susp_clk"
+		 * consumer, so USB2 works with the SS reference dead.
+		 *
+		 * Beware the false reassurance: the CAL's PLL-lock poll breaks
+		 * on ANY of its status bits, so it reports "lock" even with no
+		 * reference clock at all -- do not trust it as evidence that
+		 * the PMA is alive.
+		 *
+		 * Enabled here rather than via .power_on because phy_init()
+		 * runs before phy_power_on(), and the PMA bring-up in the
+		 * gs201 phy_init needs the reference already running.
+		 */
+		ret = clk_bulk_prepare_enable(phy_drd->drv_data->n_core_clks,
+					      phy_drd->core_clks);
+		if (ret) {
+			dev_err(phy_drd->dev,
+				"Failed to enable PHY reference clock\n");
+			regulator_bulk_disable(phy_drd->drv_data->n_regulators,
+					       phy_drd->regulators);
+			return ret;
+		}
 	}
 	/*
 	 * ... and ungate power via PMU. Without this here, we get an SError
@@ -1781,6 +1822,10 @@ static int exynos5_usbdrd_gs101_phy_exit(struct phy *phy)
 
 	if (inst->phy_cfg->id != EXYNOS5_DRDPHY_UTMI)
 		return 0;
+
+	/* Balances the core_clks enable in exynos5_usbdrd_gs101_phy_init(). */
+	clk_bulk_disable_unprepare(phy_drd->drv_data->n_core_clks,
+				   phy_drd->core_clks);
 
 	return regulator_bulk_disable(phy_drd->drv_data->n_regulators,
 				      phy_drd->regulators);
@@ -2895,7 +2940,37 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 		.pcs_base		= phy_drd->reg_pcs,
 		.ctrl_base		= phy_drd->reg_phy,
 		.link_base		= NULL,
-		.used_phy_port		= 1,	/* CC2/flipped: route SS lanes for port 1. TODO: derive from live CC orientation (AOSP reads extcon TYPEC_POLARITY); hardcoded for the bench device which sits on CC2. */
+		/*
+		 * Which SS differential pair to mux, i.e. which end of the
+		 * Type-C the SuperSpeed lanes arrive on. Feeds the PMA lane mux
+		 * (phy_exynos_usbdp_g2_v4_pma_lane_mux_sel).
+		 *
+		 * EXPERIMENT (2026-07-17): was hardcoded to 1 (CC2/flipped)
+		 * "for the bench device which sits on CC2". The bench cable now
+		 * enumerates orientation=normal (CC1), so we are very likely
+		 * muxing SS onto the WRONG pair. That fits the symptom exactly:
+		 * the SS PLL locks (pll_lock ret=0, LCPLL@0x110F0700=0xd5) and
+		 * xhci brings up a 10Gbps SS roothub, yet the link never trains
+		 * and an RTL8153 -- a USB3 part -- falls back to 480Mbps on the
+		 * HS bus while usb2 sits idle. Flip to 0 to test that.
+		 *
+		 * Deliberately still a constant. The obvious "derive it from
+		 * phy_drd->orientation" is a NO-OP here and must not be
+		 * mistaken for a fix: this runs from phy_init at ~0.32s, long
+		 * before the TCPC reports orientation, so the field is still
+		 * TYPEC_ORIENTATION_NONE (0) and any ternary lands on the
+		 * flipped branch anyway. phy_init() is refcounted by the PHY
+		 * framework, so the later dwc3 re-inits do NOT re-run this --
+		 * confirmed on device: phy_exynos_usbdp_g2_v4_enable appears
+		 * exactly once in dmesg.
+		 *
+		 * The real fix, once this experiment confirms the mechanism, is
+		 * to re-run the lane mux when the orientation actually arrives
+		 * in exynos5_usbdrd_orien_sw_set() (AOSP reads extcon
+		 * TYPEC_POLARITY and re-inits). Only then does deriving it from
+		 * the live orientation mean anything.
+		 */
+		.used_phy_port		= 0,	/* CC1/normal: matches the bench cable's live orientation */
 		.alt_ref_clk		= false,
 		.hs_rewa		= 0,
 		.dual_phy		= false,
