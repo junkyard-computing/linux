@@ -1802,7 +1802,34 @@
 			phy-names = "usb2-phy", "usb3-phy";
 			snps,has-lpm-erratum;
 			snps,dis_u2_susphy_quirk;
-			snps,dis_u3_susphy_quirk;
+			/*
+			 * NO snps,dis_u3_susphy_quirk on gs201.
+			 *
+			 * The quirk inverts dwc3_enable_susphy(true) into a
+			 * *clear* of GUSB3PIPECTL.SUSPENDENABLE (bit17), so it
+			 * silently vetoes every attempt to set that bit from C --
+			 * including the deferred enable at the tail of our
+			 * DWC31 180A-190A block in dwc3_core_init().
+			 *
+			 * That bit is not just a power knob: PIPE receiver
+			 * detection runs in the P2/P3 power states (hence the
+			 * existence of the DISRXDETINP3 "disable RX detect in P3"
+			 * bit). With SUSPENDENABLE clear, dwc3 never drops the SS
+			 * PHY to P3, receiver detection never runs, and the port
+			 * oscillates RX.Detect <-> SS.Disabled while an
+			 * SS-capable device falls back to the USB2 bus.
+			 *
+			 * A working AOSP felix reads GUSB3PIPECTL = 0x0B021003
+			 * (bit17 set); ours read 0x0B001003. AOSP's DT sets no u3
+			 * susphy quirk and explicitly comments out the u2 one
+			 * (gs201-common.dtsi:95).
+			 *
+			 * dis_u2_susphy_quirk is deliberately KEPT: it guards the
+			 * USB2 side, where suspending the UTMI PHY mid-config
+			 * mis-clocks the HS RX datapath (-71 on control
+			 * transfers). host.c sets GUSB2PHYCFG.SUSPHY explicitly
+			 * once that is safe.
+			 */
 			/*
 			 * gs201's USB2 PHY clock isn't free-running. The
 			 * mainline dwc3 quirk clears GUSB2PHYCFG.U2_FREECLK_EXISTS
