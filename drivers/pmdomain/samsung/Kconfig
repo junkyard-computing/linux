@@ -5,4 +5,17 @@ config EXYNOS_PM_DOMAINS
 	bool "Exynos PM domains" if COMPILE_TEST
 	depends on (ARCH_EXYNOS && PM_GENERIC_DOMAINS) || COMPILE_TEST
 
+config GS201_PM_DOMAINS
+	bool "gs201 (Tensor G2) PM domains" if COMPILE_TEST
+	depends on (ARCH_EXYNOS && PM_GENERIC_DOMAINS) || COMPILE_TEST
+	depends on EXYNOS_PMU
+	help
+	  Generic power domain support for gs201 (Tensor G2). Same PMU
+	  CONFIGURATION/STATUS layout as EXYNOS_PM_DOMAINS, but gs201's PMU is
+	  EL3-only, so accesses are mediated by BL31 via the SMC-routed regmap
+	  that exynos-pmu.c installs, rather than a direct MMIO writel().
+
+	  Without this nothing powers gs201's SoC domains down: the bootloader
+	  leaves them all on, which costs roughly 5C at idle versus stock.
+
 endif
