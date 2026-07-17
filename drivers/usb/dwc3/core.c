@@ -148,7 +148,30 @@ void dwc3_set_prtcap(struct dwc3 *dwc, u32 mode, bool ignore_susphy)
 	  * and they can be set after core initialization.
 	  */
 	hw_mode = DWC3_GHWPARAMS0_MODE(dwc->hwparams.hwparams0);
-	if (hw_mode == DWC3_GHWPARAMS0_MODE_DRD && !ignore_susphy) {
+	/*
+	 * felix/gs201 (DWC31 180A-190A): do NOT clear SUSPHY on the mode
+	 * switch. This controller is DRD, so the generic path below clears
+	 * GUSB3PIPECTL.SUSPENDENABLE here and relies on it being "set after
+	 * core initialization" -- but on our OTG + role-switch path nothing
+	 * ever sets it again, so it stays clear for the life of the boot.
+	 * AOSP keeps it set, and a working AOSP device reads
+	 * GUSB3PIPECTL.SUSPHY = 1 while ours reads 0.
+	 *
+	 * That matters for SuperSpeed, not just power: PIPE receiver
+	 * detection is performed in the P2/P3 power states (hence the
+	 * existence of the DISRXDETINP3 "disable RX detect in P3" bit). With
+	 * SUSPENDENABLE clear, dwc3 never drops the SS PHY to P3, so the
+	 * link never runs receiver detection, never finds the far-end
+	 * termination, and the port oscillates RX.Detect <-> SS.Disabled
+	 * while an SS-capable device quietly falls back to the USB2 bus.
+	 *
+	 * Our SUSPHY is deliberately deferred to the tail of the ported AOSP
+	 * config block in dwc3_core_init() (setting it earlier mis-clocks the
+	 * HS RX datapath -> -71); by the time we get here it is already set
+	 * correctly, so the right thing is to leave it alone.
+	 */
+	if (hw_mode == DWC3_GHWPARAMS0_MODE_DRD && !ignore_susphy &&
+	    !DWC3_VER_IS_WITHIN(DWC31, 180A, 190A)) {
 		if (DWC3_GCTL_PRTCAP(reg) != mode)
 			dwc3_enable_susphy(dwc, false);
 	}
@@ -1645,10 +1668,38 @@ int dwc3_core_init(struct dwc3 *dwc)
 		       DWC3_PM_LC_TIMER_US(0x5) | DWC3_EN_PM_TIMER_US;
 		dwc3_writel(dwc, DWC3_LSKIPFREQ_REG, reg);
 
-		/* GUSB3PIPECTL: clear DISRXDETINP3 and RX_DETOPOLL. */
+		/*
+		 * GUSB3PIPECTL: clear DISRXDETINP3 and RX_DETOPOLL, then apply
+		 * the three felix/gs201 SS quirks AOSP sets in
+		 * dwc3_exynos_phy_setup() / dwc3_exynos_config_soc():
+		 *
+		 *   ux_exit_in_px_quirk    -> UX_EXIT_PX             BIT(27)
+		 *   u1u2_exitfail_quirk    -> U1U2EXITFAIL_TO_RECOV  BIT(25)
+		 *   elastic_buf_mode_quirk -> ELASTIC_BUFFER_MODE    BIT(0)
+		 *
+		 * AOSP declares all three on the &udc node in gs201-common.dtsi.
+		 *
+		 * These are the only control bits still differing between a
+		 * working AOSP boot and ours. A full differential register
+		 * capture of a working .108 vs a broken .138 -- USBCON
+		 * 0x000-0x1FC, the whole PCS, all 1835 defined PMA registers,
+		 * the dwc3 globals, and LLUCTL/LSKIPFREQ -- came back identical
+		 * except for status/monitor registers and exactly these bits.
+		 * So the PHY is programmed correctly and this is what is left.
+		 *
+		 * Note that mainline's dwc3_ss_phy_setup() deliberately clears
+		 * UX_EXIT_PX ("causes issues with some PHYs ... not supposed to
+		 * be used in normal operation"). That is a generic-PHY
+		 * judgement, but this SoC's own vendor driver sets it on this
+		 * silicon. Re-set it here, after that code has run, scoped to
+		 * the felix 180A-190A block so no other platform is affected.
+		 */
 		reg = dwc3_readl(dwc, DWC3_GUSB3PIPECTL(0));
 		reg &= ~DWC3_GUSB3PIPECTL_DISRXDETINP3;
 		reg &= ~DWC3_GUSB3PIPECTL_RX_DETOPOLL;
+		reg |= DWC3_GUSB3PIPECTL_UX_EXIT_PX;
+		reg |= DWC3_GUSB3PIPECTL_U1U2EXITFAIL_TO_RECOV;
+		reg |= DWC3_GUSB3PIPECTL_ELASTIC_BUFFER_MODE;
 		dwc3_writel(dwc, DWC3_GUSB3PIPECTL(0), reg);
 
 		/* GSBUSCFG0: add INCR8 and INCR4 burst-enable bits on top
