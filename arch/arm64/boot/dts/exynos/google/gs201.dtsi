@@ -1631,12 +1631,24 @@
 	/*   aoc (0x1880): AOSP marks its node disabled.                      */
 	/*   eh (0x1C00): Emerald Hill compression; AOSP keeps it on.         */
 	/* ------------------------------------------------------------------ */
+	/*
+	 * BISECT (2026-07-18): dpu/disp DISABLED for the first genpd flash.
+	 * The outer DSI panel + decon/dsim now drive the login console (card0),
+	 * so these domains have a LIVE consumer that does NOT yet hold a
+	 * power-domains phandle. genpd's power_off_unused would depower the
+	 * running display -> the ~40s boot-loop the WIP commit hit with all
+	 * domains registered. Excluding them isolates that by construction and
+	 * still banks the driverless imaging/video + tpu wins. Re-enable (and
+	 * add power-domains = <&pd_disp>/<&pd_dpu> to the display nodes) once
+	 * the display driver's runtime PM can own them.
+	 */
 	pd_dpu: power-domain-dpu {
 		compatible = "google,gs201-pd";
 		samsung,pmu-syscon = <&pmu_alive>;
 		samsung,pmu-offset = <0x2200>;
 		label = "pd-dpu";
 		#power-domain-cells = <0>;
+		status = "disabled";
 	};
 
 	pd_disp: power-domain-disp {
@@ -1645,6 +1657,7 @@
 		samsung,pmu-offset = <0x2280>;
 		label = "pd-disp";
 		#power-domain-cells = <0>;
+		status = "disabled";
 	};
 
 	pd_g2d: power-domain-g2d {
