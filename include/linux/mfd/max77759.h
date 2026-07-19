@@ -97,6 +97,15 @@
 #define MAX77759_CHGR_REG_CHG_CNFG_04                  0xbd
 #define   MAX77759_CHGR_REG_CHG_CNFG_04_CHG_CV_PRM     GENMASK(5, 0)
 #define MAX77759_CHGR_REG_CHG_CNFG_05                  0xbe
+/*
+ * OTG_ILIM[3:0]: reverse-boost (host-mode VBUS) current limit. POR = 0x6
+ * (~1000mA), which browns out a SuperSpeed dongle's hub on bus power, so it
+ * only enumerates when an external PD brick feeds the dock. 0x0b = 1500mA
+ * (AOSP's value, max77759_regs.h OTG_ILIM_1500MA) sources enough for the dock
+ * to come up without PD. Step ~100mA: 0x01=500mA .. 0x0b=1500mA.
+ */
+#define   MAX77759_CHGR_REG_CHG_CNFG_05_OTG_ILIM       GENMASK(3, 0)
+#define   MAX77759_CHGR_REG_CHG_CNFG_05_OTG_ILIM_1500MA 0x0b
 #define MAX77759_CHGR_REG_CHG_CNFG_06                  0xbf
 #define   MAX77759_CHGR_REG_CHG_CNFG_06_CHGPROT        GENMASK(3, 2)
 #define MAX77759_CHGR_REG_CHG_CNFG_07                  0xc0

@@ -453,6 +453,20 @@ static int charger_set_mode(struct max77759_charger *chg,
 static int enable_chgin_otg(struct regulator_dev *rdev)
 {
 	struct max77759_charger *chg = rdev_get_drvdata(rdev);
+	int ret;
+
+	/*
+	 * Raise the reverse-boost (host-mode VBUS) current limit to 1500mA before
+	 * turning the boost on. The ~1000mA POR default browns out a SuperSpeed
+	 * dongle's hub on bus power, so the dock only enumerates when an external
+	 * PD brick powers it. 1500mA (AOSP's value) sources enough for the dock to
+	 * come up PD-free -- which also lets it re-negotiate on every boot.
+	 */
+	ret = regmap_update_bits(chg->regmap, MAX77759_CHGR_REG_CHG_CNFG_05,
+				 MAX77759_CHGR_REG_CHG_CNFG_05_OTG_ILIM,
+				 MAX77759_CHGR_REG_CHG_CNFG_05_OTG_ILIM_1500MA);
+	if (ret)
+		return ret;
 
 	return charger_set_mode(chg, MAX77759_CHGR_MODE_OTG_BOOST_ON);
 }
