@@ -1660,12 +1660,19 @@
 		status = "disabled";
 	};
 
+	/*
+	 * DISABLED (2026-07-19 audit): g2d was NOT in the proven-stable
+	 * gs201-pd-gate.c force-gate set — it has no known consumer but was
+	 * never validated gateable. Excluded pending a clean reboot-reliability
+	 * bisect (see pd_bo). Re-add once proven safe.
+	 */
 	pd_g2d: power-domain-g2d {
 		compatible = "google,gs201-pd";
 		samsung,pmu-syscon = <&pmu_alive>;
 		samsung,pmu-offset = <0x2300>;
 		label = "pd-g2d";
 		#power-domain-cells = <0>;
+		status = "disabled";
 	};
 
 	pd_mfc: power-domain-mfc {
@@ -1748,12 +1755,21 @@
 		#power-domain-cells = <0>;
 	};
 
+	/*
+	 * DISABLED (2026-07-19 audit): the old gs201-pd-gate.c DELIBERATELY
+	 * SKIPPED bo — it needs a CMU (clock) pre-gate before power-off, which
+	 * this genpd provider does not do. Gating it naively (clock still
+	 * running into a de-powering block) is the prime suspect for the
+	 * intermittent genpd boot-unavailability. Re-add only after modelling
+	 * the CMU pre-gate (what AOSP's cal-if does before this domain).
+	 */
 	pd_bo: power-domain-bo {
 		compatible = "google,gs201-pd";
 		samsung,pmu-syscon = <&pmu_alive>;
 		samsung,pmu-offset = <0x2880>;
 		label = "pd-bo";
 		#power-domain-cells = <0>;
+		status = "disabled";
 	};
 
 	/*
