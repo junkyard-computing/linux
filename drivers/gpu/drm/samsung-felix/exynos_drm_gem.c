@@ -104,6 +104,36 @@ static int exynos_drm_gem_object_mmap(struct drm_gem_object *obj,
 	return ret;
 }
 
+/*
+ * The in-kernel fbdev client (drm_fbdev_ttm) reaches the scanout buffer through
+ * drm_client_buffer_vmap_local() -> obj->funcs->vmap. Without this the client
+ * probe fails and no /dev/fb0 is created, which is why the console needed
+ * kmscon (direct KMS) instead of a plain fbcon getty.
+ *
+ * Nothing has to be mapped here: exynos_drm_gem_create() allocates with
+ * dma_alloc_wc(), which already returns a kernel VA that stays valid for the
+ * lifetime of the object. Imported dma-bufs have no ->vaddr and are rejected —
+ * the fbdev client only ever vmaps buffers it created itself via dumb_create.
+ */
+static int exynos_drm_gem_vmap(struct drm_gem_object *obj,
+			       struct iosys_map *map)
+{
+	struct exynos_drm_gem *exynos_gem_obj = to_exynos_gem(obj);
+
+	if (!exynos_gem_obj->vaddr)
+		return -ENOMEM;
+
+	iosys_map_set_vaddr(map, exynos_gem_obj->vaddr);
+
+	return 0;
+}
+
+static void exynos_drm_gem_vunmap(struct drm_gem_object *obj,
+				  struct iosys_map *map)
+{
+	/* dma_alloc_wc() owns the mapping; it is released in free_object(). */
+}
+
 static const struct vm_operations_struct exynos_drm_gem_vm_ops = {
 	.open = drm_gem_vm_open,
 	.close = drm_gem_vm_close,
@@ -112,6 +142,8 @@ static const struct vm_operations_struct exynos_drm_gem_vm_ops = {
 static const struct drm_gem_object_funcs exynos_drm_gem_object_funcs = {
 	.free = exynos_drm_gem_free_object,
 	.mmap = exynos_drm_gem_object_mmap,
+	.vmap = exynos_drm_gem_vmap,
+	.vunmap = exynos_drm_gem_vunmap,
 	.vm_ops = &exynos_drm_gem_vm_ops,
 };
 
