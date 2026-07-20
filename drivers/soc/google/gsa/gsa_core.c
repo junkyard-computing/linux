@@ -115,6 +115,17 @@ static int gsa_tz_send_hwmgr_state_cmd(struct gsa_tz_chan_ctx *ctx, u32 cmd)
 				  &req_msg, sizeof(req_msg),
 				  &rsp_msg, sizeof(rsp_msg));
 
+	/*
+	 * Propagate transport errors rather than flattening them to -EIO.
+	 * tipc_create_channel() returns -ENOENT while the Trusty IPC virtio
+	 * device is still coming up, and a caller probing early needs to tell
+	 * "not ready yet, retry" apart from a real protocol failure so it can
+	 * defer instead of giving up. -EIO below stays reserved for a reply
+	 * that did arrive but was malformed or carried an error.
+	 */
+	if (rc < 0)
+		return rc;
+
 	if (rc != sizeof(rsp_msg)) {
 		return -EIO;
 	}

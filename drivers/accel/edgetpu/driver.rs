@@ -73,6 +73,32 @@ impl platform::Driver for EdgeTpuPlatformDriver {
         pdev: &'bound platform::Device<Core<'_>>,
         _info: Option<&'bound Self::IdInfo>,
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+        // Gate the whole probe on GSA/Trusty IPC being reachable, BEFORE acquiring
+        // any resources. edgetpu's platform device probes ~10-80 ms before the
+        // trusty_ipc virtio transport comes online, so on the very first cold boot
+        // the GSA channel can't open (tipc_create_channel -> -ENOENT) and firmware
+        // bring-up would abort permanently while the accel node still registers
+        // (making the dead TPU look alive). Returning EPROBE_DEFER asks the driver
+        // core to retry once trusty_ipc is up.
+        //
+        // This must be the very first thing so a deferral unwinds cleanly: no reg
+        // regions are requested yet, and — critically — the "tpu" clock is not yet
+        // prepare_enable'd. `Clk`'s Drop only clk_put's; it does NOT
+        // clk_disable_unprepare, so deferring after clk.prepare_enable() would leak
+        // one clock-enable ref per retry. A bare GET_STATE query needs neither the
+        // reg mapping nor the TPU rail — only the GSA Trusty channel.
+        match crate::gsa::Gsa::get(pdev.as_ref())
+            .and_then(|g| g.send_cmd(crate::gsa::GSA_TPU_GET_STATE))
+        {
+            Ok(_) => {}
+            Err(e) if e == ENOENT => {
+                dev_info!(pdev, "edgetpu: GSA/Trusty IPC not ready yet, deferring probe\n");
+                Err::<(), _>(EPROBE_DEFER)?;
+            }
+            // Any other error: proceed and let the real bring-up below report it.
+            Err(_) => {}
+        }
+
         // Map the two reg windows: index 0 = main TPU CSR block (2 MiB),
         // index 1 = SSMT stream-ID table (64 KiB). Used by the boot bring-up
         // and dropped at the end of probe.
