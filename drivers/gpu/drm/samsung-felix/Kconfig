@@ -2,6 +2,15 @@
 config DRM_SAMSUNG_FELIX
 	tristate "Samsung DPU for Pixel Fold felix (gs201) outer panel"
 	depends on DRM && ARCH_EXYNOS
+	select DRM_CLIENT_SELECTION
+	# drm_fbdev_ttm is the only GEM-agnostic in-kernel fbdev client: it builds
+	# its scanout from dumb_create() + a vmalloc'd shadow with deferred I/O and
+	# never touches TTM internals (the name is historical — it was the fallback
+	# for TTM drivers). The felix DPU has a custom GEM, so the two alternatives
+	# don't fit: drm_fbdev_dma container_of-casts to drm_gem_dma_object, and
+	# drm_fbdev_shmem needs GEM SHMEM. Its object file is built into the
+	# drm_ttm_helper module (drivers/gpu/drm/Makefile:135), hence this select.
+	select DRM_TTM_HELPER
 	select DRM_KMS_HELPER
 	select DRM_MIPI_DSI
 	select DRM_DISPLAY_HELPER
