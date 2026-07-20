@@ -13,8 +13,10 @@
  */
 
 #include <linux/component.h>
+#include <linux/moduleparam.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/workqueue.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
@@ -1147,6 +1149,40 @@ static struct component_match *exynos_drm_match_add(struct device *dev)
 	return match ?: ERR_PTR(-ENODEV);
 }
 
+/*
+ * fbcon deferral (felix). Calling drm_client_setup() synchronously from bind
+ * (t~0.29s) runs a full DECON re-init from the bootloader HANDOVER state under
+ * console_lock with IRQs disabled and hard-hangs the device: the DPU/DSIM clocks
+ * are not yet settled that early (the log line right before the hang is
+ * "dsim ... failed to get pll-input"). The userspace (kmscon) modeset at ~10.8s
+ * takes the handover-adopt fast path (dsim skip_init=1) and is a 0.3 ms no-op.
+ *
+ * So defer the in-kernel fbdev client onto a workqueue — timed to land after the
+ * DPU is ready, but early enough to still put most of the boot log on the panel.
+ * The delay is tunable so the safe threshold can be swept WITHOUT rebuilding:
+ *   cmdline:  exynos_drm.fbcon_delay_ms=<ms>
+ *   runtime:  /sys/module/exynos_drm/parameters/fbcon_delay_ms  (affects next bind)
+ *   0 = call synchronously at bind (original, known-to-hang behaviour — A/B ref).
+ */
+static unsigned int fbcon_delay_ms = 6000;
+module_param(fbcon_delay_ms, uint, 0644);
+MODULE_PARM_DESC(fbcon_delay_ms,
+	"Delay in ms before starting the in-kernel fbdev client / fbcon (0 = synchronous at bind).");
+
+static struct drm_device *exynos_fbcon_drm;
+
+static void exynos_fbcon_setup_work(struct work_struct *work)
+{
+	struct drm_device *drm = READ_ONCE(exynos_fbcon_drm);
+
+	if (drm) {
+		drm_info(drm, "starting deferred fbdev client (fbcon_delay_ms=%u)\n",
+			 fbcon_delay_ms);
+		drm_client_setup(drm, NULL);
+	}
+}
+static DECLARE_DELAYED_WORK(exynos_fbcon_work, exynos_fbcon_setup_work);
+
 static int exynos_drm_bind(struct device *dev)
 {
 	struct exynos_drm_private *private;
@@ -1250,13 +1286,18 @@ static int exynos_drm_bind(struct device *dev)
 	device_create_file(dev, &dev_attr_tui_status);
 
 	/*
-	 * Start the in-kernel fbdev client now that the device is registered.
-	 * This is what creates /dev/fb0 and hands the framebuffer to fbcon, so
-	 * a plain getty@tty1 can drive the console instead of kmscon. Must come
-	 * after drm_dev_register(): the client walks the registered connectors
-	 * to pick an initial mode.
+	 * Start the in-kernel fbdev client (creates /dev/fb0 + hands the
+	 * framebuffer to fbcon). Deferred onto a workqueue by default — calling
+	 * it synchronously here hangs felix at ~0.29s (see fbcon_delay_ms above).
+	 * fbcon_delay_ms=0 restores the synchronous call as an A/B reference.
 	 */
-	drm_client_setup(drm, NULL);
+	if (fbcon_delay_ms) {
+		WRITE_ONCE(exynos_fbcon_drm, drm);
+		schedule_delayed_work(&exynos_fbcon_work,
+				      msecs_to_jiffies(fbcon_delay_ms));
+	} else {
+		drm_client_setup(drm, NULL);
+	}
 
 	return 0;
 
@@ -1274,6 +1315,10 @@ static void exynos_drm_unbind(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
 	struct exynos_drm_private *private = drm_to_exynos_dev(drm);
+
+	/* stop any pending deferred fbdev-client setup before teardown */
+	WRITE_ONCE(exynos_fbcon_drm, NULL);
+	cancel_delayed_work_sync(&exynos_fbcon_work);
 
 	/* destroy sysfs node for TUI status */
 	device_remove_file(dev, &dev_attr_tui_status);
