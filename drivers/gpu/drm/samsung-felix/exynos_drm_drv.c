@@ -16,8 +16,10 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_fbdev_ttm.h>
 #include <drm/drm_atomic_uapi.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_ioctl.h>
@@ -1055,6 +1057,13 @@ static struct drm_driver exynos_drm_driver = {
 	.ioctls			   = exynos_ioctls,
 	.num_ioctls		   = ARRAY_SIZE(exynos_ioctls),
 	.fops			   = &exynos_drm_driver_fops,
+	/*
+	 * Generic in-kernel fbdev client. drm_fbdev_ttm is the GEM-agnostic
+	 * one: it builds its scanout via dumb_create() and a vmalloc'd shadow
+	 * with deferred I/O, so it needs no TTM and no GEM-DMA object layout —
+	 * only ->dumb_create (present) and a GEM ->vmap (added alongside this).
+	 */
+	DRM_FBDEV_TTM_DRIVER_OPS,
 	.name			   = DRIVER_NAME,
 	.desc			   = DRIVER_DESC,
 	.major			   = DRIVER_MAJOR,
@@ -1239,6 +1248,15 @@ static int exynos_drm_bind(struct device *dev)
 
 	/* create sysfs node for TUI status */
 	device_create_file(dev, &dev_attr_tui_status);
+
+	/*
+	 * Start the in-kernel fbdev client now that the device is registered.
+	 * This is what creates /dev/fb0 and hands the framebuffer to fbcon, so
+	 * a plain getty@tty1 can drive the console instead of kmscon. Must come
+	 * after drm_dev_register(): the client walks the registered connectors
+	 * to pick an initial mode.
+	 */
+	drm_client_setup(drm, NULL);
 
 	return 0;
 
