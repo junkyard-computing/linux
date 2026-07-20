@@ -138,6 +138,10 @@ pub(crate) fn firmware_bringup(
         }
         Ok(_) => {}
         Err(e) => {
+            // The Trusty-IPC-not-ready race (-ENOENT) is caught up-front in
+            // probe() with EPROBE_DEFER, before any resources are acquired, so
+            // by here an error is a genuine bring-up failure — report the real
+            // errno (gsa_core no longer flattens everything to -EIO).
             dev_err!(dev, "edgetpu: GSA GET_STATE failed: {:?}\n", e);
             return Err(e);
         }
