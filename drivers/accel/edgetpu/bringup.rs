@@ -137,6 +137,16 @@ pub(crate) fn firmware_bringup(
             let _ = gsa.unload();
         }
         Ok(_) => {}
+        // ENOENT means the Trusty IPC virtio device has not come online yet,
+        // so GSA could not even open its tipc channel. On felix this is a real
+        // race and not a hardware fault: edgetpu probes at ~7.80s while
+        // trusty_ipc reports "is online" at ~7.885s, i.e. it loses by ~80ms on
+        // every cold boot, and the TPU silently never came up. Ask the driver
+        // core to retry us later instead of failing bring-up permanently.
+        Err(e) if e == ENOENT => {
+            dev_info!(dev, "edgetpu: GSA/Trusty IPC not ready yet, deferring probe\n");
+            return Err(EPROBE_DEFER);
+        }
         Err(e) => {
             dev_err!(dev, "edgetpu: GSA GET_STATE failed: {:?}\n", e);
             return Err(e);
