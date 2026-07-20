@@ -367,10 +367,22 @@ static atomic_t edgetpu_bus_users = ATOMIC_INIT(0);
 /* Add an inactive (MIN_FREQUENCY 0) qos request on a bus's exynos-bus devfreq. */
 static int edgetpu_bus_add(const char *name, struct dev_pm_qos_request *req)
 {
-	struct device_node *np = of_find_node_by_name(NULL, name);
+	struct device_node *np;
 	struct devfreq *df;
 	int ret;
 
+	/*
+	 * These requests are file-static but probe can run more than once: on an
+	 * EPROBE_DEFER retry, or on a module reload while edgetpu_gsa itself
+	 * stays resident. Re-adding an already-active request trips the WARN in
+	 * __dev_pm_qos_add_request() ("called for already added request") and
+	 * corrupts the qos list, so treat that as success and keep the existing
+	 * request.
+	 */
+	if (dev_pm_qos_request_active(req))
+		return 0;
+
+	np = of_find_node_by_name(NULL, name);
 	if (!np)
 		return -ENODEV;
 	df = devfreq_get_devfreq_by_node(np);
