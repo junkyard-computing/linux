@@ -619,25 +619,35 @@
 };
 
 /*
- * Turn off the inner (main fold) OLED at boot.
+ * INNER/main fold panel ana6707-f10 on DSIM0 (1840x2208 @30/60/120).
  *
- * felix's inner panel (samsung ana6707-f10, wired to the DSIM0 path that
- * mainline does not bring up) is lit by the bootloader and never turned off:
- * with no inner display driver it sits at full-brightness white showing the
- * boot logo, drawing multiple watts and adding ~5-6 C to skin temperature
- * (measured: idle skin zones dropped 53-55 C -> 48-49 C once blanked). Its
- * power rails are s2mpg13 sub-PMIC LDOs we have no driver for, so we cannot
- * cut them; instead hold its reset line (gpa7-1) asserted, which blanks the
- * OLED (emission off) at negligible standby cost. Empirically confirmed on
- * felix: driving gpa7-1 low turns the inner panel dark. The outer/cover panel
- * (ea8182-f10, reset on gpp23) is on separate rails/GPIO and is unaffected.
+ * Historically this panel had no driver and no DT node: the bootloader lit it
+ * at full-brightness white and nothing ever turned it off (~5-6 C of skin
+ * heat), so we blanked it by holding its reset line (gpa7-1) asserted with a
+ * gpio-hog. That hog is now RETIRED — the panel driver owns the reset line via
+ * reset-gpios below, and a hog would make devm_gpiod_get(dev, "reset") fail
+ * with -EBUSY and block probe.
+ *
+ * Node shape mirrors the outer ea8182 panel above: NO `reg` property and no
+ * unit-address, because the samsung dsim attaches the panel by matching
+ * `label` against the panel_name module param — the bootloader supplies
+ * exynos_drm.panel_name=dsim0:samsung-ana6707-f10 on every boot.
+ *
+ * NOTE the supplies: unlike the outer panel (which points at
+ * reg_disp_placeholder), these are wired to the REAL s2mpg13 rails. That is
+ * deliberate and is the structural fix for the boot stall — with a real
+ * consumer, regulator_init_complete()'s unused-regulator reap can never
+ * disable ldo4s/ldo28s ~30 s into boot. ldo4s = vddi, ldo28s = vci.
  */
-&gpa7 {
-	inner-panel-off-hog {
-		gpio-hog;
-		gpios = <1 GPIO_ACTIVE_HIGH>;
-		output-low;
-		line-name = "inner-panel-reset";
+&drmdsim0 {
+	panel {
+		compatible = "samsung,ana6707-f10";
+		label = "ana6707-f10";
+		channel = <0>;
+		reset-gpios = <&gpa7 1 GPIO_ACTIVE_HIGH>;
+		vddi-supply = <&ldo4s>;
+		vci-supply = <&ldo28s>;
+		vddd-supply = <&reg_disp_placeholder>;
 	};
 };
 

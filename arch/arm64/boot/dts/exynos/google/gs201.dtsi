@@ -496,6 +496,23 @@
 				hs-clk = <730>;
 				esc-clk = <20>;
 			};
+			/*
+			 * INNER panel (ana6707-f10). Required: dsim_mode_valid()
+			 * rejects any mode with no matching entry here, so without
+			 * this the 1840x2208 @30/60/120 modes are all pruned and no
+			 * modeset on DSIM0 is possible. Values are the AOSP felix
+			 * ones (gs101-display-timing.dtsi 1840x2208); the driver
+			 * prefix-matches the name so one entry covers all three
+			 * refresh rates.
+			 */
+			mode_1840x2208 {
+				mode-name = "1840x2208";
+				pmsk = <
+					0x2 0xD0 0x2 0x5555 /* p m s k */
+					>;
+				hs-clk = <1280>;
+				esc-clk = <20>;
+			};
 		};
 	};
 
@@ -572,6 +589,61 @@
 		dpp,id = <5>;
 	};
 
+	/*
+	 * DECON0 — the INNER/main fold display pipe (ana6707-f10, 1840x2208).
+	 * Ported from AOSP gs201-drm-dpu.dtsi with the same simplifications the
+	 * DECON1 node below already makes: no `iommus`/`samsung,iommu-group`
+	 * (GEM uses CMA on this port) and no `power-domains = <&pd_dpu>` (pd_dpu
+	 * is left as the bootloader set it — see the genpd notes). WIN and SUB
+	 * are shared blocks, so their windows are deliberately identical to
+	 * DECON1's; MAIN/WINCON/DQE/CGC_DMA are DECON0's own.
+	 */
+	drmdecon0: drmdecon@1c240000 {
+		status = "okay";
+		compatible = "samsung,exynos-decon";
+		reg = <0x0 0x1c240000 0x6000>,	/* MAIN */
+		      <0x0 0x1c250000 0x6000>,	/* WIN (shared) */
+		      <0x0 0x1c260000 0x10000>,	/* SUB (shared) */
+		      <0x0 0x1c270000 0x6000>,	/* WINCON */
+		      <0x0 0x1c2a0000 0xf000>,	/* DQE0 */
+		      <0x0 0x1c0be000 0x1000>;	/* CGC_DMA */
+		reg-names = "main", "win", "sub", "wincon", "dqe", "cgc-dma";
+		decon,id = <0>;
+		cgc-dma,id = <9>;
+		interrupts = <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>,		/* frame_start */
+			     <GIC_SPI 240 IRQ_TYPE_LEVEL_HIGH>,		/* frame_done */
+			     <GIC_SPI 239 IRQ_TYPE_LEVEL_HIGH>,		/* extra */
+			     <GIC_SPI 238 IRQ_TYPE_LEVEL_HIGH>,		/* dimming_start */
+			     <GIC_SPI 237 IRQ_TYPE_LEVEL_HIGH>,		/* dimming_end */
+			     <GIC_SPI 260 IRQ_TYPE_LEVEL_HIGH>;		/* cgc-dma */
+		interrupt-names = "frame_start", "frame_done", "extra",
+				  "dimming_start", "dimming_end", "cgc-dma";
+		max_win = <6>;
+		ppc = <2>;
+		ppc_rotator = <4>;
+		ppc_scaler = <2>;
+		delay_comp = <4>;
+		delay_scaler = <3>;
+		bus_width = <16>;
+		bus_util = <65>;
+		rot_util = <60>;
+		dfs_lv_cnt = <7>;
+		dfs_lv = <664000 533000 465000 400000 310000 267000 134000>;
+		rd_en = <1>;
+		rd_hi_thres = <0x800>;
+		rd_lo_thres = <0x400>;
+		rd_wait_cycle = <0x11>;
+		dta_en = <1>;
+		dta_hi_thres = <0x3200>;
+		dta_lo_thres = <0x600>;
+		/* AOSP assigns the identical DPP list to every DECON; the driver
+		 * allocates them dynamically, so this is not an ownership conflict
+		 * with DECON1 below. */
+		dpps = <&drmdpp0 &drmdpp1 &drmdpp2 &drmdpp3 &drmdpp4 &drmdpp5>;
+		/* DSI0(0x1), DSI1(0x2), VIDI(0x8) */
+		connector = <0x1 0x2 0x8>;
+	};
+
 	drmdecon1: drmdecon@1c241000 {
 		status = "okay";
 		compatible = "samsung,exynos-decon";
@@ -613,6 +685,38 @@
 		dpps = <&drmdpp0 &drmdpp1 &drmdpp2 &drmdpp3 &drmdpp4 &drmdpp5>;
 		/* DSI0(0x1), DSI1(0x2), VIDI(0x8) */
 		connector = <0x1 0x2 0x8>;
+	};
+
+	/*
+	 * DSIM0 — inner/main fold panel link (ana6707-f10). Ported from AOSP
+	 * gs201-drm-dpu.dtsi. Note the D-PHY: AOSP declares exactly ONE m4m4 phy
+	 * node and BOTH dsim0 and dsim1 reference it — the two links share the
+	 * M4M4 block and differ only in their PHY register window (0x1c2e0100
+	 * here vs 0x1c2e0900 for DSIM1). So pointing at mipi_phy_dsim1 below is
+	 * correct, not a copy/paste error; that node is the shared phy and its
+	 * label is simply a legacy of the outer-panel-first bring-up.
+	 */
+	drmdsim0: drmdsim@1c2c0000 {
+		status = "okay";
+		compatible = "samsung,exynos-dsim";
+		reg = <0x0 0x1c2c0000 0x300>,	/* DSI */
+		      <0x0 0x1c2e0100 0x700>,	/* M4M4S0 PHY */
+		      <0x0 0x1c2e0000 0x100>;	/* M4M4S0 PHY BIAS (shared) */
+		reg-names = "dsi", "dphy", "dphy-extra";
+		dsim,id = <0>;
+		interrupts = <GIC_SPI 250 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "dsim";
+		phys = <&mipi_phy_dsim1 0>;
+		phy-names = "dsim_dphy";
+		dsim_mode = <&dsim_modes>;
+		te_from = <0>;
+		/* inner-panel TE (EINT) on gpp0-3 (AOSP gs201-drm-dpu.dtsi) */
+		te-gpios = <&gpp0 3 0>;
+		pinctrl-names = "hw_te_on", "hw_te_off";
+		pinctrl-0 = <&disp_te_pri_on>;
+		pinctrl-1 = <&disp_te_pri_off>;
+		#address-cells = <1>;
+		#size-cells = <0>;
 	};
 
 	drmdsim1: drmdsim@1c2d0000 {
@@ -1297,6 +1401,17 @@
 
 		disp_te_sec_off: disp-te-sec-off {
 			samsung,pins = "gpp0-4";
+			samsung,pin-function = <0>;
+		};
+
+		/* Same arrangement for the INNER (primary) panel's TE on gpp0-3. */
+		disp_te_pri_on: disp-te-pri-on {
+			samsung,pins = "gpp0-3";
+			samsung,pin-function = <0xf>;
+		};
+
+		disp_te_pri_off: disp-te-pri-off {
+			samsung,pins = "gpp0-3";
 			samsung,pin-function = <0>;
 		};
 	};
