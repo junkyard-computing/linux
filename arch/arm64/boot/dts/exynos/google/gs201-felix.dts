@@ -653,6 +653,17 @@
 		 */
 		label = "samsung-ana6707-f10";
 		channel = <0>;
+		/*
+		 * Nothing binds a DRM client to this connector today, so without
+		 * this the panel stays adopted from the bootloader at
+		 * full-brightness white for the whole boot. Blank it (reset
+		 * asserted, rails untouched) if no modeset claims it - the
+		 * driver-owned replacement for the old gpa7-1 gpio-hog. Remove
+		 * this property once something actually renders to the inner
+		 * display. Deliberately NOT set on the outer panel, which is the
+		 * console and can sit in handoff while displaying.
+		 */
+		google,blank-if-unclaimed;
 		reset-gpios = <&gpa7 1 GPIO_ACTIVE_HIGH>;
 		vddi-supply = <&ldo4s>;
 		vci-supply = <&ldo28s>;

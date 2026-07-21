@@ -831,14 +831,20 @@ static void exynos_panel_handoff_work(struct work_struct *work)
 	}
 
 	dev_info(ctx->dev,
-		 "no modeset claimed the panel %ums after handoff; powering it off\n",
+		 "no modeset claimed the panel %ums after handoff; blanking it\n",
 		 EXYNOS_PANEL_HANDOFF_TIMEOUT_MS);
 
-	/* Same sequence as the not-enabled-at-boot path: assert reset, drop rails. */
+	/*
+	 * Assert reset ONLY - deliberately do NOT call
+	 * exynos_panel_set_power(ctx, false). This is exactly what the gpio-hog
+	 * this replaces used to do, and it is known to blank the OLED (emission
+	 * off) at negligible standby cost. Dropping the rails would take down
+	 * VDDI/VCI (s2mpg13 ldo4s/ldo28s), which this board's DTS documents as
+	 * perturbing DRM/dsim ordering into a ~100 s deferred-probe stall - not
+	 * something to do behind a timer.
+	 */
 	gpiod_direction_output(ctx->reset_gpio, 0);
-	exynos_panel_set_power(ctx, false);
 	ctx->enabled = false;
-	ctx->panel_state = PANEL_STATE_OFF;
 	mutex_unlock(&ctx->mode_lock);
 }
 
@@ -855,9 +861,17 @@ static void exynos_panel_handoff(struct exynos_panel *ctx)
 		exynos_panel_set_power(ctx, true);
 		/* We don't do panel reset while booting, so call post power here */
 		exynos_panel_post_power_on(ctx);
-		/* ...but don't stay adopted forever if nothing claims it. */
-		schedule_delayed_work(&ctx->handoff_work,
-			msecs_to_jiffies(EXYNOS_PANEL_HANDOFF_TIMEOUT_MS));
+		/*
+		 * ...but don't stay adopted forever if nothing claims it. Opt-in
+		 * per panel: PANEL_STATE_HANDOFF alone is NOT a reliable "nobody
+		 * wants this" signal - a panel can be actively displaying while
+		 * still in handoff, because a seamless takeover never re-inits it.
+		 * So only arm this where the board knows the panel has no client.
+		 */
+		if (of_property_read_bool(ctx->dev->of_node,
+					  "google,blank-if-unclaimed"))
+			schedule_delayed_work(&ctx->handoff_work,
+				msecs_to_jiffies(EXYNOS_PANEL_HANDOFF_TIMEOUT_MS));
 	} else {
 		ctx->panel_state = PANEL_STATE_UNINITIALIZED;
 		gpiod_direction_output(ctx->reset_gpio, 0);
