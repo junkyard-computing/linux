@@ -642,7 +642,16 @@
 &drmdsim0 {
 	panel {
 		compatible = "samsung,ana6707-f10";
-		label = "ana6707-f10";
+		/*
+		 * label MUST match the bootloader's cmdline value with its
+		 * "dsim0:" prefix stripped — i.e. "samsung-ana6707-f10", NOT
+		 * "ana6707-f10". dsim_add_mipi_dsi_device() compares the full
+		 * stripped string against this label with strncmp(.., cmp_len),
+		 * so a shorter label simply never matches and the DSI device is
+		 * never registered. (The outer panel matches because its cmdline
+		 * name "ea8182-f10" happens to equal its label.)
+		 */
+		label = "samsung-ana6707-f10";
 		channel = <0>;
 		reset-gpios = <&gpa7 1 GPIO_ACTIVE_HIGH>;
 		vddi-supply = <&ldo4s>;
