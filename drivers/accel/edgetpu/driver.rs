@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use kernel::{
+    bindings,
     clk::{Clk, Hertz},
     device::Core,
     dma::{
@@ -119,15 +120,28 @@ impl platform::Driver for EdgeTpuPlatformDriver {
         // non-zero rate is what actually powers the block on this port — there is
         // no genpd yet (same as the mainline GPU). Kept alive in the driver data.
         //
-        // Run at NOM (1066 MHz) — the janeiro TPU's DVFS ceiling (TPU_POLICY_MAX,
-        // config-pwr-state.h: UUD 226 / SUD 627 / UD 845 / NOM 1066 MHz). The AOSP
-        // driver ramps to NOM under inference; we have no DVFS governor, so pin the
-        // top state directly. At the previous fixed 627 MHz (SUD) the firmware ran
-        // every mailbox op ~1.7× slower — the entire measured per-submit gap vs the
-        // AOSP chardev was this clock, not driver overhead (which profiles at ~1 µs).
+        // Bring the TPU up at UUD (226 MHz) — the janeiro DVFS *floor*, not the
+        // ceiling (config-pwr-state.h: UUD 226 / SUD 627 / UD 845 / NOM 1066 MHz).
+        // Pinning NOM (1066) here the instant the firmware starts is a sharp
+        // current step that trips the IF-PMIC (max77759) UVLO at ~12.2 s of boot,
+        // *while GPU + display are also ramping* — a reboot loop
+        // (0xcfcd UVLO). Coming up at the floor removes that boot-time current
+        // step; the rate is raised on demand for inference via the runtime knob
+        // (`/sys/kernel/debug/edgetpu/tpu_clk_hz`, edgetpu_dvfs_debugfs_init).
+        // The firmware runs correctly at any DVFS state, just slower per mailbox
+        // op at a lower clock (SUD/627 was ~1.7× slower than NOM; the whole
+        // per-submit gap vs the AOSP chardev was this clock, not driver overhead).
         let clk = Clk::get(pdev.as_ref(), Some(c"tpu"))?;
-        clk.set_rate(Hertz::from_mhz(1066))?;
+        clk.set_rate(Hertz::from_mhz(226))?; // UUD — the DVFS floor (see above)
         clk.prepare_enable()?;
+        // Expose a debugfs knob to set the TPU DVFS rate at runtime (Hz). Because
+        // the *boot* clock above is the safe floor, ramping to a higher state via
+        // this knob is self-recovering: if a rate trips UVLO the device just
+        // resets and boots again at the floor. Best-effort (diagnostic only).
+        // SAFETY: FFI to the companion module; `as_raw()` is a valid device ptr.
+        unsafe {
+            bindings::edgetpu_dvfs_debugfs_init(pdev.as_ref().as_raw());
+        }
 
         // Map the persistent CSR window + carveout data region used by the runtime VII mailbox path
         // (so per-submit queue access memcpy's through a held mapping, not a memremap per call).
