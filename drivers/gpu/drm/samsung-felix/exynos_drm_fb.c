@@ -17,6 +17,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_damage_helper.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fourcc.h>
@@ -49,6 +50,18 @@ extern const struct dpp_restriction dpp_drv_data;
 static const struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
 	.destroy	= drm_gem_fb_destroy,
 	.create_handle	= drm_gem_fb_create_handle,
+	/*
+	 * Turn framebuffer damage into an atomic commit. The felix panel is
+	 * DSI command-mode: the DECON only transfers a frame when a commit
+	 * triggers it, so a consumer that just writes into the scanout buffer
+	 * (fbcon/fbdev, which assumes continuous scanout) never reaches the
+	 * panel — frame_done_count stays put and the panel holds its last
+	 * frame. drm_atomic_helper_dirtyfb issues a damage-only atomic commit,
+	 * which the exynos commit tail turns into a DECON frame transfer.
+	 * Without this, fbcon comes up (fb0 + console switch) but the outer
+	 * panel stays black.
+	 */
+	.dirty		= drm_atomic_helper_dirtyfb,
 };
 
 static struct drm_framebuffer *
