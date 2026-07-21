@@ -55,6 +55,14 @@ impl MailboxState {
         }
         self.bo.reset(dev_raw);
     }
+
+    /// Full firmware power-cycle: GSA-restart the R52 in place and re-drive the
+    /// KCI + VII handshake ([`crate::bringup::firmware_restart`]). This is the
+    /// step-1 restart — the rail/clock stay up; it proves the firmware boots
+    /// cleanly a second time, the prerequisite for gating the TPU rail at idle.
+    pub(crate) fn power_cycle(&mut self, dev: &Device) -> Result {
+        crate::bringup::firmware_restart(dev, &mut self.kci, &mut self.vii)
+    }
 }
 
 /// Largest single BO we allow — a sanity bound on one allocation, well under the
@@ -170,12 +178,20 @@ impl EdgeTpuFileData {
     /// [`MailboxState::reset_client`].
     pub(crate) fn reset(
         ddev: &EdgeTpuDevice,
-        _args: &mut uapi::drm_edgetpu_reset,
+        args: &mut uapi::drm_edgetpu_reset,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
         let pdev = ddev.pdev.as_ref();
         let raw = pdev.as_raw();
-        ddev.mbox.lock().reset_client(pdev, raw);
+        // `flags` bit 0 (experimental, repurposes the reserved field): do a full
+        // firmware power-cycle instead of the soft VII-context reset — used to
+        // validate the runtime restart path from userspace during TPU idle-PM
+        // bring-up. bit 0 == 0 keeps the original soft-reset behaviour.
+        if args.flags & 1 != 0 {
+            ddev.mbox.lock().power_cycle(pdev)?;
+        } else {
+            ddev.mbox.lock().reset_client(pdev, raw);
+        }
         Ok(0)
     }
 }

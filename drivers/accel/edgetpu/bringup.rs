@@ -184,3 +184,65 @@ pub(crate) fn firmware_bringup(
 
     Ok(())
 }
+
+/// Restart the secure firmware *in place* — GSA-unload any running image, then
+/// reload + re-start it and re-drive the KCI + VII handshake. Unlike
+/// [`firmware_bringup`] this touches **no** probe-scoped `IoMem`: the rail/clock
+/// stay up (the caller keeps the ACPM "tpu" clock enabled), the PSMs stay in the
+/// LPM-up state from probe, and the SSMT stream table is retained — so only the
+/// R52 firmware + mailbox state is rebuilt, and every register access goes
+/// through the persistent C csr mapping (kci/vii). Callable long after probe.
+///
+/// This is the runtime power-cycle primitive (driven today by `EDGETPU_RESET`
+/// with `flags & 1`): it proves the firmware boots cleanly a second time, the
+/// prerequisite for gating the TPU rail at idle to reclaim its leakage share.
+pub(crate) fn firmware_restart(
+    dev: &Device,
+    kci: &mut Kci,
+    vii: &mut [Vii; NUM_VII],
+) -> Result {
+    let gsa = Gsa::get(dev)?;
+
+    // Stop any running image first (mirrors the stale-image path in bring-up).
+    match gsa.send_cmd(GSA_TPU_GET_STATE) {
+        Ok(state) if state > GSA_TPU_STATE_INACTIVE => {
+            let _ = gsa.unload();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            dev_err!(dev, "edgetpu: restart GET_STATE failed: {:?}\n", e);
+            return Err(e);
+        }
+    }
+
+    // Reload the signed image body into the carveout, then GSA-authenticate it.
+    let fw = Firmware::request(FW_NAME, dev)?;
+    let data = fw.data();
+    if data.len() < FW_HEADER_SIZE {
+        dev_err!(dev, "edgetpu: restart fw too small ({} bytes)\n", data.len());
+        return Err(EINVAL);
+    }
+    let body = &data[FW_HEADER_SIZE..];
+    gsa::copy_body(FW_CARVEOUT_PHYS, FW_CARVEOUT_SIZE, body)?;
+    gsa.load_fw(&data[..FW_HEADER_SIZE], FW_CARVEOUT_PHYS)?;
+
+    // Re-program the KCI mailbox queue CSRs — the firmware latches them at boot.
+    kci.setup()?;
+
+    let state = gsa.send_cmd(GSA_TPU_START)?;
+    if state != GSA_TPU_STATE_RUNNING {
+        dev_err!(dev, "edgetpu: restart START -> {} (not RUNNING)\n", state);
+        return Err(EIO);
+    }
+    dev_info!(dev, "edgetpu: *** TPU firmware RE-RUNNING (GSA state {}) ***\n", state);
+
+    // Prove the restarted firmware is interactively processing the mailbox.
+    fsleep(Delta::from_millis(50));
+    let flavor = kci.fw_info(dev)?;
+    dev_info!(dev, "edgetpu: restart KCI FW_INFO ok — fw_flavor={}\n", flavor);
+
+    for (i, v) in vii.iter_mut().enumerate() {
+        v.activate(dev, kci, i as u16)?;
+    }
+    Ok(())
+}
