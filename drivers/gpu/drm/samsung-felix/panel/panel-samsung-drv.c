@@ -803,10 +803,51 @@ static void exynos_panel_pre_power_off(struct exynos_panel *ctx)
 		dev_dbg(ctx->dev, "set pre power off\n");
 }
 
+/*
+ * Time to wait for a modeset to claim a panel we adopted from the bootloader
+ * before concluding nobody wants it. Generous on purpose: userspace (kmscon /
+ * a DRM client) only comes up several seconds into boot, and claiming late is
+ * harmless while powering down early would cause a visible flash.
+ */
+#define EXYNOS_PANEL_HANDOFF_TIMEOUT_MS 20000
+
+/*
+ * Resolve an unclaimed handoff. PANEL_STATE_HANDOFF is documented as
+ * transient - it becomes PANEL_STATE_ON once something initializes the panel.
+ * On felix's inner display nothing ever does (its connector has no DRM
+ * client), so without this the panel stays lit at full-brightness white for
+ * the life of the boot. If the state has moved on by the time this fires,
+ * somebody claimed the panel and we leave it strictly alone.
+ */
+static void exynos_panel_handoff_work(struct work_struct *work)
+{
+	struct exynos_panel *ctx = container_of(to_delayed_work(work),
+						struct exynos_panel, handoff_work);
+
+	mutex_lock(&ctx->mode_lock);
+	if (ctx->panel_state != PANEL_STATE_HANDOFF) {
+		mutex_unlock(&ctx->mode_lock);
+		return;
+	}
+
+	dev_info(ctx->dev,
+		 "no modeset claimed the panel %ums after handoff; powering it off\n",
+		 EXYNOS_PANEL_HANDOFF_TIMEOUT_MS);
+
+	/* Same sequence as the not-enabled-at-boot path: assert reset, drop rails. */
+	gpiod_direction_output(ctx->reset_gpio, 0);
+	exynos_panel_set_power(ctx, false);
+	ctx->enabled = false;
+	ctx->panel_state = PANEL_STATE_OFF;
+	mutex_unlock(&ctx->mode_lock);
+}
+
 static void exynos_panel_handoff(struct exynos_panel *ctx)
 {
 	ctx->enabled = gpiod_get_raw_value(ctx->reset_gpio) > 0;
 	_exynos_panel_set_vddd_voltage(ctx, false);
+	/* Initialised unconditionally so remove() can always cancel it safely. */
+	INIT_DELAYED_WORK(&ctx->handoff_work, exynos_panel_handoff_work);
 	if (ctx->enabled) {
 		dev_info(ctx->dev, "panel enabled at boot\n");
 		ctx->panel_state = PANEL_STATE_HANDOFF;
@@ -814,6 +855,9 @@ static void exynos_panel_handoff(struct exynos_panel *ctx)
 		exynos_panel_set_power(ctx, true);
 		/* We don't do panel reset while booting, so call post power here */
 		exynos_panel_post_power_on(ctx);
+		/* ...but don't stay adopted forever if nothing claims it. */
+		schedule_delayed_work(&ctx->handoff_work,
+			msecs_to_jiffies(EXYNOS_PANEL_HANDOFF_TIMEOUT_MS));
 	} else {
 		ctx->panel_state = PANEL_STATE_UNINITIALIZED;
 		gpiod_direction_output(ctx->reset_gpio, 0);
@@ -5913,6 +5957,9 @@ EXPORT_SYMBOL_GPL(exynos_panel_probe);
 void exynos_panel_remove(struct mipi_dsi_device *dsi)
 {
 	struct exynos_panel *ctx = mipi_dsi_get_drvdata(dsi);
+
+	/* Must not fire against a torn-down ctx. */
+	cancel_delayed_work_sync(&ctx->handoff_work);
 
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&ctx->panel);

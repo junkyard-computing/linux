@@ -907,6 +907,17 @@ struct exynos_panel {
 	bool bl_ctrl_dcs;
 	enum exynos_cabc_mode cabc_mode;
 	struct backlight_device *bl;
+	/*
+	 * PANEL_STATE_HANDOFF is meant to be transient: the bootloader left the
+	 * panel lit, we adopt it so a modeset can take over without flicker, and
+	 * the state leaves HANDOFF as soon as something initializes the panel.
+	 * If nothing ever claims it - e.g. the felix inner display, whose
+	 * connector has no DRM client - it would otherwise stay powered at
+	 * full-brightness white indefinitely, costing several watts and ~5-6 C
+	 * of skin temperature. This work fires once after probe and powers the
+	 * panel down if it is STILL in handoff by then.
+	 */
+	struct delayed_work handoff_work;
 	struct mutex mode_lock;
 	struct mutex crtc_lock;
 	struct mutex bl_state_lock;
