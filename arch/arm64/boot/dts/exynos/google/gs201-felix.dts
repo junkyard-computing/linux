@@ -652,11 +652,18 @@
  * rails feed the inner ana6707 panel's vddi/vci, and disabling them perturbs
  * the DRM/dsim probe ordering into a long deferred-probe stall (~100 s boot).
  * The inner panel is already dark (and cool) via the gpa7-1 reset hog above,
- * so cutting the rails buys no thermal win. Keep regulator-boot-on: the rails
- * stay up, boot stays fast, and the driver + regulators remain available for
- * the follow-up spmic-thermal (skin) / ODPM phases. ldo4s = vddi, ldo28s =
- * vci of the inner panel (AOSP gs201-felix-display.dtsi); nothing else uses
- * them.
+ * so cutting the rails buys no thermal win. We want the rails to STAY UP so
+ * boot stays fast, while the driver + regulators remain available for the
+ * follow-up spmic-thermal (skin) / ODPM phases. ldo4s = vddi, ldo28s = vci of
+ * the inner panel (AOSP gs201-felix-display.dtsi); nothing else uses them.
+ *
+ * NB (2026-07-21): "keep regulator-boot-on" was NOT sufficient to achieve that,
+ * and this comment used to claim it was. boot-on only records that the rail is
+ * enabled at boot; regulator_init_complete() still disables any regulator with
+ * no consumer ~30 s in, and these have none. Result: the core cut both rails at
+ * t=31.7 s and the boot stalled 100.9 s — intermittently, whenever userspace
+ * hadn't finished coming up before that 30 s mark. Fixed by adding
+ * regulator-always-on on both rails (see below).
  */
 &acpm_ipc {
 	s2mpg13: pmic-2 {
@@ -686,11 +693,24 @@
 		};
 
 		regulators {
+			/*
+			 * regulator-always-on is REQUIRED here, not just boot-on.
+			 * boot-on only records that the rail is already enabled at boot;
+			 * it does NOT exempt it from regulator_init_complete()'s
+			 * unused-regulator cleanup, which disables every regulator with
+			 * no consumer ~30 s into boot. These rails have no consumer (the
+			 * inner panel has no driver and no DT node), so with boot-on
+			 * alone the core cut them at t=31.7 s and the boot then stalled
+			 * for 100.9 s — measured on felix, and exactly the ~100 s
+			 * DRM/dsim deferred-probe stall described above. always-on is
+			 * what actually implements the intent "the rails stay up".
+			 */
 			ldo4s: ldo4s {
 				regulator-name = "s2mpg13_ldo4s_inner_vddi";
 				regulator-min-microvolt = <700000>;
 				regulator-max-microvolt = <2275000>;
 				regulator-boot-on;
+				regulator-always-on;
 			};
 
 			ldo28s: ldo28s {
@@ -698,6 +718,7 @@
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <3375000>;
 				regulator-boot-on;
+				regulator-always-on;
 			};
 		};
 	};
