@@ -86,6 +86,15 @@ void edgetpu_bus_qos_get(void);
 void edgetpu_bus_qos_put(void);
 
 /*
+ * Create the runtime TPU DVFS knob at /sys/kernel/debug/edgetpu/tpu_clk_hz
+ * (rw, Hz). Takes a second common-clock consumer handle on the "tpu" ACPM clock
+ * so userspace can raise the rate for inference / lower it at idle; the boot
+ * clock is set at the safe DVFS floor by the Rust driver. @dev is the edgetpu
+ * platform device. Best-effort (diagnostic); never fails bring-up.
+ */
+void edgetpu_dvfs_debugfs_init(struct device *dev);
+
+/*
  * Module-lifetime mapping of the main TPU CSR block (0x1ce00000), used by the
  * runtime VII mailbox path which outlives the Rust driver's probe-time IoMem.
  * edgetpu_csr_init() is idempotent; call it once from probe. Offsets are from
