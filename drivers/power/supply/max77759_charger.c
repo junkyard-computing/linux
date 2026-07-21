@@ -772,6 +772,26 @@ static int max77759_charger_probe(struct platform_device *pdev)
 	return max77759_init_irqhandler(chg);
 }
 
+static void max77759_charger_shutdown(struct platform_device *pdev)
+{
+	struct max77759_charger *chg = platform_get_drvdata(pdev);
+
+	/*
+	 * Force the charger OFF before the system resets. This matters most for
+	 * the reverse-boost (host-mode VBUS / chgin-otg) that sources a dongle:
+	 * on gs201/felix a warm reset (reboot=warm -> PSCI SYSTEM_RESET2) does
+	 * not tear down the Type-C link, and nothing else disables the boost via
+	 * the regulator path, so it stays in OTG_BOOST_ON / ILIM=1500mA straight
+	 * through the reset. That trips the IF-PMIC under-voltage lockout
+	 * ("0xcfcd - UVLO (IF-PMIC)"); worse, a UVLO reset preserves the boost
+	 * state, so every subsequent boot re-trips it -> a reset loop that only a
+	 * cold power-off clears. Writing CHG_CNFG_00 MODE=OFF here safes the boost
+	 * before the reset so warm reboots are reliable.
+	 */
+	if (chg)
+		charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
+}
+
 static const struct platform_device_id max77759_charger_id[] = {
 	{ .name = "max77759-charger" },
 	{ }
@@ -784,6 +804,7 @@ static struct platform_driver max77759_charger_driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = max77759_charger_probe,
+	.shutdown = max77759_charger_shutdown,
 	.id_table = max77759_charger_id,
 };
 module_platform_driver(max77759_charger_driver);
