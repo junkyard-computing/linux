@@ -432,8 +432,69 @@ void edgetpu_bus_qos_put(void)
 }
 EXPORT_SYMBOL_GPL(edgetpu_bus_qos_put);
 
+/*
+ * Runtime TPU DVFS knob (`/sys/kernel/debug/edgetpu/tpu_clk_hz`, rw).
+ *
+ * The Rust driver brings the TPU up at the DVFS *floor* (UUD/226 MHz) so the
+ * firmware start doesn't trip the IF-PMIC UVLO at boot (see driver.rs). Inference
+ * wants a higher state, so expose the ACPM "tpu" clock rate to userspace: write
+ * a frequency in Hz to raise/lower it, read back the current rate. This is a
+ * second consumer handle on the same clock the Rust `Clk` holds — the common
+ * clock framework shares the underlying clk_core, so clk_set_rate() here changes
+ * the one HW rate. We don't prepare/enable it (the Rust handle keeps the rail
+ * powered); we only set/get the rate.
+ *
+ * Because the boot clock is the safe floor, sweeping this knob up to NOM is
+ * self-recovering: a rate that trips UVLO just resets the phone, which boots
+ * again at the floor. Diagnostic-only; failures here never affect bring-up.
+ */
+#include <linux/clk.h>
+#include <linux/debugfs.h>
+
+static struct clk *edgetpu_dvfs_clk;
+static struct dentry *edgetpu_dvfs_dir;
+
+static int edgetpu_dvfs_get(void *data, u64 *val)
+{
+	if (!edgetpu_dvfs_clk)
+		return -ENODEV;
+	*val = clk_get_rate(edgetpu_dvfs_clk);
+	return 0;
+}
+
+static int edgetpu_dvfs_set(void *data, u64 val)
+{
+	if (!edgetpu_dvfs_clk)
+		return -ENODEV;
+	return clk_set_rate(edgetpu_dvfs_clk, (unsigned long)val);
+}
+DEFINE_DEBUGFS_ATTRIBUTE(edgetpu_dvfs_fops, edgetpu_dvfs_get, edgetpu_dvfs_set,
+			 "%llu\n");
+
+void edgetpu_dvfs_debugfs_init(struct device *dev)
+{
+	if (edgetpu_dvfs_clk)
+		return;
+	edgetpu_dvfs_clk = clk_get(dev, "tpu");
+	if (IS_ERR(edgetpu_dvfs_clk)) {
+		dev_warn(dev, "edgetpu_gsa: DVFS knob: clk_get(tpu) failed (%ld)\n",
+			 PTR_ERR(edgetpu_dvfs_clk));
+		edgetpu_dvfs_clk = NULL;
+		return;
+	}
+	edgetpu_dvfs_dir = debugfs_create_dir("edgetpu", NULL);
+	debugfs_create_file_unsafe("tpu_clk_hz", 0644, edgetpu_dvfs_dir, NULL,
+				   &edgetpu_dvfs_fops);
+	dev_info(dev, "edgetpu_gsa: DVFS knob at /sys/kernel/debug/edgetpu/tpu_clk_hz (now %lu Hz)\n",
+		 clk_get_rate(edgetpu_dvfs_clk));
+}
+EXPORT_SYMBOL_GPL(edgetpu_dvfs_debugfs_init);
+
 static void __exit edgetpu_gsa_exit(void)
 {
+	debugfs_remove_recursive(edgetpu_dvfs_dir);
+	if (edgetpu_dvfs_clk)
+		clk_put(edgetpu_dvfs_clk);
 	if (dev_pm_qos_request_active(&edgetpu_mif_qos))
 		dev_pm_qos_remove_request(&edgetpu_mif_qos);
 	if (dev_pm_qos_request_active(&edgetpu_int_qos))
