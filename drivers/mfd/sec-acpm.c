@@ -37,6 +37,7 @@ struct sec_pmic_acpm_platform_data {
 	const struct regmap_config *regmap_cfg_pmic;
 	const struct regmap_config *regmap_cfg_rtc;
 	const struct regmap_config *regmap_cfg_meter;
+	const struct regmap_config *regmap_cfg_mt_trim;
 };
 
 static const struct regmap_range s2mpg10_common_registers[] = {
@@ -558,6 +559,30 @@ static const struct regmap_config s2mpg13_regmap_config_meter = {
 	.cache_type = REGCACHE_NONE,
 };
 
+/*
+ * Meter trim bank. Only COMMON2 (0x34) is needed: bit 7 there is the meter
+ * software reset the power meter has to toggle before it will sample at all.
+ * Kept to that single register rather than opening the whole trim bank.
+ */
+static const struct regmap_range s2mpg13_mt_trim_registers[] = {
+	regmap_reg_range(S2MPG13_MT_TRIM_COMMON2, S2MPG13_MT_TRIM_COMMON2),
+};
+
+static const struct regmap_access_table s2mpg13_mt_trim_table = {
+	.yes_ranges = s2mpg13_mt_trim_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg13_mt_trim_registers),
+};
+
+static const struct regmap_config s2mpg13_regmap_config_mt_trim = {
+	.name = "mt_trim",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG13_MT_TRIM_COMMON2,
+	.wr_table = &s2mpg13_mt_trim_table,
+	.rd_table = &s2mpg13_mt_trim_table,
+	.cache_type = REGCACHE_NONE,
+};
+
 struct sec_pmic_acpm_shared_bus_context {
 	struct acpm_handle *acpm;
 	unsigned int acpm_chan_id;
@@ -570,6 +595,14 @@ enum sec_pmic_acpm_accesstype {
 	SEC_PMIC_ACPM_ACCESSTYPE_RTC = 0x02,
 	SEC_PMIC_ACPM_ACCESSTYPE_METER = 0x0a,
 	SEC_PMIC_ACPM_ACCESSTYPE_WLWP = 0x0b,
+	/*
+	 * Meter trim bank. Distinct from TRIM (0x0f). The power meter cannot be
+	 * reset without it: AOSP's s2mpg1x_meter_sw_reset() toggles bit 7 of
+	 * MT_TRIM 0x34 before re-asserting METER_EN, and without that the meter
+	 * never samples -- its LPF and accumulator registers stay frozen and
+	 * even survive a reboot unchanged.
+	 */
+	SEC_PMIC_ACPM_ACCESSTYPE_MT_TRIM = 0x0e,
 	SEC_PMIC_ACPM_ACCESSTYPE_TRIM = 0x0f,
 };
 
@@ -723,6 +756,14 @@ static int sec_pmic_acpm_probe(struct platform_device *pdev)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
+	if (pdata->regmap_cfg_mt_trim) {
+		regmap = sec_pmic_acpm_regmap_init(dev, shared_ctx,
+						   SEC_PMIC_ACPM_ACCESSTYPE_MT_TRIM,
+						   pdata->regmap_cfg_mt_trim, true);
+		if (IS_ERR(regmap))
+			return PTR_ERR(regmap);
+	}
+
 	ret = sec_pmic_probe(dev, pdata->device_type, irq, regmap_pmic, NULL);
 	if (ret)
 		return ret;
@@ -783,6 +824,7 @@ static const struct sec_pmic_acpm_platform_data s2mpg13_data = {
 	.regmap_cfg_common = &s2mpg13_regmap_config_common,
 	.regmap_cfg_pmic = &s2mpg13_regmap_config_pmic,
 	.regmap_cfg_meter = &s2mpg13_regmap_config_meter,
+	.regmap_cfg_mt_trim = &s2mpg13_regmap_config_mt_trim,
 };
 
 static const struct of_device_id sec_pmic_acpm_of_match[] = {
