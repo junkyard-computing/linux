@@ -583,6 +583,29 @@ static const struct regmap_config s2mpg13_regmap_config_mt_trim = {
 	.cache_type = REGCACHE_NONE,
 };
 
+/*
+ * Same story on the main PMIC, but the meter-reset register sits at COMMON
+ * (0x29) rather than COMMON2 (0x34).
+ */
+static const struct regmap_range s2mpg12_mt_trim_registers[] = {
+	regmap_reg_range(S2MPG12_MT_TRIM_COMMON, S2MPG12_MT_TRIM_COMMON),
+};
+
+static const struct regmap_access_table s2mpg12_mt_trim_table = {
+	.yes_ranges = s2mpg12_mt_trim_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg12_mt_trim_registers),
+};
+
+static const struct regmap_config s2mpg12_regmap_config_mt_trim = {
+	.name = "mt_trim",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG12_MT_TRIM_COMMON,
+	.wr_table = &s2mpg12_mt_trim_table,
+	.rd_table = &s2mpg12_mt_trim_table,
+	.cache_type = REGCACHE_NONE,
+};
+
 struct sec_pmic_acpm_shared_bus_context {
 	struct acpm_handle *acpm;
 	unsigned int acpm_chan_id;
@@ -815,6 +838,7 @@ static const struct sec_pmic_acpm_platform_data s2mpg12_data = {
 	.regmap_cfg_common = &s2mpg12_regmap_config_common,
 	.regmap_cfg_pmic = &s2mpg12_regmap_config_pmic,
 	.regmap_cfg_meter = &s2mpg12_regmap_config_meter,
+	.regmap_cfg_mt_trim = &s2mpg12_regmap_config_mt_trim,
 };
 
 static const struct sec_pmic_acpm_platform_data s2mpg13_data = {
