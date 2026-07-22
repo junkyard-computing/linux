@@ -2370,11 +2370,31 @@
 		devfreq = <&bus_mif>;
 		/*
 		 * Source interconnect node for the GPU path; links up to bus_mif
-		 * (the DMC). ratio 8 => a peak-kBps vote maps to kHz/8; INT clamps
-		 * it to its own 533MHz max, so any GPU vote pulls INT toward max.
+		 * (the DMC).
+		 *
+		 * The ratio must NOT be bus_mif's. exynos-generic-icc maps a
+		 * bandwidth vote to freq = peak_kBps / data-clock-ratio, and the
+		 * same vote is applied to every node on the path -- but MIF and
+		 * INT run on different frequency scales (MIF 421-3172 MHz, INT
+		 * 100-533 MHz). With ratio 8 the GPU's *lowest* OPP (3368000
+		 * kBps) mapped to a 421 MHz MIN_FREQUENCY floor on INT, near the
+		 * top of INT's range, so INT sat pinned at 465 MHz forever --
+		 * the GPU holds that vote even while runtime-suspended. Confirmed
+		 * on felix: unbinding panthor dropped INT 465 -> 100 MHz.
+		 *
+		 * This is a correctness fix, not a power one. S5M_VDD_INT was
+		 * measured (s2mpg12 ODPM) at 133937 uW with INT at both 465 and
+		 * 100 MHz -- byte-identical -- so the rail is insensitive to INT
+		 * frequency and this recovers nothing on the idle-power gap.
+		 *
+		 * ratio 48 rescales the same GPU ladder onto INT's range:
+		 * 3368000/48 = 70 MHz (below INT's 100 MHz floor, so an idle GPU
+		 * leaves INT alone) and 25376000/48 = 529 MHz (rounds up to INT's
+		 * 533 MHz top, so a saturated GPU still pulls INT to max). Keep
+		 * this in step with the GPU's opp-peak-kBps ladder.
 		 */
 		#interconnect-cells = <0>;
 		interconnects = <&bus_mif>;
-		samsung,data-clock-ratio = <8>;
+		samsung,data-clock-ratio = <48>;
 	};
 };
