@@ -1276,15 +1276,41 @@ static const struct s2mpg10_regulator_desc s2mpg11_regulators[] = {
 			0, 0, 0, NULL, 0),				\
 }
 
+/*
+ * BUCK1S (S1S_VDD_CAM). Exposed for one reason: so the regulator core's
+ * unused-regulator cleanup can turn it off. The bootloader leaves B1S_CTRL at
+ * 0xf8 - bits[7:6]=11, forced on, where the neighbouring bucks sit at 0xb8
+ * (externally gated) - and nothing in this tree claims the camera rail, so it
+ * burns ~62 mW at idle against 0.7 mW on an AOSP device on the same silicon.
+ * Enable is the 2-bit mode field, so disabling writes 00 and the rail drops.
+ *
+ * No ramp support: we only ever gate it, never move its voltage, so the ramp
+ * fields are zeroed exactly as in the LDO case above. Keep this restricted to
+ * BUCK1S - the warning on the table below applies to every other buck.
+ */
+#define s2mpg13_regulator_desc_buck(_num, _supply, _vrange) {		\
+	.desc = regulator_desc_s2mpg1x_buck_cmn(#_num "s",		\
+			S2MPG13_BUCK##_num, _supply,			\
+			s2mpg10_reg_buck_ops, _vrange,			\
+			S2MPG13_PMIC_B##_num##S_OUT1, GENMASK(7, 0),	\
+			S2MPG13_PMIC_B##_num##S_CTRL, GENMASK(7, 6),	\
+			0, 0, NULL, 0, 30),				\
+	.enable_ramp_rate = 12500,					\
+}
+
 /* voltage range for s2mpg13 LDO4 (group 6) */
 S2MPG10_VOLTAGE_RANGE(s2mpg13_ldo, 4, 700000, 700000, 2275000, STEP_25_MV);
 
 /* voltage range for s2mpg13 LDO28 (group 7) */
 S2MPG10_VOLTAGE_RANGE(s2mpg13_ldo, 28, 1800000, 1800000, 3375000, STEP_25_MV);
 
+/* voltage range for s2mpg13 BUCK1S (same shape as the s2mpg10 bucks) */
+S2MPG10_VOLTAGE_RANGE(s2mpg13_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
+
 static const struct s2mpg10_regulator_desc s2mpg13_regulators[] = {
 	s2mpg13_regulator_desc_ldo(4, NULL, s2mpg13_ldo_vranges4),
 	s2mpg13_regulator_desc_ldo(28, NULL, s2mpg13_ldo_vranges28),
+	s2mpg13_regulator_desc_buck(1, NULL, s2mpg13_buck_vranges1),
 };
 
 static const struct regulator_ops s2mps11_ldo_ops = {
