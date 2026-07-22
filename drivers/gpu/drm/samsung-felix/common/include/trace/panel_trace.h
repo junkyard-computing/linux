@@ -82,7 +82,7 @@ TRACE_EVENT(dsi_label_scope,
 			__field(bool, begin)
 		),
 	TP_fast_assign(
-			__assign_str(name, name);
+			__assign_str(name);
 			__entry->begin = begin;
 		),
 	TP_printk("%s %s", __get_str(name), __entry->begin ? "begin" : "end")

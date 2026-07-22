@@ -82,7 +82,15 @@ TRACE_EVENT(dsi_label_scope,
 			__field(bool, begin)
 		),
 	TP_fast_assign(
-			__assign_str(name, name);
+			/*
+			 * Mainline deprecated the second argument to
+			 * __assign_str(); the source now comes from the
+			 * matching __string() above. This header only compiles
+			 * when tracing is enabled, so the stale two-argument
+			 * form sat here dormant until CONFIG_FTRACE was turned
+			 * on for runtime-PM debugging.
+			 */
+			__assign_str(name);
 			__entry->begin = begin;
 		),
 	TP_printk("%s %s", __get_str(name), __entry->begin ? "begin" : "end")
