@@ -26,6 +26,7 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/math64.h>
+#include <linux/mfd/samsung/s2mpg12.h>
 #include <linux/mfd/samsung/s2mpg13.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -305,18 +306,26 @@ struct s2mpg1x_pm_variant {
 	const char *name;
 	u32 (*power_resolution)(u8 muxsel);
 	const char *(*muxsel_name)(u8 muxsel);
+	/*
+	 * Register in the MT_TRIM bank whose bit 7 is the meter software reset.
+	 * The two PMICs put it at different offsets (s2mpg13 COMMON2 0x34,
+	 * s2mpg12 COMMON 0x29), so the reset cannot hardcode one.
+	 */
+	unsigned int mt_trim_rst_reg;
 };
 
 static const struct s2mpg1x_pm_variant s2mpg13_pm_variant = {
 	.name = "s2mpg13-powermeter",
 	.power_resolution = s2mpg13_muxsel_power_resolution,
 	.muxsel_name = s2mpg13_muxsel_name,
+	.mt_trim_rst_reg = S2MPG13_MT_TRIM_COMMON2,
 };
 
 static const struct s2mpg1x_pm_variant s2mpg12_pm_variant = {
 	.name = "s2mpg12-powermeter",
 	.power_resolution = s2mpg12_muxsel_power_resolution,
 	.muxsel_name = s2mpg12_muxsel_name,
+	.mt_trim_rst_reg = S2MPG12_MT_TRIM_COMMON,
 };
 
 struct s2mpg13_powermeter {
@@ -348,23 +357,24 @@ struct s2mpg13_powermeter {
  * Bring the meter out of the state firmware leaves it in.
  *
  * The software reset lives in the MT_TRIM bank rather than the meter bank:
- * drop bit 7 of MT_TRIM COMMON2 and raise it again (AOSP
+ * drop bit 7 of the variant's MT_TRIM reset register and raise it again (AOSP
  * s2mpg1x_meter_sw_reset). Toggling METER_EN alone is not enough -- doing only
  * that leaves the accumulators frozen with acc_count pinned at 0xfffff.
  */
 static int s2mpg1x_meter_reset(struct s2mpg13_powermeter *pm)
 {
+	unsigned int reg = pm->variant->mt_trim_rst_reg;
 	int ret;
 
 	if (!pm->mt_trim)
 		return 0;
 
-	ret = regmap_update_bits(pm->mt_trim, S2MPG13_MT_TRIM_COMMON2,
+	ret = regmap_update_bits(pm->mt_trim, reg,
 				 S2MPG13_MT_TRIM_METER_SW_RST, 0);
 	if (ret)
 		return ret;
 
-	ret = regmap_update_bits(pm->mt_trim, S2MPG13_MT_TRIM_COMMON2,
+	ret = regmap_update_bits(pm->mt_trim, reg,
 				 S2MPG13_MT_TRIM_METER_SW_RST,
 				 S2MPG13_MT_TRIM_METER_SW_RST);
 	if (ret)

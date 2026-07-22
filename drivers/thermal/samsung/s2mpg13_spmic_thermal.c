@@ -139,21 +139,20 @@ static const struct thermal_zone_device_ops s2mpg13_spmic_ops = {
 };
 
 /*
- * Bring the METER block up and start the NTC channels. On AOSP the ODPM
- * powermeter driver runs the meter; there is no such driver here, so the
- * thermal driver enables it: set the NTC sample rate, unmask the channels in
- * CTRL3, and make sure the meter is running (CTRL1.METER_EN). The LPF data
- * takes a few sample periods to settle from zero.
+ * Bring the METER block up and start the NTC channels: set the NTC sample rate,
+ * unmask the channels in CTRL3, and make sure the meter is running
+ * (CTRL1.METER_EN). The LPF data takes a few sample periods to settle from zero.
+ *
+ * The s2mpg13-powermeter driver also enables the meter (for the power channels)
+ * and probes after this one, where it does a full MT_TRIM software reset. That
+ * reset does not touch CTRL3, so the NTC channels enabled here survive it; the
+ * two drivers own disjoint fields of CTRL1 (NTC rate [7:5] here, INT rate [4:2]
+ * there) and only share METER_EN, which is idempotent.
  */
 static int s2mpg13_spmic_enable_ntc(struct s2mpg13_spmic_thermal *chip,
 				    u8 adc_chan_en)
 {
-	unsigned int ctrl1;
 	int ret;
-
-	ret = regmap_read(chip->meter, S2MPG13_METER_CTRL1, &ctrl1);
-	if (!ret)
-		dev_info(chip->dev, "meter CTRL1 before enable: 0x%02x\n", ctrl1);
 
 	ret = regmap_update_bits(chip->meter, S2MPG13_METER_CTRL1,
 				 S2MPG13_NTC_SAMP_RATE_MASK,
