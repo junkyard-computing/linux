@@ -49,6 +49,13 @@ enum s2mpg13_pmic_reg {
 	S2MPG13_PMIC_COMMON_CTRL1 = 0x0c,
 	S2MPG13_PMIC_COMMON_CTRL2,
 	S2MPG13_PMIC_COMMON_CTRL3,
+	/*
+	 * BUCK1S (S1S_VDD_CAM) enable/vsel. Only this buck is described; the
+	 * other sub-PMIC bucks are deliberately left unmanaged (see the comment
+	 * on s2mpg13_regulators[] in drivers/regulator/s2mps11.c).
+	 */
+	S2MPG13_PMIC_B1S_CTRL = 0x0f,
+	S2MPG13_PMIC_B1S_OUT1 = 0x10,
 	/* LDO enable/vsel control (LxS_CTRL), 0x2c..0x47 */
 	S2MPG13_PMIC_L1S_CTRL = 0x2c,
 	S2MPG13_PMIC_L2S_CTRL,
