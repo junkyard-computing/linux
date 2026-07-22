@@ -342,7 +342,14 @@ struct exynos_partial *exynos_partial_initialize(struct decon_device *decon,
 	ret = partial->funcs->init(partial, partial_mode, mode);
 	if (ret) {
 		pr_err("failed to initialize partial update\n");
-		kfree(partial);
+		/*
+		 * Only drop what was allocated here, and drop it the devres way:
+		 * kfree() on a devm_kzalloc() pointer frees ARCH_KMALLOC_MINALIGN
+		 * bytes into the devres node and corrupts the slab. In the else
+		 * branch above, `partial` is decon->partial and is not ours to free.
+		 */
+		if (!decon->partial)
+			devm_kfree(dev, partial);
 		return NULL;
 	}
 

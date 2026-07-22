@@ -426,7 +426,7 @@ exynos_hibernation_register(struct decon_device *decon)
 		hibernation->cam_op_reg = of_iomap(cam_np, 0);
 		if (!hibernation->cam_op_reg) {
 			pr_err("failed to map camera operation register\n");
-			kfree(hibernation);
+			devm_kfree(dev, hibernation);
 			return NULL;
 		}
 	}
