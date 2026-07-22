@@ -14,6 +14,7 @@
 #include <linux/mfd/samsung/rtc.h>
 #include <linux/mfd/samsung/s2mpg10.h>
 #include <linux/mfd/samsung/s2mpg11.h>
+#include <linux/mfd/samsung/s2mpg12.h>
 #include <linux/mfd/samsung/s2mpg13.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -367,6 +368,100 @@ static const struct regmap_config s2mpg11_regmap_config_meter = {
 };
 
 /*
+ * s2mpg12 (gs201 MAIN PMIC) -- METER access only. The PMIC bank is bounded so
+ * the regmap is well-formed, but nothing writes it: the main PMIC supplies the
+ * SoC core rails and no regulator cell is registered for this chip (see
+ * s2mpg12_devs in sec-common.c). Uncached, like its sub-PMIC sibling.
+ */
+static const struct regmap_range s2mpg12_common_registers[] = {
+	regmap_reg_range(0x00, 0x10), /* VGPIO, I3C, CHIPID, IBI */
+};
+
+static const struct regmap_range s2mpg12_common_ro_registers[] = {
+	regmap_reg_range(0x0b, 0x0b), /* CHIPID */
+};
+
+static const struct regmap_access_table s2mpg12_common_rd_table = {
+	.yes_ranges = s2mpg12_common_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg12_common_registers),
+};
+
+static const struct regmap_access_table s2mpg12_common_wr_table = {
+	.yes_ranges = s2mpg12_common_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg12_common_registers),
+	.no_ranges = s2mpg12_common_ro_registers,
+	.n_no_ranges = ARRAY_SIZE(s2mpg12_common_ro_registers),
+};
+
+static const struct regmap_config s2mpg12_regmap_config_common = {
+	.name = "common",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG12_COMMON_IBIM2,
+	.wr_table = &s2mpg12_common_wr_table,
+	.rd_table = &s2mpg12_common_rd_table,
+	.cache_type = REGCACHE_NONE,
+};
+
+static const struct regmap_range s2mpg12_pmic_registers[] = {
+	regmap_reg_range(0x00, 0xec), /* All PMIC registers */
+};
+
+static const struct regmap_access_table s2mpg12_pmic_rd_table = {
+	.yes_ranges = s2mpg12_pmic_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg12_pmic_registers),
+};
+
+/*
+ * Read-only by construction: no write ranges at all. Nothing in-tree should
+ * ever write a main-PMIC register, and making that structural beats relying on
+ * every future caller being careful.
+ */
+static const struct regmap_access_table s2mpg12_pmic_wr_table = {
+	.n_yes_ranges = 0,
+};
+
+static const struct regmap_config s2mpg12_regmap_config_pmic = {
+	.name = "pmic",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG12_PMIC_SW_RESET,
+	.wr_table = &s2mpg12_pmic_wr_table,
+	.rd_table = &s2mpg12_pmic_rd_table,
+	.cache_type = REGCACHE_NONE,
+};
+
+static const struct regmap_range s2mpg12_meter_registers[] = {
+	regmap_reg_range(0x00, 0xe5), /* Meter config + data */
+};
+
+static const struct regmap_range s2mpg12_meter_ro_registers[] = {
+	regmap_reg_range(0x40, 0xe5), /* Measurement data */
+};
+
+static const struct regmap_access_table s2mpg12_meter_rd_table = {
+	.yes_ranges = s2mpg12_meter_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg12_meter_registers),
+};
+
+static const struct regmap_access_table s2mpg12_meter_wr_table = {
+	.yes_ranges = s2mpg12_meter_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg12_meter_registers),
+	.no_ranges = s2mpg12_meter_ro_registers,
+	.n_no_ranges = ARRAY_SIZE(s2mpg12_meter_ro_registers),
+};
+
+static const struct regmap_config s2mpg12_regmap_config_meter = {
+	.name = "meter",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG12_METER_EXT_SIGNED_DATA2,
+	.wr_table = &s2mpg12_meter_wr_table,
+	.rd_table = &s2mpg12_meter_rd_table,
+	.cache_type = REGCACHE_NONE,
+};
+
+/*
  * s2mpg13 (gs201 sub-PMIC). Uncached (REGCACHE_NONE) for bring-up: every
  * access hits the ACPM bus, so there is no cache-staleness risk while only
  * the LDO control registers are exercised. The wr/rd tables just bound the
@@ -589,8 +684,13 @@ static int sec_pmic_acpm_probe(struct platform_device *pdev)
 	if (IS_ERR(acpm))
 		return dev_err_probe(dev, PTR_ERR(acpm), "failed to get acpm\n");
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
+	/*
+	 * Optional: a metering-only PMIC (gs201 main, S2MPG12) has no IRQ
+	 * consumer and so no "interrupts" property, and sec_irq_init() skips it
+	 * anyway. Don't fail probe just because there is no interrupt to find.
+	 */
+	irq = platform_get_irq_optional(pdev, 0);
+	if (irq < 0 && irq != -ENXIO)
 		return irq;
 
 	shared_ctx = devm_kzalloc(dev, sizeof(*shared_ctx), GFP_KERNEL);
@@ -663,6 +763,19 @@ static const struct sec_pmic_acpm_platform_data s2mpg11_data = {
  * matches the AOSP s2mpg13 "channel 1" and is the first thing to check if the
  * chip-id read fails at probe.
  */
+/*
+ * gs201 main PMIC. Mirrors the gs101 main (s2mpg10): PMIC IPC channel 2,
+ * speedy sub-channel 0 (main = 0, sub = 1).
+ */
+static const struct sec_pmic_acpm_platform_data s2mpg12_data = {
+	.device_type = S2MPG12,
+	.acpm_chan_id = 2,
+	.speedy_channel = 0,
+	.regmap_cfg_common = &s2mpg12_regmap_config_common,
+	.regmap_cfg_pmic = &s2mpg12_regmap_config_pmic,
+	.regmap_cfg_meter = &s2mpg12_regmap_config_meter,
+};
+
 static const struct sec_pmic_acpm_platform_data s2mpg13_data = {
 	.device_type = S2MPG13,
 	.acpm_chan_id = 2,
@@ -675,6 +788,7 @@ static const struct sec_pmic_acpm_platform_data s2mpg13_data = {
 static const struct of_device_id sec_pmic_acpm_of_match[] = {
 	{ .compatible = "samsung,s2mpg10-pmic", .data = &s2mpg10_data, },
 	{ .compatible = "samsung,s2mpg11-pmic", .data = &s2mpg11_data, },
+	{ .compatible = "samsung,s2mpg12-pmic", .data = &s2mpg12_data, },
 	{ .compatible = "samsung,s2mpg13-pmic", .data = &s2mpg13_data, },
 	{ },
 };

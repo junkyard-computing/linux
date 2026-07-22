@@ -57,6 +57,20 @@ static const struct mfd_cell s2mpg11_devs[] = {
 };
 
 /*
+ * gs201 MAIN PMIC: ODPM power meter ONLY.
+ *
+ * Deliberately no regulator cell. The main PMIC owns the SoC core rails
+ * (S1M_VDD_MIF, S2M/S3M/S4M_VDD_CPUCL2/1/0, S5M_VDD_INT, S10M_VDD_TPU...);
+ * exposing those to the regulator core risks the unused-regulator reap or a
+ * stray disable powering down the CPU or MIF, which is fatal. Metering is
+ * read-only, so it is safe on its own.
+ */
+static const struct mfd_cell s2mpg12_devs[] = {
+	MFD_CELL_OF("s2mpg12-powermeter", NULL, NULL, 0, 0,
+		    "google,s2mpg12-powermeter"),
+};
+
+/*
  * gs201 sub-PMIC: regulator, the NTC thermistor sensor (spmic-thermal) and the
  * ODPM power meter.
  */
@@ -137,6 +151,7 @@ static void sec_pmic_dump_rev(struct sec_pmic_dev *sec_pmic)
 	switch (sec_pmic->device_type) {
 	case S2MPG10:
 	case S2MPG11:
+	case S2MPG12:
 	case S2MPG13:
 		/* For s2mpg1x, the revision is in a different regmap */
 		return;
@@ -259,6 +274,10 @@ int sec_pmic_probe(struct device *dev, int device_type, unsigned int irq,
 	case S2MPG11:
 		sec_devs = s2mpg11_devs;
 		num_sec_devs = ARRAY_SIZE(s2mpg11_devs);
+		break;
+	case S2MPG12:
+		sec_devs = s2mpg12_devs;
+		num_sec_devs = ARRAY_SIZE(s2mpg12_devs);
 		break;
 	case S2MPG13:
 		sec_devs = s2mpg13_devs;
