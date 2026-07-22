@@ -489,9 +489,8 @@ static int edgetpu_dvfs_get(void *data, u64 *val)
 	return 0;
 }
 
-static int edgetpu_dvfs_set(void *data, u64 val)
+static int edgetpu_dvfs_set_rate(unsigned long rate)
 {
-	unsigned long rate = (unsigned long)val;
 	int ret;
 
 	if (!edgetpu_dvfs_clk)
@@ -503,6 +502,10 @@ static int edgetpu_dvfs_set(void *data, u64 val)
 	 * the provider's ->set_rate actually runs. ACPM rounds to the nearest
 	 * supported DVFS point, so +1 Hz lands on a real neighbour rather than
 	 * an illegal rate, and the second call then pins the target.
+	 *
+	 * NB this nudge can transiently round *up* to the next DVFS point
+	 * (226 -> 627) before settling. That is harmless on an otherwise-idle
+	 * system at runtime, but it is why nothing calls this during boot.
 	 */
 	if (rate == clk_get_rate(edgetpu_dvfs_clk)) {
 		ret = clk_set_rate(edgetpu_dvfs_clk, rate + 1);
@@ -517,6 +520,81 @@ static int edgetpu_dvfs_set(void *data, u64 val)
 	edgetpu_dvfs_req_hz = rate;
 	return 0;
 }
+
+static int edgetpu_dvfs_set(void *data, u64 val)
+{
+	return edgetpu_dvfs_set_rate((unsigned long)val);
+}
+
+/*
+ * Demand-based TPU DVFS.
+ *
+ * Bring-up parks the clock at the DVFS floor (UUD/226 MHz) so the firmware start
+ * cannot trip the IF-PMIC UVLO while GPU and display are also ramping at ~12 s of
+ * boot. Nothing then raised it, so inference ran at the floor indefinitely:
+ * measured 1483 vs 3842 tok/s end-to-end, and 0.662 vs 0.240 ms per dispatch.
+ *
+ * So vote the clock up while a client is attached and drop it at the last
+ * detach, refcounted -- exactly the shape of the MIF/INT bus vote above, and for
+ * the same reason: the hardware needs a higher operating point only while
+ * someone is actually using it.
+ *
+ * This does not weaken the boot UVLO fix. The current step now happens on demand
+ * after boot on an otherwise-idle system, never during the boot ramp, and the
+ * boot rate is still the floor -- so the failure mode stays self-recovering (a
+ * rate that trips UVLO resets the phone, which boots again at the floor).
+ *
+ * Idle power is unchanged: with no client attached the clock sits back at the
+ * floor, so this costs nothing in the idle-power budget.
+ *
+ * The active rate is NOM by default but writable at
+ * /sys/kernel/debug/edgetpu/tpu_clk_active_hz, so the "is UD/845 a better
+ * default than NOM/1066?" question can be settled by measurement without a
+ * rebuild (845 buys 3510 of 4166 dispatches/s for a smaller current step).
+ */
+#define EDGETPU_TPU_FLOOR_HZ	226000000UL	/* UUD - the DVFS floor */
+#define EDGETPU_TPU_NOM_HZ	1066000000UL	/* NOM */
+
+static atomic_t edgetpu_dvfs_users = ATOMIC_INIT(0);
+static unsigned long edgetpu_dvfs_active_hz = EDGETPU_TPU_NOM_HZ;
+
+/* First attached client raises the TPU to the active rate; others just refcount. */
+void edgetpu_dvfs_vote_get(void)
+{
+	if (atomic_inc_return(&edgetpu_dvfs_users) != 1)
+		return;
+	if (edgetpu_dvfs_set_rate(edgetpu_dvfs_active_hz))
+		pr_warn("edgetpu_gsa: TPU DVFS raise failed; inference will be slow\n");
+}
+EXPORT_SYMBOL_GPL(edgetpu_dvfs_vote_get);
+
+/* Last client detaching drops the TPU back to the boot floor. */
+void edgetpu_dvfs_vote_put(void)
+{
+	if (atomic_dec_if_positive(&edgetpu_dvfs_users) != 0)
+		return;
+	edgetpu_dvfs_set_rate(EDGETPU_TPU_FLOOR_HZ);
+}
+EXPORT_SYMBOL_GPL(edgetpu_dvfs_vote_put);
+
+static int edgetpu_dvfs_active_get(void *data, u64 *val)
+{
+	*val = edgetpu_dvfs_active_hz;
+	return 0;
+}
+
+static int edgetpu_dvfs_active_set(void *data, u64 val)
+{
+	if (!val)
+		return -EINVAL;
+	edgetpu_dvfs_active_hz = (unsigned long)val;
+	/* Apply immediately if a client is already attached. */
+	if (atomic_read(&edgetpu_dvfs_users) > 0)
+		return edgetpu_dvfs_set_rate(edgetpu_dvfs_active_hz);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(edgetpu_dvfs_active_fops, edgetpu_dvfs_active_get,
+			 edgetpu_dvfs_active_set, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(edgetpu_dvfs_fops, edgetpu_dvfs_get, edgetpu_dvfs_set,
 			 "%llu\n");
 
@@ -534,6 +612,8 @@ void edgetpu_dvfs_debugfs_init(struct device *dev)
 	edgetpu_dvfs_dir = debugfs_create_dir("edgetpu", NULL);
 	debugfs_create_file_unsafe("tpu_clk_hz", 0644, edgetpu_dvfs_dir, NULL,
 				   &edgetpu_dvfs_fops);
+	debugfs_create_file_unsafe("tpu_clk_active_hz", 0644, edgetpu_dvfs_dir,
+				   NULL, &edgetpu_dvfs_active_fops);
 	dev_info(dev, "edgetpu_gsa: DVFS knob at /sys/kernel/debug/edgetpu/tpu_clk_hz (now %lu Hz)\n",
 		 clk_get_rate(edgetpu_dvfs_clk));
 }

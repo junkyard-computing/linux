@@ -95,6 +95,17 @@ void edgetpu_bus_qos_put(void);
 void edgetpu_dvfs_debugfs_init(struct device *dev);
 
 /*
+ * Demand-based TPU DVFS vote. Bring-up parks the clock at the DVFS floor so the
+ * firmware start can't trip the IF-PMIC UVLO during the boot ramp; nothing then
+ * raised it, so inference ran at the floor forever (1483 vs 3842 tok/s). These
+ * raise the clock to the active rate while >=1 client is attached and drop it
+ * back to the floor at the last detach, refcounted -- the same shape as the
+ * MIF/INT bus vote above. Idle power is unchanged (no client => floor).
+ */
+void edgetpu_dvfs_vote_get(void);
+void edgetpu_dvfs_vote_put(void);
+
+/*
  * Module-lifetime mapping of the main TPU CSR block (0x1ce00000), used by the
  * runtime VII mailbox path which outlives the Rust driver's probe-time IoMem.
  * edgetpu_csr_init() is idempotent; call it once from probe. Offsets are from

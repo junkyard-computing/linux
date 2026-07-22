@@ -94,6 +94,22 @@ pub(crate) fn bus_qos_put() {
     unsafe { bindings::edgetpu_bus_qos_put() };
 }
 
+/// Raise the TPU DVFS clock to its active rate for an attaching client
+/// (refcounted; only the first client actually raises it). Bring-up leaves the
+/// clock at the DVFS floor to protect the boot UVLO budget, so without this
+/// every inference runs at ~1/4.7 of NOM.
+pub(crate) fn dvfs_vote_get() {
+    // SAFETY: FFI to the companion module; internally refcounted, no arguments.
+    unsafe { bindings::edgetpu_dvfs_vote_get() };
+}
+
+/// Drop this client's TPU DVFS vote (only the last client returns the clock to
+/// the boot floor, so an idle TPU costs no extra power).
+pub(crate) fn dvfs_vote_put() {
+    // SAFETY: FFI to the companion module; internally refcounted, no arguments.
+    unsafe { bindings::edgetpu_dvfs_vote_put() };
+}
+
 /// Write `bytes` into the carveout at `phys` via the C glue (persistent WC map).
 /// Used for the KCI/VII mailbox queues (BOs use [`BoEntry`] system memory now).
 pub(crate) fn write(phys: u64, bytes: &[u8]) -> Result {

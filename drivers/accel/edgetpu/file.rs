@@ -63,6 +63,10 @@ impl drm::file::DriverFile for EdgeTpuFileData {
                 // slower). Dropped when the fd closes (PinnedDrop). Taken only after the data is
                 // created, so its Drop always pairs this get.
                 crate::mem::bus_qos_get();
+                // Same deal for the TPU's own clock: bring-up parks it at the DVFS floor for the
+                // boot UVLO budget, so raise it to the active rate while this client is attached
+                // and drop it again on close. Refcounted in the C glue.
+                crate::mem::dvfs_vote_get();
                 Ok(data)
             }
             Err(e) => {
@@ -93,5 +97,8 @@ impl PinnedDrop for EdgeTpuFileData {
         // Drop this client's bus vote. When the last client leaves, MIF/INT fall back to the
         // devfreq governor's floor.
         crate::mem::bus_qos_put();
+        // ...and this client's TPU clock vote. The last client leaving returns the TPU to the
+        // boot floor, so an idle TPU adds nothing to the idle-power budget.
+        crate::mem::dvfs_vote_put();
     }
 }
