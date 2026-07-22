@@ -494,6 +494,12 @@ struct regmap_irq_chip_data *sec_irq_init(struct sec_pmic_dev *sec_pmic)
 	case S2MPG10:
 	case S2MPG11:
 		return sec_irq_init_s2mpg1x(sec_pmic);
+	case S2MPG12:
+		/*
+		 * gs201 main PMIC: metering only, no regulator/IRQ consumers, and
+		 * no s2mpg12 regmap_irq chip is defined. Skip IRQ setup.
+		 */
+		return NULL;
 	case S2MPG13:
 		/*
 		 * Phase 1 s2mpg13 sub-PMIC bring-up: the regulator path does not

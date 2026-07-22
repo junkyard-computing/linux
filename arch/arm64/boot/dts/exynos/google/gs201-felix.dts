@@ -696,6 +696,35 @@
  * regulator-always-on on both rails (see below).
  */
 &acpm_ipc {
+	/*
+	 * gs201 MAIN PMIC -- ODPM metering ONLY, deliberately no regulators.
+	 *
+	 * This chip supplies the SoC core rails (VDD_MIF, VDD_CPUCL0/1/2,
+	 * VDD_INT, VDD_TPU, VDD_SLC). Exposing them as Linux regulators would
+	 * risk the unused-regulator reap, or a stray disable powering down the
+	 * CPU or memory controller, which is fatal -- so sec-common.c registers
+	 * only the powermeter cell for S2MPG12 and its PMIC regmap has no write
+	 * ranges at all. Metering is read-only and therefore safe.
+	 *
+	 * Channel set mirrors the AOSP gs201 s2mpg12 ODPM assignment so numbers
+	 * can be compared rail-for-rail against an AOSP device:
+	 *   vsen_c1, vsen_c2, vsen_c3, buck1m(VDD_MIF), buck2m(CPUCL2),
+	 *   buck3m(CPUCL1), buck4m(CPUCL0), buck5m(VDD_INT), buck8m,
+	 *   ldo15m(VDD_SLC), buck10m(VDD_TPU), buck6m.
+	 * The three VSEN_C* channels need external shunts and are expected to
+	 * read 0 here, exactly like the sub-PMIC's vsen channels do.
+	 */
+	s2mpg12: pmic-1 {
+		compatible = "samsung,s2mpg12-pmic";
+
+		s2mpg12_odpm: powermeter {
+			compatible = "google,s2mpg12-powermeter";
+			google,channel-muxsel = /bits/ 8 <
+				0x5c 0x5d 0x5e 0x01 0x02 0x03
+				0x04 0x05 0x08 0x2f 0x0a 0x06>;
+		};
+	};
+
 	s2mpg13: pmic-2 {
 		compatible = "samsung,s2mpg13-pmic";
 		interrupts-extended = <&gpa0 7 IRQ_TYPE_LEVEL_LOW>;
