@@ -48,16 +48,33 @@
 #define S2MPG13_ACC_BUF			6
 #define S2MPG13_ACC_COUNT_BUF		3
 
-/* METER_CTRL1. */
+/* METER_CTRL1: meter enable plus the internal sampling rate. */
 #define S2MPG13_METER_EN		BIT(0)
-/* METER_CTRL2: write to latch accumulators into LPF_DATA; self-clearing. */
+#define S2MPG13_INT_SAMP_RATE_MASK	(0x7 << 2)
+#define S2MPG13_INT_SAMP_RATE_125HZ	(0x4 << 2)
+
+/*
+ * METER_CTRL2: write to latch the accumulators into the readable registers;
+ * self-clearing.
+ *
+ * The latch does not complete until the meter finishes an internal sample, so
+ * the wait is a function of the sampling rate set above, not a fixed constant
+ * (AOSP s2mpg1x_meter_get_acquisition_time_us, b/209886118). At 125 Hz that is
+ * 8 ms; poll in sixteenths of it as AOSP does, so a fast latch returns fast.
+ */
 #define S2MPG13_METER_ASYNC_RD		BIT(7)
-#define S2MPG13_LATCH_POLL_US		200
+#define S2MPG13_ACQUISITION_US		8000
 #define S2MPG13_LATCH_POLLS		16
+#define S2MPG13_LATCH_POLL_US		(S2MPG13_ACQUISITION_US / S2MPG13_LATCH_POLLS)
 #define S2MPG13_RESET_SETTLE_US		200
-#define S2MPG13_ACC_WINDOW_MS		200
-/* LPF mode (CTRL6 + CTRL7[3:0]): 0 = power, 1 = current, per channel. */
-#define S2MPG13_LPF_MODE_HI_MASK	0x0f
+/*
+ * Power/current mode is per channel, one bit each, and is selected separately
+ * for the two data paths: the accumulators (CTRL4 + CTRL5[3:0]) and the LPF
+ * snapshot (CTRL6 + CTRL7[3:0]). 0 = power, 1 = current. We read accumulators,
+ * so CTRL4/CTRL5 are the ones that matter; CTRL6/CTRL7 are set to match so the
+ * LPF registers stay meaningful for anything that reads them.
+ */
+#define S2MPG13_MODE_HI_MASK		0x0f
 
 /*
  * Per-rail power resolution in milliwatts/LSB, in Q30 fixed point (value * 2^30
@@ -323,33 +340,22 @@ struct s2mpg13_powermeter {
  *
  * Writing the bit transfers the accumulator data to the readable registers and
  * then self-clears, so poll for it to clear before reading. AOSP does the same
- * in s2mpg1x_meter_set_async_blocking(); its acquisition time is a function of
- * the internal sampling rate, so rather than model that, poll with a short
- * sleep and a bounded total wait.
+ * in s2mpg1x_meter_set_async_blocking(): the wait is bounded by one internal
+ * sample period, since the data and the sample count are not updated at the
+ * same instant and reading between them would mismatch.
  */
 /*
- * Restart accumulation, then integrate over a fixed window.
+ * Bring the meter out of the state firmware leaves it in.
  *
- * The accumulators free-run from boot and saturate: acc_count pins at 0xfffff
- * (2^20-1) and stops, so a "mean" computed from it is an average over all of
- * uptime and never responds to anything. Clear them first, integrate for a
- * known window, then latch. That makes each read a fresh measurement of *now*.
- *
- * AOSP's full reset (s2mpg1x_meter_sw_reset) toggles a bit in the MT_TRIM bank
- * and then re-asserts METER_EN. We do not expose an MT_TRIM regmap, so try just
- * the METER_EN half; if the accumulators do not clear, acc_count will still read
- * saturated and that tells us MT_TRIM is required after all.
+ * The software reset lives in the MT_TRIM bank rather than the meter bank:
+ * drop bit 7 of MT_TRIM COMMON2 and raise it again (AOSP
+ * s2mpg1x_meter_sw_reset). Toggling METER_EN alone is not enough -- doing only
+ * that leaves the accumulators frozen with acc_count pinned at 0xfffff.
  */
 static int s2mpg1x_meter_reset(struct s2mpg13_powermeter *pm)
 {
 	int ret;
 
-	/*
-	 * The meter software reset lives in the MT_TRIM bank, not the meter
-	 * bank: drop bit 7 of MT_TRIM COMMON2 and raise it again. Toggling
-	 * METER_EN alone is NOT enough -- doing only that leaves the
-	 * accumulators frozen and acc_count pinned at 0xfffff.
-	 */
 	if (!pm->mt_trim)
 		return 0;
 
@@ -496,20 +502,38 @@ static int s2mpg13_powermeter_probe(struct platform_device *pdev)
 	 * Reset the meter BEFORE configuring it. Without this the block never
 	 * samples at all: its LPF and accumulator registers stay frozen and
 	 * even survive a reboot unchanged. The reset also clears the meter's
-	 * configuration, which is why it must come first -- MUXSELs and LPF
-	 * mode are programmed below, and resetting afterwards (or per read)
-	 * leaves the meter unconfigured and ASYNC_RD never completes.
+	 * configuration, which is why it must come first -- everything below
+	 * reprograms it, and resetting afterwards would undo that.
 	 */
 	ret = s2mpg1x_meter_reset(pm);
 	if (ret)
 		return dev_err_probe(dev, ret, "meter reset failed\n");
 
-	/* Select LPF power mode for all 12 channels (0 = power). */
+	/*
+	 * Set the internal sampling rate explicitly. Firmware does not leave a
+	 * usable one behind, and the rate sets how long a latch takes, so this
+	 * has to agree with S2MPG13_ACQUISITION_US above. 125 Hz is what AOSP
+	 * picks for this PMIC.
+	 */
+	ret = regmap_update_bits(pm->meter, S2MPG13_METER_CTRL1,
+				 S2MPG13_INT_SAMP_RATE_MASK,
+				 S2MPG13_INT_SAMP_RATE_125HZ);
+	if (ret)
+		return ret;
+
+	/* Power mode (0) for all 12 channels, on both the ACC and LPF paths. */
+	ret = regmap_write(pm->meter, S2MPG13_METER_CTRL4, 0x00);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(pm->meter, S2MPG13_METER_CTRL5,
+				 S2MPG13_MODE_HI_MASK, 0x00);
+	if (ret)
+		return ret;
 	ret = regmap_write(pm->meter, S2MPG13_METER_CTRL6, 0x00);
 	if (ret)
 		return ret;
 	ret = regmap_update_bits(pm->meter, S2MPG13_METER_CTRL7,
-				 S2MPG13_LPF_MODE_HI_MASK, 0x00);
+				 S2MPG13_MODE_HI_MASK, 0x00);
 	if (ret)
 		return ret;
 
