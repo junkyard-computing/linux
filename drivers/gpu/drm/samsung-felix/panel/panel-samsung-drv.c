@@ -28,7 +28,15 @@
 #include <drm/drm_vblank.h>
 #include <video/mipi_display.h>
 
-#define CREATE_TRACE_POINTS
+/*
+ * NOTE: do NOT define CREATE_TRACE_POINTS here. exynos_drm_drv.c already
+ * instantiates the dpu_trace tracepoints, and with CONFIG_DRM_SAMSUNG_FELIX=y
+ * both exynos-drm and exynos-panel link into vmlinux -- defining them twice is
+ * a multiple-definition link failure. (Upstream AOSP builds these as two
+ * separate .ko modules, where each getting its own copy was harmless, which is
+ * why the duplicate survived the graft. It only shows up once tracing is
+ * actually compiled in.)
+ */
 #include <trace/dpu_trace.h>
 #include "../exynos_drm_connector.h"
 #include "../exynos_drm_decon.h"
