@@ -889,7 +889,7 @@ static struct dsim_pll_features *dsim_of_get_pll_features(
 	return pll_features;
 
 read_node_fail:
-	kfree(pll_features);
+	devm_kfree(dsim->dev, pll_features);
 	return NULL;
 }
 
@@ -942,7 +942,7 @@ static struct dsim_pll_params *dsim_of_get_clock_mode(struct dsim_device *dsim)
 			goto err_put_entry;
 
 		if (dsim_of_parse_modes(entry, pll_param) < 0) {
-			kfree(pll_param);
+			devm_kfree(dsim->dev, pll_param);
 			continue;
 		}
 
