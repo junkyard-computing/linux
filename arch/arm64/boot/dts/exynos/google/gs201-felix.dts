@@ -779,6 +779,30 @@
 				regulator-boot-on;
 				regulator-always-on;
 			};
+
+			/*
+			 * S1S_VDD_CAM. Deliberately NO regulator-always-on and
+			 * NO regulator-boot-on: this is the one rail we WANT
+			 * regulator_init_complete()'s unused-regulator cleanup
+			 * to switch off ~30 s into boot.
+			 *
+			 * The bootloader leaves B1S_CTRL at 0xf8 (bits[7:6]=11,
+			 * forced on) where the neighbouring bucks sit at 0xb8,
+			 * and nothing in this tree drives a camera, so the rail
+			 * idles at ~62 mW. An AOSP device on the same silicon
+			 * reads 0.7 mW on this ODPM channel, i.e. off.
+			 *
+			 * This is the exact inverse of the ldo4s/ldo28s case
+			 * above: there the reap was the bug, here it is the
+			 * mechanism. If a camera driver ever lands it must take
+			 * this as its supply, at which point the reap stops
+			 * applying by itself.
+			 */
+			buck1s: buck1s {
+				regulator-name = "s2mpg13_buck1s_vdd_cam";
+				regulator-min-microvolt = <450000>;
+				regulator-max-microvolt = <1300000>;
+			};
 		};
 	};
 };
