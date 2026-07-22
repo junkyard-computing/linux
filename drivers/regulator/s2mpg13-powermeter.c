@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ODPM (on-device power meter) reader for the Google gs201 s2mpg13 sub-PMIC.
+ * ODPM (on-device power meter) reader for the Google gs201 PMICs: s2mpg13
+ * (sub) and s2mpg12 (main).
  *
- * The s2mpg13 METER block continuously low-pass-filters the instantaneous
- * power of up to 12 rails. Each channel's rail is selected by a MUXSEL register
- * and its 21-bit LPF sample is scaled by a per-rail resolution to milliwatts.
- * This driver reads that out and dumps it via debugfs
- * (<debugfs>/s2mpg13-powermeter/power).
+ * The METER block continuously low-pass-filters the instantaneous power of up
+ * to 12 rails. Each channel's rail is selected by a MUXSEL register and its
+ * 21-bit LPF sample is scaled by a per-rail resolution to milliwatts. This
+ * driver reads that out and dumps it via debugfs
+ * (<debugfs>/s2mpg1{2,3}-powermeter/power).
  *
- * The MUXSEL->resolution table and the fixed-point (Q30) scaling are
- * transcribed from the AOSP s2mpg13-powermeter driver.
+ * The MUXSEL->resolution tables and the fixed-point (Q30) scaling come from
+ * AOSP. The METER register block is byte-identical between the two chips, so
+ * they share everything except the rail decode (see s2mpg1x_pm_variant).
  *
- * NOTE: this only sees rails on the s2mpg13 *sub* PMIC; the main SoC rails
- * (CPU/GPU/MIF) are on the s2mpg12 main PMIC, which is not ported.
+ * The sub PMIC carries peripheral rails (display/MIPI/UFS PLL, camera, GPU,
+ * DDR); the main PMIC carries the SoC core rails -- VDD_MIF, VDD_CPUCL0/1/2,
+ * VDD_INT, VDD_TPU, VDD_SLC -- which is where idle-power questions about the
+ * CPU/memory subsystem actually get answered.
  *
  * Copyright 2021 Google LLC
  * Copyright 2026 Junkyard Computing
@@ -22,6 +26,7 @@
 #include <linux/debugfs.h>
 #include <linux/mfd/samsung/s2mpg13.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -193,10 +198,97 @@ static const char *s2mpg13_muxsel_name(u8 m)
 	return "?";
 }
 
+/*
+ * s2mpg12 (gs201 MAIN PMIC) power resolution, mW/LSB in the same Q30 encoding.
+ *
+ * Indexed by (muxsel - 1), transcribed verbatim from the table AOSP's shipped
+ * s2mpg12-powermeter.ko uses in s2mpg12_muxsel_to_power_resolution() (the .c is
+ * not vendored, so this was extracted from .rodata+0x190 of the prebuilt
+ * module). Only BUCK1M..BUCK10M (0x01-0x0a) and LDO1M..LDO28M (0x21-0x3c) are
+ * valid on this chip; everything else is 0 and reports as unmetered.
+ */
+static const u32 s2mpg12_power_res[0x3c] = {
+	/* 0x01..0x0a: BUCK1M..BUCK10M */
+	[0x01 - 1] = 6555200,	/* S1M_VDD_MIF */
+	[0x02 - 1] = 19665600,	/* S2M_VDD_CPUCL2 */
+	[0x03 - 1] = 13110400,	/* S3M_VDD_CPUCL1 */
+	[0x04 - 1] = 6555200,	/* S4M_VDD_CPUCL0 */
+	[0x05 - 1] = 19665600,	/* S5M_VDD_INT */
+	[0x06 - 1] = 6555200,
+	[0x07 - 1] = 6555200,
+	[0x08 - 1] = 6555200,
+	[0x09 - 1] = 6555200,
+	[0x0a - 1] = 19665600,	/* S10M_VDD_TPU */
+	/* 0x21..0x3c: LDO1M..LDO28M */
+	[0x21 - 1] = 983280,   [0x22 - 1] = 5244160, [0x23 - 1] = 983280,
+	[0x24 - 1] = 983280,   [0x25 - 1] = 491639,  [0x26 - 1] = 1474919,
+	[0x27 - 1] = 1311039,  [0x28 - 1] = 983280,  [0x29 - 1] = 983280,
+	[0x2a - 1] = 983280,   [0x2b - 1] = 1311039, [0x2c - 1] = 1311039,
+	[0x2d - 1] = 1311039,  [0x2e - 1] = 983280,  [0x2f - 1] = 1311039,
+	[0x30 - 1] = 2622079,  [0x31 - 1] = 1311039, [0x32 - 1] = 983280,
+	[0x33 - 1] = 1311039,  [0x34 - 1] = 983280,  [0x35 - 1] = 1966560,
+	[0x36 - 1] = 1311039,  [0x37 - 1] = 983280,  [0x38 - 1] = 3933120,
+	[0x39 - 1] = 983280,   [0x3a - 1] = 1966560, [0x3b - 1] = 983280,
+	[0x3c - 1] = 1474919,
+};
+
+static u32 s2mpg12_muxsel_power_resolution(u8 m)
+{
+	if (m < 1 || m > ARRAY_SIZE(s2mpg12_power_res))
+		return 0;
+	return s2mpg12_power_res[m - 1];
+}
+
+static const char *s2mpg12_muxsel_name(u8 m)
+{
+	static char buf[8];
+
+	if (m == MUXSEL_NONE)
+		return "none";
+	if (m >= MUXSEL_BUCK1 && m <= MUXSEL_BUCK10) {
+		scnprintf(buf, sizeof(buf), "buck%um", m - MUXSEL_BUCK1 + 1);
+		return buf;
+	}
+	if (m >= MUXSEL_LDO1 && m <= MUXSEL_LDO28) {
+		scnprintf(buf, sizeof(buf), "ldo%um", m - MUXSEL_LDO1 + 1);
+		return buf;
+	}
+	if (m >= MUXSEL_VSEN1 && m <= MUXSEL_VSEN3) {
+		static const char * const vsen[] = { "vsen1", "vsen2", "vsen3" };
+
+		return vsen[m - MUXSEL_VSEN1];
+	}
+	return "?";
+}
+
+/*
+ * Per-chip differences. The METER register block itself is byte-identical
+ * between s2mpg12 and s2mpg13 (CTRL1 0x08, MUXSEL0 0x11, LPF_DATA_CH0 0xae),
+ * so only the rail decode varies.
+ */
+struct s2mpg1x_pm_variant {
+	const char *name;
+	u32 (*power_resolution)(u8 muxsel);
+	const char *(*muxsel_name)(u8 muxsel);
+};
+
+static const struct s2mpg1x_pm_variant s2mpg13_pm_variant = {
+	.name = "s2mpg13-powermeter",
+	.power_resolution = s2mpg13_muxsel_power_resolution,
+	.muxsel_name = s2mpg13_muxsel_name,
+};
+
+static const struct s2mpg1x_pm_variant s2mpg12_pm_variant = {
+	.name = "s2mpg12-powermeter",
+	.power_resolution = s2mpg12_muxsel_power_resolution,
+	.muxsel_name = s2mpg12_muxsel_name,
+};
+
 struct s2mpg13_powermeter {
 	struct device *dev;
 	struct regmap *meter;
 	struct dentry *debugfs;
+	const struct s2mpg1x_pm_variant *variant;
 	u8 muxsel[S2MPG13_METER_CHANNELS];
 };
 
@@ -219,12 +311,12 @@ static int s2mpg13_power_show(struct seq_file *s, void *unused)
 
 		/* 21-bit LPF sample. */
 		raw = buf[0] | (buf[1] << 8) | ((buf[2] & 0x1f) << 16);
-		res = s2mpg13_muxsel_power_resolution(pm->muxsel[i]);
+		res = pm->variant->power_resolution(pm->muxsel[i]);
 		/* mW(Q30) = raw * res; ->uW: *1000; ->int: >>30. */
 		uw = res ? (((u64)raw * res * 1000) >> 30) : 0;
 
 		seq_printf(s, "CH%-2d %-9s raw=0x%06x  %llu uW\n", i,
-			   s2mpg13_muxsel_name(pm->muxsel[i]), raw, uw);
+			   pm->variant->muxsel_name(pm->muxsel[i]), raw, uw);
 	}
 	return 0;
 }
@@ -242,6 +334,9 @@ static int s2mpg13_powermeter_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	pm->dev = dev;
+	pm->variant = of_device_get_match_data(dev);
+	if (!pm->variant)
+		return dev_err_probe(dev, -ENODEV, "no variant match data\n");
 	pm->meter = dev_get_regmap(dev->parent, "meter");
 	if (!pm->meter)
 		return dev_err_probe(dev, -ENODEV, "no 'meter' regmap on parent\n");
@@ -294,12 +389,13 @@ static int s2mpg13_powermeter_probe(struct platform_device *pdev)
 		pm->muxsel[i] = val;
 	}
 
-	pm->debugfs = debugfs_create_dir("s2mpg13-powermeter", NULL);
+	pm->debugfs = debugfs_create_dir(pm->variant->name, NULL);
 	debugfs_create_file("power", 0444, pm->debugfs, pm,
 			    &s2mpg13_power_fops);
 
 	platform_set_drvdata(pdev, pm);
-	dev_info(dev, "s2mpg13 ODPM: %d channels\n", S2MPG13_METER_CHANNELS);
+	dev_info(dev, "%s ODPM: %d channels\n", pm->variant->name,
+		 S2MPG13_METER_CHANNELS);
 	return 0;
 }
 
@@ -311,7 +407,10 @@ static void s2mpg13_powermeter_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id s2mpg13_powermeter_of_match[] = {
-	{ .compatible = "google,s2mpg13-powermeter" },
+	{ .compatible = "google,s2mpg13-powermeter",
+	  .data = &s2mpg13_pm_variant },
+	{ .compatible = "google,s2mpg12-powermeter",
+	  .data = &s2mpg12_pm_variant },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, s2mpg13_powermeter_of_match);
@@ -326,5 +425,5 @@ static struct platform_driver s2mpg13_powermeter_driver = {
 };
 module_platform_driver(s2mpg13_powermeter_driver);
 
-MODULE_DESCRIPTION("Google s2mpg13 sub-PMIC ODPM power meter");
+MODULE_DESCRIPTION("Google s2mpg12/s2mpg13 gs201 ODPM power meter");
 MODULE_LICENSE("GPL");
