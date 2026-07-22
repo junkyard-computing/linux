@@ -24,6 +24,8 @@
 
 #include <linux/bits.h>
 #include <linux/debugfs.h>
+#include <linux/delay.h>
+#include <linux/math64.h>
 #include <linux/mfd/samsung/s2mpg13.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -35,9 +37,25 @@
 
 #define S2MPG13_METER_CHANNELS		12
 #define S2MPG13_LPF_BUF			3	/* 3 bytes / 21-bit LPF sample */
+/*
+ * Accumulator path: 6 bytes of accumulated samples per channel plus a shared
+ * 3-byte sample count. This is what the meter actually keeps up to date -- the
+ * LPF_DATA registers this driver used to read are a snapshot that never
+ * refreshed, so every channel returned a byte-identical value forever (caught
+ * when S1S_VDD_CAM was switched off at the PMIC and its "power" did not move).
+ * AOSP reads the same accumulators for its ODPM energy interface.
+ */
+#define S2MPG13_ACC_BUF			6
+#define S2MPG13_ACC_COUNT_BUF		3
 
 /* METER_CTRL1. */
 #define S2MPG13_METER_EN		BIT(0)
+/* METER_CTRL2: write to latch accumulators into LPF_DATA; self-clearing. */
+#define S2MPG13_METER_ASYNC_RD		BIT(7)
+#define S2MPG13_LATCH_POLL_US		200
+#define S2MPG13_LATCH_POLLS		16
+#define S2MPG13_RESET_SETTLE_US		200
+#define S2MPG13_ACC_WINDOW_MS		200
 /* LPF mode (CTRL6 + CTRL7[3:0]): 0 = power, 1 = current, per channel. */
 #define S2MPG13_LPF_MODE_HI_MASK	0x0f
 
@@ -287,36 +305,160 @@ static const struct s2mpg1x_pm_variant s2mpg12_pm_variant = {
 struct s2mpg13_powermeter {
 	struct device *dev;
 	struct regmap *meter;
+	struct regmap *mt_trim;
 	struct dentry *debugfs;
 	const struct s2mpg1x_pm_variant *variant;
 	u8 muxsel[S2MPG13_METER_CHANNELS];
 };
 
+/*
+ * Latch a fresh sample set before reading.
+ *
+ * The LPF_DATA registers are NOT live: they are a snapshot that the meter only
+ * refreshes from its internal accumulators when ASYNC_RD is written. Without
+ * this the debugfs file happily returns a stale set forever -- every channel
+ * byte-identical read after read, which is exactly how this was found: after
+ * the regulator core switched S1S_VDD_CAM off at the PMIC (B1S_CTRL f8 -> 38),
+ * the "measured" power for that rail did not budge from 62637 uW.
+ *
+ * Writing the bit transfers the accumulator data to the readable registers and
+ * then self-clears, so poll for it to clear before reading. AOSP does the same
+ * in s2mpg1x_meter_set_async_blocking(); its acquisition time is a function of
+ * the internal sampling rate, so rather than model that, poll with a short
+ * sleep and a bounded total wait.
+ */
+/*
+ * Restart accumulation, then integrate over a fixed window.
+ *
+ * The accumulators free-run from boot and saturate: acc_count pins at 0xfffff
+ * (2^20-1) and stops, so a "mean" computed from it is an average over all of
+ * uptime and never responds to anything. Clear them first, integrate for a
+ * known window, then latch. That makes each read a fresh measurement of *now*.
+ *
+ * AOSP's full reset (s2mpg1x_meter_sw_reset) toggles a bit in the MT_TRIM bank
+ * and then re-asserts METER_EN. We do not expose an MT_TRIM regmap, so try just
+ * the METER_EN half; if the accumulators do not clear, acc_count will still read
+ * saturated and that tells us MT_TRIM is required after all.
+ */
+static int s2mpg1x_meter_reset(struct s2mpg13_powermeter *pm)
+{
+	int ret;
+
+	/*
+	 * The meter software reset lives in the MT_TRIM bank, not the meter
+	 * bank: drop bit 7 of MT_TRIM COMMON2 and raise it again. Toggling
+	 * METER_EN alone is NOT enough -- doing only that leaves the
+	 * accumulators frozen and acc_count pinned at 0xfffff.
+	 */
+	if (!pm->mt_trim)
+		return 0;
+
+	ret = regmap_update_bits(pm->mt_trim, S2MPG13_MT_TRIM_COMMON2,
+				 S2MPG13_MT_TRIM_METER_SW_RST, 0);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(pm->mt_trim, S2MPG13_MT_TRIM_COMMON2,
+				 S2MPG13_MT_TRIM_METER_SW_RST,
+				 S2MPG13_MT_TRIM_METER_SW_RST);
+	if (ret)
+		return ret;
+
+	usleep_range(S2MPG13_RESET_SETTLE_US, S2MPG13_RESET_SETTLE_US + 100);
+	return 0;
+}
+
+static int s2mpg1x_meter_latch(struct s2mpg13_powermeter *pm)
+{
+	unsigned int val;
+	int i, ret;
+
+	ret = regmap_update_bits(pm->meter, S2MPG13_METER_CTRL2,
+				 S2MPG13_METER_ASYNC_RD,
+				 S2MPG13_METER_ASYNC_RD);
+	if (ret)
+		return ret;
+
+	/* Typically complete well inside the first poll. */
+	for (i = 0; i < S2MPG13_LATCH_POLLS; i++) {
+		ret = regmap_read(pm->meter, S2MPG13_METER_CTRL2, &val);
+		if (ret)
+			return ret;
+		if (!(val & S2MPG13_METER_ASYNC_RD))
+			return 0;
+		usleep_range(S2MPG13_LATCH_POLL_US,
+			     S2MPG13_LATCH_POLL_US + 100);
+	}
+
+	return -ETIMEDOUT;
+}
+
 static int s2mpg13_power_show(struct seq_file *s, void *unused)
 {
 	struct s2mpg13_powermeter *pm = s->private;
+	u8 cnt_buf[S2MPG13_ACC_COUNT_BUF];
+	u32 acc_count;
 	int i, ret;
 
+	/*
+	 * Do NOT reset here: the reset clears the meter's configuration, and
+	 * accumulators are meant to run continuously. Each read is a latched
+	 * snapshot of the running totals -- difference two reads to get power
+	 * over that interval, which is also how the AOSP ODPM interface is used.
+	 */
+	ret = s2mpg1x_meter_latch(pm);
+	if (ret) {
+		dev_warn_once(pm->dev,
+			      "meter latch failed (%d); readings would be stale\n",
+			      ret);
+		return ret;
+	}
+
+	/*
+	 * Sample count shared by every channel. Read it once, after the latch,
+	 * so it matches the accumulator snapshot.
+	 */
+	ret = regmap_bulk_read(pm->meter, S2MPG13_METER_ACC_COUNT_1, cnt_buf,
+			       S2MPG13_ACC_COUNT_BUF);
+	if (ret)
+		return ret;
+	acc_count = cnt_buf[0] | (cnt_buf[1] << 8) | (cnt_buf[2] << 16);
+
+	seq_printf(s, "acc_count=%u\n", acc_count);
+
 	for (i = 0; i < S2MPG13_METER_CHANNELS; i++) {
-		u8 buf[S2MPG13_LPF_BUF];
-		u32 raw, res;
-		u64 uw;
+		u8 buf[S2MPG13_ACC_BUF];
+		u64 acc = 0;
+		u32 res;
+		u64 uw = 0;
+		int b;
 
 		ret = regmap_bulk_read(pm->meter,
-				       S2MPG13_METER_LPF_DATA_CH0_1 +
-					       S2MPG13_LPF_BUF * i,
-				       buf, S2MPG13_LPF_BUF);
+				       S2MPG13_METER_ACC_DATA_CH0_1 +
+					       S2MPG13_ACC_BUF * i,
+				       buf, S2MPG13_ACC_BUF);
 		if (ret)
 			return ret;
 
-		/* 21-bit LPF sample. */
-		raw = buf[0] | (buf[1] << 8) | ((buf[2] & 0x1f) << 16);
-		res = pm->variant->power_resolution(pm->muxsel[i]);
-		/* mW(Q30) = raw * res; ->uW: *1000; ->int: >>30. */
-		uw = res ? (((u64)raw * res * 1000) >> 30) : 0;
+		for (b = 0; b < S2MPG13_ACC_BUF; b++)
+			acc |= (u64)buf[b] << (8 * b);
 
-		seq_printf(s, "CH%-2d %-9s raw=0x%06x  %llu uW\n", i,
-			   pm->variant->muxsel_name(pm->muxsel[i]), raw, uw);
+		res = pm->variant->power_resolution(pm->muxsel[i]);
+		/*
+		 * Mean power over the accumulation window:
+		 *   mW(Q30) = acc / acc_count * resolution
+		 * Scale by 1000 before dividing to keep sub-uW precision. The
+		 * per-sample mean is ~21 bits, so (mean * 1000) * res stays well
+		 * inside u64; acc alone would not.
+		 */
+		if (res && acc_count) {
+			u64 mean_m = div64_u64(acc * 1000, acc_count);
+
+			uw = (mean_m * res) >> 30;
+		}
+
+		seq_printf(s, "CH%-2d %-9s acc=0x%012llx  %llu uW\n", i,
+			   pm->variant->muxsel_name(pm->muxsel[i]), acc, uw);
 	}
 	return 0;
 }
@@ -340,6 +482,27 @@ static int s2mpg13_powermeter_probe(struct platform_device *pdev)
 	pm->meter = dev_get_regmap(dev->parent, "meter");
 	if (!pm->meter)
 		return dev_err_probe(dev, -ENODEV, "no 'meter' regmap on parent\n");
+	/*
+	 * Optional so a variant without it still probes, but without the MT_TRIM
+	 * bank the meter cannot be reset and every reading is a frozen snapshot,
+	 * so say so loudly rather than reporting fiction.
+	 */
+	pm->mt_trim = dev_get_regmap(dev->parent, "mt_trim");
+	if (!pm->mt_trim)
+		dev_warn(dev,
+			 "no 'mt_trim' regmap: meter cannot be reset, readings will be stale\n");
+
+	/*
+	 * Reset the meter BEFORE configuring it. Without this the block never
+	 * samples at all: its LPF and accumulator registers stay frozen and
+	 * even survive a reboot unchanged. The reset also clears the meter's
+	 * configuration, which is why it must come first -- MUXSELs and LPF
+	 * mode are programmed below, and resetting afterwards (or per read)
+	 * leaves the meter unconfigured and ASYNC_RD never completes.
+	 */
+	ret = s2mpg1x_meter_reset(pm);
+	if (ret)
+		return dev_err_probe(dev, ret, "meter reset failed\n");
 
 	/* Select LPF power mode for all 12 channels (0 = power). */
 	ret = regmap_write(pm->meter, S2MPG13_METER_CTRL6, 0x00);

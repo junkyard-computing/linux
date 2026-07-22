@@ -17,6 +17,13 @@
 #ifndef __LINUX_MFD_S2MPG13_H
 #define __LINUX_MFD_S2MPG13_H
 
+/*
+ * Meter trim bank (0x0e). Bit 7 of COMMON2 is the meter software reset; the
+ * power meter does not sample until it is toggled (AOSP s2mpg1x_meter_sw_reset).
+ */
+#define S2MPG13_MT_TRIM_COMMON2		0x34
+#define S2MPG13_MT_TRIM_METER_SW_RST	BIT(7)
+
 /* Common registers (bank 0x000) */
 enum s2mpg13_common_reg {
 	S2MPG13_COMMON_VGPIO0,
@@ -125,6 +132,13 @@ enum s2mpg13_meter_reg {
 	S2MPG13_METER_NTC_OT_WARN0 = 0x3d,
 	S2MPG13_METER_NTC_OT_FAULT0 = 0x45,
 	S2MPG13_METER_NTC_UT_WARN0 = 0x4d,
+	/*
+	 * Accumulated power/current, 6 bytes/channel, CH0..11 (0x63..0xaa),
+	 * with the shared sample count below. Mean power over the window is
+	 * acc / acc_count * resolution. Unlike LPF_DATA these are what the
+	 * meter is supposed to keep updating; see s2mpg13-powermeter.c.
+	 */
+	S2MPG13_METER_ACC_DATA_CH0_1 = 0x63,
 	S2MPG13_METER_ACC_COUNT_1 = 0xab,
 	S2MPG13_METER_ACC_COUNT_2 = 0xac,
 	S2MPG13_METER_ACC_COUNT_3 = 0xad,
