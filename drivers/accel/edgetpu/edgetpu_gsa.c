@@ -453,20 +453,69 @@ EXPORT_SYMBOL_GPL(edgetpu_bus_qos_put);
 
 static struct clk *edgetpu_dvfs_clk;
 static struct dentry *edgetpu_dvfs_dir;
+/*
+ * Last rate we successfully asked for, 0 until the first write.
+ *
+ * We cannot use clk_get_rate() to report the state of this clock. The common
+ * clock framework caches core->rate and refreshes it from the provider's
+ * ->recalc_rate, which for the ACPM clocks is acpm_clk_recalc_rate() ->
+ * ACPM dvfs.get_rate(). For the "tpu" domain that query does not reflect a
+ * completed set: after raising the rate to NOM the HW is measurably at NOM
+ * (0.240 vs 0.662 ms per mailbox op) while ACPM keeps reporting the boot floor,
+ * so the cache stays at 226 MHz forever.
+ *
+ * That single stale value produced two bugs, one of them dangerous:
+ *
+ *   - the knob read back 226000000 no matter the real rate; and
+ *   - clk_set_rate() bails out early when the requested rate equals the cached
+ *     rate ("nothing to do"), so `echo 226000000` was a SILENT NO-OP whenever
+ *     the part was actually at NOM. Anyone lowering the clock that way was left
+ *     running at NOM — exactly the state the boot-time UVLO fix exists to avoid.
+ *
+ * So track what we asked for and report that, and force the set past the stale
+ * cache. Fixing this here rather than in clk-acpm.c keeps the workaround next to
+ * the evidence and out of a clock driver shared with every other ACPM consumer.
+ */
+static unsigned long edgetpu_dvfs_req_hz;
 
 static int edgetpu_dvfs_get(void *data, u64 *val)
 {
 	if (!edgetpu_dvfs_clk)
 		return -ENODEV;
-	*val = clk_get_rate(edgetpu_dvfs_clk);
+	/* Report what we last asked for; fall back to the CCF cache before any
+	 * write, when it is still the rate the Rust driver set at bring-up.
+	 */
+	*val = edgetpu_dvfs_req_hz ?: clk_get_rate(edgetpu_dvfs_clk);
 	return 0;
 }
 
 static int edgetpu_dvfs_set(void *data, u64 val)
 {
+	unsigned long rate = (unsigned long)val;
+	int ret;
+
 	if (!edgetpu_dvfs_clk)
 		return -ENODEV;
-	return clk_set_rate(edgetpu_dvfs_clk, (unsigned long)val);
+
+	/*
+	 * Defeat the early-bail described above: if the (possibly stale) cached
+	 * rate already equals the target, nudge to a neighbouring rate first so
+	 * the provider's ->set_rate actually runs. ACPM rounds to the nearest
+	 * supported DVFS point, so +1 Hz lands on a real neighbour rather than
+	 * an illegal rate, and the second call then pins the target.
+	 */
+	if (rate == clk_get_rate(edgetpu_dvfs_clk)) {
+		ret = clk_set_rate(edgetpu_dvfs_clk, rate + 1);
+		if (ret)
+			return ret;
+	}
+
+	ret = clk_set_rate(edgetpu_dvfs_clk, rate);
+	if (ret)
+		return ret;
+
+	edgetpu_dvfs_req_hz = rate;
+	return 0;
 }
 DEFINE_DEBUGFS_ATTRIBUTE(edgetpu_dvfs_fops, edgetpu_dvfs_get, edgetpu_dvfs_set,
 			 "%llu\n");
