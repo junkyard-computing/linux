@@ -24,6 +24,15 @@
 #ifndef __LINUX_MFD_S2MPG12_H
 #define __LINUX_MFD_S2MPG12_H
 
+/*
+ * Meter trim bank (0x0e). Bit 7 of COMMON is the meter software reset; the
+ * power meter does not sample until it is toggled (AOSP s2mpg1x_meter_sw_reset).
+ * The main PMIC puts it at COMMON (0x29), where the sub-PMIC uses COMMON2
+ * (0x34) -- different offsets, same bit.
+ */
+#define S2MPG12_MT_TRIM_COMMON		0x29
+#define S2MPG12_MT_TRIM_METER_SW_RST	BIT(7)
+
 /* Common registers (bank 0x000) */
 enum s2mpg12_common_reg {
 	S2MPG12_COMMON_VGPIO0,
