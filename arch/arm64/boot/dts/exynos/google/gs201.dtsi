@@ -1649,8 +1649,18 @@
 		interrupts = <GIC_SPI 453 IRQ_TYPE_LEVEL_HIGH>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&ufs_rst_n &ufs_refclk_out>;
-		clocks = <&ufs_aclk>, <&ufs_unipro>, <&ufs_aclk>,
-			 <&ufs_aclk>, <&ufs_aclk>,   <&ufs_aclk>;
+		/*
+		 * sclk_unipro_main is wired to the real cmu_hsi2 UNIPRO gate
+		 * (not the ufs_unipro fixed-clock stub) so ufshcd clock-gating
+		 * disables it on idle — gating the HSI2_UFS distribution clock
+		 * up through cmu_top to drop the L2S_PLL_MIPI_UFS rail
+		 * (docs/gs201-cmu-clock-scoping.md, Phase 1b-ii). Same 177.664
+		 * MHz rate as the stub, so UFS timing (mclk_rate) is unchanged.
+		 * The aclk-family clocks stay on the fixed-clock stub for now.
+		 */
+		clocks = <&ufs_aclk>,
+			 <&cmu_hsi2 CLK_GOUT_HSI2_UFS_EMBD_I_CLK_UNIPRO>,
+			 <&ufs_aclk>, <&ufs_aclk>, <&ufs_aclk>, <&ufs_aclk>;
 		clock-names = "core_clk", "sclk_unipro_main", "fmp",
 			      "aclk", "pclk", "sysreg";
 		freq-table-hz = <0 0>, <0 0>, <0 0>, <0 0>, <0 0>, <0 0>;
