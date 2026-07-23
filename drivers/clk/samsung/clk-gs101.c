@@ -63,6 +63,23 @@
 #define PLL_CON2_PLL_SPARE				0x0208
 #define PLL_CON3_PLL_SPARE				0x020c
 #define PLL_CON4_PLL_SPARE				0x0210
+/*
+ * gs201 CMU_TOP shifts the shared/spare PLL block: LOCKTIME regs are gs101 +
+ * 0x4, CON regs are gs101 + 0x40 (verified against AOSP cal-if cmucal-sfr.c for
+ * all five PLLs). Reading the gs101 offsets on gs201 lands on the wrong
+ * register and mis-decodes the rate (shared0 read 841 MHz via 0x10c instead of
+ * 2131.968 MHz via 0x14c). Same PLL bit layout, only the offset moves.
+ */
+#define GS201_PLL_LOCKTIME_PLL_SHARED0			0x0004
+#define GS201_PLL_CON3_PLL_SHARED0			0x014c
+#define GS201_PLL_LOCKTIME_PLL_SHARED1			0x0008
+#define GS201_PLL_CON3_PLL_SHARED1			0x018c
+#define GS201_PLL_LOCKTIME_PLL_SHARED2			0x000c
+#define GS201_PLL_CON3_PLL_SHARED2			0x01cc
+#define GS201_PLL_LOCKTIME_PLL_SHARED3			0x0010
+#define GS201_PLL_CON3_PLL_SHARED3			0x020c
+#define GS201_PLL_LOCKTIME_PLL_SPARE			0x0014
+#define GS201_PLL_CON3_PLL_SPARE			0x024c
 #define CMU_CMU_TOP_CONTROLLER_OPTION			0x0800
 #define CLKOUT_CON_BLK_CMU_CMU_TOP_CLKOUT0		0x0810
 #define CMU_HCHGEN_CLKMUX_CMU_BOOST			0x0840
@@ -653,6 +670,25 @@ static const struct samsung_pll_clock top_pll_clks[] __initconst = {
 	    NULL),
 	PLL(pll_0518x, CLK_FOUT_SPARE_PLL, "fout_spare_pll", "oscclk",
 	    PLL_LOCKTIME_PLL_SPARE, PLL_CON3_PLL_SPARE,
+	    NULL),
+};
+
+/* Same PLLs, gs201 register offsets (see GS201_PLL_* above). */
+static const struct samsung_pll_clock top_pll_clks_gs201[] __initconst = {
+	PLL(pll_0517x, CLK_FOUT_SHARED0_PLL, "fout_shared0_pll", "oscclk",
+	    GS201_PLL_LOCKTIME_PLL_SHARED0, GS201_PLL_CON3_PLL_SHARED0,
+	    NULL),
+	PLL(pll_0517x, CLK_FOUT_SHARED1_PLL, "fout_shared1_pll", "oscclk",
+	    GS201_PLL_LOCKTIME_PLL_SHARED1, GS201_PLL_CON3_PLL_SHARED1,
+	    NULL),
+	PLL(pll_0518x, CLK_FOUT_SHARED2_PLL, "fout_shared2_pll", "oscclk",
+	    GS201_PLL_LOCKTIME_PLL_SHARED2, GS201_PLL_CON3_PLL_SHARED2,
+	    NULL),
+	PLL(pll_0518x, CLK_FOUT_SHARED3_PLL, "fout_shared3_pll", "oscclk",
+	    GS201_PLL_LOCKTIME_PLL_SHARED3, GS201_PLL_CON3_PLL_SHARED3,
+	    NULL),
+	PLL(pll_0518x, CLK_FOUT_SPARE_PLL, "fout_spare_pll", "oscclk",
+	    GS201_PLL_LOCKTIME_PLL_SPARE, GS201_PLL_CON3_PLL_SPARE,
 	    NULL),
 };
 
@@ -1499,8 +1535,8 @@ static const unsigned int gs201_top_skip_ids[] __initconst = {
 };
 
 static const struct samsung_cmu_info top_cmu_info_gs201 __initconst = {
-	.pll_clks		= top_pll_clks,
-	.nr_pll_clks		= ARRAY_SIZE(top_pll_clks),
+	.pll_clks		= top_pll_clks_gs201,
+	.nr_pll_clks		= ARRAY_SIZE(top_pll_clks_gs201),
 	.mux_clks		= top_mux_clks,
 	.nr_mux_clks		= ARRAY_SIZE(top_mux_clks),
 	.div_clks		= top_div_clks,
