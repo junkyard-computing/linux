@@ -88,6 +88,14 @@
  * own tables are left untouched (this file also serves real gs101 hardware).
  */
 #define GS201_CLK_CON_MUX_MUX_CLKCMU_HSI2_UFS_EMBD	0x10a8
+/*
+ * gs201 renames the cmu_top DISP distribution clock to DPU_NOC and shifts it:
+ * mux 0x1050->0x1054 (+0x4), div 0x1848->0x1850 (+0x8) (per cal-if cmucal-sfr.c).
+ * The gs101 CLK_*_DISP_BUS offsets read unrelated gs201 registers, so the gs201
+ * variant tables must use these to decode the real DPU clock rate.
+ */
+#define GS201_CLK_CON_MUX_MUX_CLKCMU_DISP_BUS		0x1054
+#define GS201_CLK_CON_DIV_CLKCMU_DISP_BUS		0x1850
 #define GS201_CLK_CON_DIV_PLL_SHARED0_DIV2		0x1928
 #define GS201_CLK_CON_DIV_PLL_SHARED0_DIV3		0x192c
 #define GS201_CLK_CON_DIV_PLL_SHARED0_DIV4		0x1930
@@ -1604,7 +1612,7 @@ static const struct samsung_mux_clock top_mux_clks_gs201[] __initconst = {
 	MUX(CLK_MOUT_CMU_CSIS_BUS, "mout_cmu_csis_bus", mout_cmu_csis_bus_p,
 	    CLK_CON_MUX_MUX_CLKCMU_CSIS_BUS, 0, 3),
 	MUX(CLK_MOUT_CMU_DISP_BUS, "mout_cmu_disp_bus", mout_cmu_disp_bus_p,
-	    CLK_CON_MUX_MUX_CLKCMU_DISP_BUS, 0, 3),
+	    GS201_CLK_CON_MUX_MUX_CLKCMU_DISP_BUS, 0, 3),
 	MUX(CLK_MOUT_CMU_DNS_BUS, "mout_cmu_dns_bus", mout_cmu_dns_bus_p,
 	    CLK_CON_MUX_MUX_CLKCMU_DNS_BUS, 0, 3),
 	MUX(CLK_MOUT_CMU_DPU_BUS, "mout_cmu_dpu_bus", mout_cmu_dpu_p,
@@ -1746,7 +1754,7 @@ static const struct samsung_div_clock top_div_clks_gs201[] __initconst = {
 	DIV(CLK_DOUT_CMU_CSIS_BUS, "dout_cmu_csis_bus", "gout_cmu_csis_bus",
 	    CLK_CON_DIV_CLKCMU_CSIS_BUS, 0, 4),
 	DIV(CLK_DOUT_CMU_DISP_BUS, "dout_cmu_disp_bus", "gout_cmu_disp_bus",
-	    CLK_CON_DIV_CLKCMU_DISP_BUS, 0, 4),
+	    GS201_CLK_CON_DIV_CLKCMU_DISP_BUS, 0, 4),
 	DIV(CLK_DOUT_CMU_DNS_BUS, "dout_cmu_dns_bus", "gout_cmu_dns_bus",
 	    CLK_CON_DIV_CLKCMU_DNS_BUS, 0, 4),
 	DIV(CLK_DOUT_CMU_DPU_BUS, "dout_cmu_dpu_bus", "gout_cmu_dpu_bus",
