@@ -388,18 +388,17 @@
 		clocks = <&oscclk>;
 		clock-names = "oscclk";
 		/*
-		 * Disabled. Mainline clk-gs101.c advertises a
-		 * `google,gs201-cmu-top` compat but reuses the gs101 register
-		 * map. Empirically (2026-05-03 boot test) that map has at
-		 * least one divider register at an offset gs201 doesn't
-		 * implement: probe panics with `Asynchronous SError Interrupt`
-		 * inside `clk_divider_recalc_rate` shortly after a benign
-		 * "Unable to get CMU sysreg" warning. Re-enabling requires
-		 * either a gs201-specific divider/mux table in clk-gs101.c
-		 * (cross-referenced against AOSP cal-if cmucal-sfr.c offsets)
-		 * or a brand new clk-gs201.c sibling driver.
+		 * The 2026-05-03 SError (`clk_divider_recalc_rate` async-abort)
+		 * was the SHARED0_DIV4+ / shared1-3 register holes; those are
+		 * now in gs201_top_skip_ids (clk-gs101.c), so probe reads only
+		 * dividers gs201 implements. Re-enabled to provide the real
+		 * HSI2_UFS / DISP distribution clocks (idle-power work): with
+		 * cmu_top disabled those clocks never gate, holding the
+		 * L2S_PLL_MIPI_UFS and VDD_INT rails up vs the AOSP oracle
+		 * (docs/gs201-cmu-clock-scoping.md). Consumers still use the
+		 * fixed-clock stubs until wired over per-block.
 		 */
-		status = "disabled";
+		status = "okay";
 	};
 
 	/*
