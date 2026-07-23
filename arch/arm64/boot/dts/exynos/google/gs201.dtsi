@@ -1568,6 +1568,43 @@
 	};
 
 	/*
+	 * CMU_HSI2 register-access ("bus") clock. hsi2_cmu_info.clk_name is
+	 * "bus", used only by exynos_arm64_enable_bus_clk to keep the block's
+	 * registers reachable during probe. The UFS-relevant clocks (the
+	 * ufs_embd_user / bus_user muxes) resolve their real parents —
+	 * dout_cmu_hsi2_ufs_embd (177.664 MHz) and dout_cmu_hsi2_bus — by
+	 * global clock-name from cmu_top, so they are NOT DT inputs here. Rate
+	 * mirrors the AOSP HSI2 bus (~400 MHz); only "enabled" matters for
+	 * register access. Same stub pattern as cmu_hsi0 / cmu_peric0.
+	 */
+	hsi2_bus_clk: hsi2-bus-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <400000000>;
+		clock-output-names = "hsi2_bus";
+	};
+
+	/*
+	 * CMU_HSI2 — supplies the UFS embedded-storage gate clocks. Enabled
+	 * (Phase 1b) now that cmu_top provides the real dout_cmu_hsi2_ufs_embd
+	 * distribution clock: this is the intermediary that lets the UFS block's
+	 * clocks gate up to cmu_top's HSI2_UFS gate on idle (the L2S_PLL_MIPI_UFS
+	 * idle-power work — docs/gs201-cmu-clock-scoping.md). Driver shares
+	 * hsi2_cmu_info with the gs101 variant; gs201 HSI2 register map matches
+	 * per AOSP cal-if. The UFS node still consumes its fixed-clock stubs
+	 * until wired over to this provider's gates in a later step.
+	 */
+	cmu_hsi2: clock-controller@14400000 {
+		compatible = "google,gs201-cmu-hsi2";
+		reg = <0x0 0x14400000 0x10000>;
+		#clock-cells = <1>;
+		clocks = <&oscclk>, <&hsi2_bus_clk>;
+		clock-names = "oscclk", "bus";
+		samsung,sysreg = <&sysreg_hsi2>;
+		status = "okay";
+	};
+
+	/*
 	 * UFS device VCC enable. The KIOXIA THGJFGT1E45BAIPB's main power
 	 * rail is gated by gpp0-1 on felix; the bootloader drives it high to
 	 * talk to the device, then drops it during shutdown ("[I] [UFS]
