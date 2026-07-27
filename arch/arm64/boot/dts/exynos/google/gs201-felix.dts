@@ -345,7 +345,16 @@
 	dr_mode = "otg";
 	usb-role-switch;
 	role-switch-default-mode = "host";
-	maximum-speed = "high-speed";
+	/*
+	 * Was capped to "high-speed" during Phase-B host-mode bring-up; that
+	 * leftover cap disables SuperSpeed entirely, so a USB3 dongle could only
+	 * ever enumerate at 480Mbps -- and worse, it sees SS-capable pins but the
+	 * host never completes SS training, so it can wedge instead of cleanly
+	 * falling back to HS. gs201's SS PHY + the auto-SS path work (see the
+	 * gen2-v4 PMA graft / OTG_ILIM=1500mA); advertise SSP like gs101 and let
+	 * it negotiate down (RTL8153 lands at 5Gbps).
+	 */
+	maximum-speed = "super-speed-plus";
 	snps,quirk-frame-length-adjustment = <0x20>;
 	snps,parkmode-disable-ss-quirk;
 	/*
