@@ -433,12 +433,26 @@ static int charger_set_mode(struct max77759_charger *chg,
 	if (chg->mode == mode)
 		return 0;
 
+	/*
+	 * BUCK (sink/charge) and OTG_BOOST (source VBUS) are mutually exclusive,
+	 * and the max77759 will not switch directly between two active modes --
+	 * it must pass through OFF. This transition happens on the bench every
+	 * time PD charge-through appears or disappears while a dongle is attached
+	 * (sink<->source). Refusing it (the old -EINVAL) left the port
+	 * half-configured on PD plug/unplug and wedged the charger; sequence
+	 * through OFF instead so the switch actually completes.
+	 */
 	if ((mode == MAX77759_CHGR_MODE_CHG_BUCK_ON ||
 	     mode == MAX77759_CHGR_MODE_OTG_BOOST_ON) &&
 	    chg->mode != MAX77759_CHGR_MODE_OFF) {
-		dev_err(chg->dev, "Invalid mode transition from %d to %d\n",
-			chg->mode, mode);
-		return -EINVAL;
+		ret = regmap_update_bits(chg->regmap,
+					 MAX77759_CHGR_REG_CHG_CNFG_00,
+					 MAX77759_CHGR_REG_CHG_CNFG_00_MODE,
+					 MAX77759_CHGR_MODE_OFF);
+		if (ret)
+			return ret;
+
+		chg->mode = MAX77759_CHGR_MODE_OFF;
 	}
 
 	ret = regmap_update_bits(chg->regmap, MAX77759_CHGR_REG_CHG_CNFG_00,
