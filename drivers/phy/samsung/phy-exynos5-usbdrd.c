@@ -3001,7 +3001,7 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 		 * (Confirmed: static port=1 made a reverse-plugged RTL8153
 		 * enumerate at SS 5Gbps; this generalises it to both flips.)
 		 */
-		.used_phy_port		= (phy_drd->orientation == TYPEC_ORIENTATION_REVERSE) ? 1 : 0,
+		.used_phy_port		= (phy_drd->orientation == TYPEC_ORIENTATION_NORMAL) ? 0 : 1,
 		.alt_ref_clk		= false,
 		.hs_rewa		= 0,
 		.dual_phy		= false,
@@ -3376,9 +3376,17 @@ static const struct exynos5_usbdrd_phy_drvdata gs201_aosp_usbd31rd_phy = {
 	.phy_cfg			= phy_cfg_gs201_aosp,
 	.phy_tunes			= NULL,
 	.phy_ops			= &gs101_usbdrd_phy_ops,
-	/* Re-run the AOSP-graft PHY/PMA init on live orientation so the SS lane
-	 * mux (used_phy_port) tracks the actual CC pair the dongle is on. */
-	.orien_reinit			= exynos5_usbdrd_gs201_aosp_utmi_init,
+	/*
+	 * On live orientation, re-mux the SS lanes onto the CC pair the dongle
+	 * is actually on. Point at the SURGICAL lane-mux function (writes only
+	 * CMN_REG00B8 + the LN1/LN3 TX-RXD overrides -- byte-identical to the
+	 * AOSP CAL's phy_exynos_usbdp_g2_v4_pma_lane_mux_sel, same 0x02e0 reg),
+	 * NOT the full gs201_aosp_utmi_init: re-running the whole PMA/UTMI enable
+	 * on a live PHY kills the active USB2/HS path (measured -- dongle stopped
+	 * enumerating). The lane mux is the only port-dependent config; the PLL
+	 * is shared, so flipping just the mux is sufficient and leaves USB2 alone.
+	 */
+	.orien_reinit			= exynos5_usbdrd_usbdp_g2_v4_pma_lane_mux_sel,
 	.pmu_offset_usbdrd0_phy		= GS101_PHY_CTRL_USB20,
 	.pmu_offset_usbdrd0_phy_ss	= GS101_PHY_CTRL_USBDP,
 	.clk_names			= gs101_clk_names,
