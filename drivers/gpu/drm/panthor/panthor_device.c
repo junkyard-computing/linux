@@ -47,6 +47,21 @@ static int panthor_clk_init(struct panthor_device *ptdev)
 				     PTR_ERR(ptdev->clks.coregroup),
 				     "get 'coregroup' clock failed");
 
+	/* gs201 g3dl2 bandwidth fix (validation): the GPU OPP only scales the
+	 * "core" clock, leaving "stacks" (g3dl2 = L2/bus/memory-interface clock)
+	 * at its ~151MHz boot rate and throttling GPU memory bandwidth ~3x vs the
+	 * closed stack (which runs it at 996MHz). Pin it high to test the recovery.
+	 */
+	if (ptdev->clks.stacks) {
+		int _r = clk_prepare_enable(ptdev->clks.stacks);
+
+		if (!_r) {
+			clk_set_rate(ptdev->clks.stacks, 996000000);
+			drm_info(&ptdev->base, "g3dl2/stacks pinned: rate = %lu\n",
+				 clk_get_rate(ptdev->clks.stacks));
+		}
+	}
+
 	drm_info(&ptdev->base, "clock rate = %lu\n", clk_get_rate(ptdev->clks.core));
 	return 0;
 }
