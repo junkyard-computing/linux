@@ -2970,7 +2970,7 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 		 * TYPEC_POLARITY and re-inits). Only then does deriving it from
 		 * the live orientation mean anything.
 		 */
-		.used_phy_port		= 0,	/* CC1/normal: matches the bench cable's live orientation */
+		.used_phy_port		= 1,	/* CC2/flipped: bench dongle now measured plugging orientation=reverse (usbcap ori=reverse) -- SS was muxed onto the wrong pair with port 0. Static confirm of the lane-mux mechanism before the dynamic orien_sw_set re-mux. */
 		.alt_ref_clk		= false,
 		.hs_rewa		= 0,
 		.dual_phy		= false,
