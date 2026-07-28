@@ -500,6 +500,15 @@ struct exynos5_usbdrd_phy_drvdata {
 	const struct exynos5_usbdrd_phy_config *phy_cfg;
 	const struct exynos5_usbdrd_phy_tuning **phy_tunes;
 	const struct phy_ops *phy_ops;
+	/*
+	 * Optional per-variant hook to re-run the orientation-dependent PHY/PMA
+	 * init when the TCPC reports a live Type-C orientation. Needed on SoCs
+	 * (e.g. gs201/felix) whose SS lane mux is baked in at phy_init -- which
+	 * runs at boot, long before the orientation is known -- so a hot-plugged
+	 * dongle's SS lanes would otherwise stay muxed onto the boot-time pair.
+	 * Called from exynos5_usbdrd_orien_sw_set() with clocks enabled.
+	 */
+	void (*orien_reinit)(struct exynos5_usbdrd_phy *phy_drd);
 	const char * const *clk_names;
 	int n_clks;
 	const char * const *core_clk_names;
@@ -1942,6 +1951,18 @@ static int exynos5_usbdrd_orien_sw_set(struct typec_switch_dev *sw,
 		phy_drd->orientation = orientation;
 	}
 
+	/*
+	 * Now that a real orientation is known, re-run the variant PHY/PMA init
+	 * so the SS lane mux tracks the live CC pair. On gs201/felix the mux is
+	 * baked in at boot phy_init (orientation still NONE then), so a
+	 * hot-plugged Type-C dongle would otherwise train SS on the wrong pair
+	 * and never enumerate. Clocks are still enabled here (see above); the
+	 * hook must not take phy_mutex, so it runs outside the guard.
+	 */
+	if (phy_drd->drv_data->orien_reinit &&
+	    orientation != TYPEC_ORIENTATION_NONE)
+		phy_drd->drv_data->orien_reinit(phy_drd);
+
 	clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks, phy_drd->clks);
 
 	return 0;
@@ -2970,7 +2991,17 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 		 * TYPEC_POLARITY and re-inits). Only then does deriving it from
 		 * the live orientation mean anything.
 		 */
-		.used_phy_port		= 1,	/* CC2/flipped: bench dongle now measured plugging orientation=reverse (usbcap ori=reverse) -- SS was muxed onto the wrong pair with port 0. Static confirm of the lane-mux mechanism before the dynamic orien_sw_set re-mux. */
+			/*
+		 * Which SS differential pair to mux, derived from the LIVE Type-C
+		 * orientation: NORMAL (CC1) -> port 0, REVERSE (CC2) -> port 1.
+		 * At boot the TCPC has not reported yet (orientation == NONE ->
+		 * port 0); exynos5_usbdrd_orien_sw_set() re-runs this init via the
+		 * drvdata orien_reinit hook once the real orientation arrives, so
+		 * the SS lanes end up on the pair the dongle is actually wired to.
+		 * (Confirmed: static port=1 made a reverse-plugged RTL8153
+		 * enumerate at SS 5Gbps; this generalises it to both flips.)
+		 */
+		.used_phy_port		= (phy_drd->orientation == TYPEC_ORIENTATION_REVERSE) ? 1 : 0,
 		.alt_ref_clk		= false,
 		.hs_rewa		= 0,
 		.dual_phy		= false,
@@ -3345,6 +3376,9 @@ static const struct exynos5_usbdrd_phy_drvdata gs201_aosp_usbd31rd_phy = {
 	.phy_cfg			= phy_cfg_gs201_aosp,
 	.phy_tunes			= NULL,
 	.phy_ops			= &gs101_usbdrd_phy_ops,
+	/* Re-run the AOSP-graft PHY/PMA init on live orientation so the SS lane
+	 * mux (used_phy_port) tracks the actual CC pair the dongle is on. */
+	.orien_reinit			= exynos5_usbdrd_gs201_aosp_utmi_init,
 	.pmu_offset_usbdrd0_phy		= GS101_PHY_CTRL_USB20,
 	.pmu_offset_usbdrd0_phy_ss	= GS101_PHY_CTRL_USBDP,
 	.clk_names			= gs101_clk_names,
