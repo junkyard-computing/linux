@@ -616,7 +616,13 @@ static bool panthor_perf_block_data(struct panthor_perf_buffer_descriptor *const
 {
 	unsigned long id;
 
-	for_each_set_bit(id, desc->available_blocks, DRM_PANTHOR_PERF_BLOCK_LAST) {
+	/*
+	 * for_each_set_bit()'s last arg is an EXCLUSIVE bit count, so passing
+	 * DRM_PANTHOR_PERF_BLOCK_LAST (== _SHADER) stops before the shader block
+	 * and no FW offset is ever mapped to a shader-core block -> shader counters
+	 * always read back as zero. Scan the full range up to _MAX.
+	 */
+	for_each_set_bit(id, desc->available_blocks, DRM_PANTHOR_PERF_BLOCK_MAX) {
 		const size_t block_start = desc->blocks[id].offset;
 		const size_t block_count = desc->blocks[id].block_count;
 		const size_t block_end = desc->blocks[id].offset +
