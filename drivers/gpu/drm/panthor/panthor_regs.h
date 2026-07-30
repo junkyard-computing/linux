@@ -12,7 +12,17 @@
 #ifndef __PANTHOR_REGS_H__
 #define __PANTHOR_REGS_H__
 
+#include "panthor_fw_regs.h"
 #include "panthor_gpu_regs.h"
 #include "panthor_mmu_regs.h"
+
+/*
+ * Register-field accessors introduced by the upstream register-header
+ * consolidation that the perfcnt series depends on but which our split headers
+ * predate. Add them here rather than editing the split headers.
+ */
+#ifndef GPU_MEM_FEATURES_L2_SLICES
+#define GPU_MEM_FEATURES_L2_SLICES(x)		((((x) & GENMASK(11, 8)) >> 8) + 1)
+#endif
 
 #endif /* __PANTHOR_REGS_H__ */
