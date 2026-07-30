@@ -758,9 +758,17 @@ static size_t get_reserved_sc_blocks(struct panthor_device *ptdev)
 
 static u64 get_sc_mask(struct panthor_device *ptdev)
 {
-	const u64 sc_mask = ptdev->gpu_info.shader_present;
-
-	return BLK_MASK(hweight64(sc_mask));
+	/*
+	 * The FW lays out shader-core counter blocks at PHYSICAL core positions,
+	 * and panthor_perf_block_data() uses this mask both to identify which
+	 * positions hold a real core (test_bit) and to compact them to contiguous
+	 * user block indices. It must therefore be the real (possibly
+	 * non-contiguous) shader_present, not a compacted BLK_MASK(hweight): on
+	 * GPUs whose shader_present has gaps (e.g. gs201/Mali-G710 = 0x1110055,
+	 * cores at bits 0,2,4,6,16,20,24) a contiguous mask drops every core above
+	 * the first gap, so those shader blocks read back as zero.
+	 */
+	return ptdev->gpu_info.shader_present;
 }
 
 static int panthor_perf_setup_fw_buffer_desc(struct panthor_device *ptdev,
