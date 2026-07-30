@@ -186,7 +186,6 @@ struct panthor_device {
 	/** @devfreq: Device frequency scaling management data. */
 	struct panthor_devfreq *devfreq;
 
-<<<<<<< HEAD
 	/** @reclaim: Reclaim related stuff */
 	struct {
 		/** @reclaim.shrinker: Shrinker instance */

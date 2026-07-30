@@ -4,6 +4,7 @@
 
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_print.h>
 #include <drm/panthor_drm.h>
 #include <linux/bitops.h>
 #include <linux/circ_buf.h>
@@ -833,7 +834,7 @@ static int panthor_perf_fw_stop_sampling(struct panthor_device *ptdev)
 		return 0;
 
 	panthor_fw_update_reqs(glb_iface, req, 0, GLB_PERFCNT_ENABLE);
-	gpu_write(ptdev, CSF_DOORBELL(CSF_GLB_DOORBELL_ID), 1);
+	gpu_write(ptdev->iomem, CSF_DOORBELL(CSF_GLB_DOORBELL_ID), 1);
 	ret = panthor_fw_glb_wait_acks(ptdev, GLB_PERFCNT_ENABLE, &acked, 100);
 	if (ret)
 		drm_warn(&ptdev->base, "Could not disable performance counters");
@@ -858,7 +859,7 @@ static int panthor_perf_fw_start_sampling(struct panthor_device *ptdev)
 	WRITE_ONCE(glb_iface->input->perfcnt_extract, 0);
 
 	panthor_fw_update_reqs(glb_iface, req, GLB_PERFCNT_ENABLE, GLB_PERFCNT_ENABLE);
-	gpu_write(ptdev, CSF_DOORBELL(CSF_GLB_DOORBELL_ID), 1);
+	gpu_write(ptdev->iomem, CSF_DOORBELL(CSF_GLB_DOORBELL_ID), 1);
 	ret = panthor_fw_glb_wait_acks(ptdev, GLB_PERFCNT_ENABLE, &acked, 100);
 	if (ret)
 		drm_warn(&ptdev->base, "Could not enable performance counters");
@@ -971,7 +972,7 @@ static void panthor_perf_fw_request_sample(struct panthor_perf_sampler *sampler)
 	struct panthor_fw_global_iface *glb_iface = panthor_fw_get_glb_iface(sampler->ptdev);
 
 	panthor_fw_toggle_reqs(glb_iface, req, ack, GLB_PERFCNT_SAMPLE);
-	gpu_write(sampler->ptdev, CSF_DOORBELL(CSF_GLB_DOORBELL_ID), 1);
+	gpu_write(sampler->ptdev->iomem, CSF_DOORBELL(CSF_GLB_DOORBELL_ID), 1);
 }
 
 /**
