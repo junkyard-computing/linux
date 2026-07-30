@@ -1924,8 +1924,12 @@ static void panthor_debugfs_init(struct drm_minor *minor)
  *       - adds DRM_IOCTL_PANTHOR_BO_QUERY_INFO ioctl
  *       - adds drm_panthor_gpu_info::selected_coherency
  * - 1.8 - extends DEV_QUERY_TIMESTAMP_INFO with flags
- * - 1.9 - adds DEV_QUERY_PERF_INFO query
- *       - adds PERF_CONTROL ioctl
+ *
+ * Note: the backported perfcnt series (DEV_QUERY_PERF_INFO + PERF_CONTROL) is
+ * deliberately NOT advertised via a version bump. Upstream reserves 1.9 for
+ * DEV_QUERY_MMU_INFO, which this tree lacks; Mesa gates an MMU_INFO query on
+ * version >= 1.9, so bumping to 1.9 makes Mesa query a type we don't implement
+ * and fall back to CPU. perfcnt is feature-probed via the ioctl instead.
  */
 static const struct drm_driver panthor_drm_driver = {
 	.driver_features = DRIVER_RENDER | DRIVER_GEM | DRIVER_SYNCOBJ |
@@ -1939,7 +1943,7 @@ static const struct drm_driver panthor_drm_driver = {
 	.name = "panthor",
 	.desc = "Panthor DRM driver",
 	.major = 1,
-	.minor = 9,
+	.minor = 8,
 
 	.gem_prime_import_sg_table = panthor_gem_prime_import_sg_table,
 	.gem_prime_import = panthor_gem_prime_import,
