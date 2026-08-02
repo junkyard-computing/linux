@@ -2898,6 +2898,7 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_gs201[] = {
 static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_drd)
 {
 	struct phy_usb_instance *inst = &phy_drd->phys[0];
+	u32 reg;
 	/*
 	 * felix USB2 HS PHY tune. AOSP applies a tune (HSP_TUNE = 0x81673237,
 	 * TXVREF = 0x8 = strong HS TX drive) even though its &usb_hs_tune DT node
@@ -2984,6 +2985,35 @@ static void exynos5_usbdrd_gs201_aosp_utmi_init(struct exynos5_usbdrd_phy *phy_d
 
 	/* Power on + de-isolate the same way mainline gs201 init does. */
 	inst->phy_cfg->phy_isol(inst, false);
+
+	/*
+	 * gs201/felix combo-PHY analog power-stable handshake — REQUIRED for HS,
+	 * not just SS. On gs201 the HS/UTMI RX analog path shares calibration
+	 * bias with the SS combo (G2) PHY (see the comment in the plain
+	 * exynos5_usbdrd_gs201_utmi_init above), so the G2PHY analog/PCS/PMA
+	 * blocks must be told "power stable" even on an HS-only bring-up.
+	 *
+	 * The plain gs201 path writes these unconditionally. The AOSP CAL only
+	 * writes them from inside its ss_cap-gated branches — phy_power_en()
+	 * (G2PHY_CNTL0 UPCS_PWR_STABLE) and phy_exynos_usb_v3p1_enable()
+	 * (G2PHY_CNTL1 ANA/PCS/PMA_PWR_STABLE) — where ss_cap = (version & 0x40).
+	 * Felix's phy_version is 0x301, so 0x301 & 0x40 == 0: ss_cap is false and
+	 * the CAL SKIPS every power-stable write. This graft therefore left the
+	 * combo-PHY analog handshake unestablished, and on some boots the host
+	 * port comes up dead at EVERY speed (not even HS trains) until a reboot
+	 * re-runs phy_init — the per-boot host-init flakiness we chased. Do the
+	 * writes here, up front, exactly as the known-good plain path does, so
+	 * the handshake is always established regardless of the ss_cap gate.
+	 */
+	reg = readl(phy_drd->reg_phy + EXYNOS850_DRD_G2PHY_CNTL1);
+	reg |= G2PHY_CNTL1_ANA_PWR_EN | G2PHY_CNTL1_PCS_PWR_STABLE |
+	       G2PHY_CNTL1_PMA_PWR_STABLE;
+	writel(reg, phy_drd->reg_phy + EXYNOS850_DRD_G2PHY_CNTL1);
+
+	reg = readl(phy_drd->reg_phy + EXYNOS850_DRD_G2PHY_CNTL0);
+	reg |= G2PHY_CNTL0_UPCS_PWR_STABLE;
+	reg &= ~G2PHY_CNTL0_TEST_POWERDOWN;
+	writel(reg, phy_drd->reg_phy + EXYNOS850_DRD_G2PHY_CNTL0);
 
 	/*
 	 * gs201/felix USB2 HS "-71" FIX. The common exynos5_usbdrd_phy_init()
