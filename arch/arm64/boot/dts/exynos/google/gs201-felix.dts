@@ -609,6 +609,44 @@
 		maxim,thermistor-tgain = /bits/ 16 <0xED51>;
 		maxim,thermistor-toff = /bits/ 16 <0x1EBA>;
 		maxim,thermistor-tcurve = /bits/ 16 <0x0014>;
+
+		/*
+		 * This gauge (a MAX17201) also has no nvram to restore its
+		 * ModelGauge-m5 model, so it loses the model on every power
+		 * cycle and its learned full-capacity mis-converges (SoC then
+		 * reads garbage — e.g. 54% while the pack sits full at 4.29V).
+		 * Supply the golden characterized model so the driver reloads
+		 * it whenever the POR bit is set. The real sense resistor is
+		 * 2.5 mOhm (the driver otherwise assumes 10 mOhm); with the
+		 * right rsense the model's DesignCap (0x02e9) reads 1490 mAh.
+		 *
+		 * Values are the AOSP felix battery-data "atl" pack (batt-id 1);
+		 * the sealed pack's exact vendor can't be read, but the design
+		 * capacity is shared with the "cos" variant, so only a small SoC
+		 * curve error is possible if the cell is actually cos.
+		 */
+		shunt-resistor-micro-ohms = <2500>;
+		maxim,fg-model = /bits/ 16 <
+			0xa500 0xae30 0xb720 0xba50 0xbcb0 0xbe40 0xbfb0 0xc0b0
+			0xc280 0xc6c0 0xc970 0xce80 0xd1c0 0xd470 0xda60 0xdeb0
+			0x0080 0x0210 0x0d00 0x0f70 0x1a00 0x0d90 0x14d0 0x0a50
+			0x0970 0x07a0 0x06e0 0x05f0 0x05f0 0x07f0 0x04e0 0x04e0
+			0x0200 0x0200 0x0200 0x0200 0x0200 0x0200 0x0200 0x0200
+			0x0200 0x0200 0x0200 0x0200 0x0200 0x0200 0x0200 0x0200
+		>;
+		/*
+		 * Ordered per the driver's M5P_* layout (== AOSP fg-params order):
+		 * IAvgEmpty RelaxCFG LearnCFG Config Config2 FullSOCThr FullCapRep
+		 * DesignCap dPacc dQacc FullCapNom VEmpty QRTable00 QRTable10
+		 * QRTable20 QRTable30 RCOMP0 TempCo IChgTerm TGain TOff TCurve
+		 * MiscCfg AtRate ConvgCfg FilterCFG TaskPeriod
+		 */
+		maxim,fg-params = /bits/ 16 <
+			0xf060 0x0838 0x260e 0x4217 0x0090 0x5a05 0x02e9
+			0x02e9 0x3200 0x00ba 0x02e9 0xa55a 0x1b00 0x0b80
+			0x0480 0x0280 0x0520 0x1402 0x01d3 0xED51 0x1EBA
+			0x0014 0x3870 0x1900 0x2241 0x0624 0x2D00
+		>;
 	};
 };
 

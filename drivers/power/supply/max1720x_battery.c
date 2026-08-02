@@ -8,6 +8,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/nvmem-provider.h>
@@ -60,6 +61,49 @@
 #define MAX172XX_BATT			0xDA	/* Battery voltage */
 #define MAX172XX_ATAVCAP		0xDF
 #define MAX172XX_TCURVE			0xB9	/* Thermistor curve */
+
+/*
+ * ModelGauge m5 custom-model load registers, used only to reprogram the
+ * characterized model on a gauge with no nvmem companion (the felix base pack).
+ * These live outside the normal driver's restricted register map, so the reload
+ * uses a private permissive regmap (max1720x_m5load_regmap_cfg).
+ */
+#define MAX172XX_STATUS_POR		BIT(1)	/* Power-on reset */
+#define MAX172XX_M5_ATRATE		0x04
+#define MAX172XX_M5_REPCAP		0x05
+#define MAX172XX_M5_QRTABLE00		0x12
+#define MAX172XX_M5_FULLSOCTHR		0x13
+#define MAX172XX_M5_ICHGTERM		0x1E
+#define MAX172XX_M5_FULLCAPNOM		0x23
+#define MAX172XX_M5_LEARNCFG		0x28
+#define MAX172XX_M5_FILTERCFG		0x29
+#define MAX172XX_M5_RELAXCFG		0x2A
+#define MAX172XX_M5_MISCCFG		0x2B
+#define MAX172XX_M5_QRTABLE20		0x32
+#define MAX172XX_M5_FULLCAPREP		0x35
+#define MAX172XX_M5_RCOMP0		0x38
+#define MAX172XX_M5_TEMPCO		0x39
+#define MAX172XX_M5_VEMPTY		0x3A
+#define MAX172XX_M5_TASKPERIOD		0x3C
+#define MAX172XX_M5_FSTAT		0x3D
+#define MAX172XX_M5_FSTAT_DNR		BIT(0)	/* Data not ready */
+#define MAX172XX_M5_QRTABLE30		0x42
+#define MAX172XX_M5_DQACC		0x45
+#define MAX172XX_M5_DPACC		0x46
+#define MAX172XX_M5_VFSOC0		0x48
+#define MAX172XX_M5_CONVGCFG		0x49
+#define MAX172XX_M5_UNLOCK_EXTRA		0x60	/* extra-config unlock/command */
+#define MAX172XX_M5_UNLOCK_EXTRA_CODE	0x0080
+#define MAX172XX_M5_LOCK_EXTRA_CODE	0x0000
+#define MAX172XX_M5_UNLOCK_MODEL0	0x62	/* model-access unlock word 0 */
+#define MAX172XX_M5_UNLOCK_MODEL1	0x63	/* model-access unlock word 1 */
+#define MAX172XX_M5_FG_MODEL_START	0x80
+#define MAX172XX_M5_FG_MODEL_COUNT	48
+#define MAX172XX_M5_CV_MIXCAP		0xB6
+#define MAX172XX_M5_CV_HALFTIME		0xB7
+#define MAX172XX_M5_CONFIG2		0xBB
+#define MAX172XX_M5_CONFIG2_LDMDL	BIT(5)	/* load model in progress */
+#define MAX172XX_M5_VFSOC		0xFF
 
 static const char *const max1720x_manufacturer = "Maxim Integrated";
 static const char *const max17201_model = "MAX17201";
@@ -657,6 +701,282 @@ static void max1720x_program_thermistor_cal(struct max1720x_device_info *info,
 		dev_warn(dev, "failed to program thermistor cal\n");
 }
 
+/*
+ * Positional layout of the "maxim,fg-params" DT array. This is the same order
+ * used by the AOSP felix battery-data, so its values can be copied verbatim.
+ */
+enum {
+	M5P_IAVGEMPTY, M5P_RELAXCFG, M5P_LEARNCFG, M5P_CONFIG, M5P_CONFIG2,
+	M5P_FULLSOCTHR, M5P_FULLCAPREP, M5P_DESIGNCAP, M5P_DPACC, M5P_DQACC,
+	M5P_FULLCAPNOM, M5P_VEMPTY, M5P_QRTABLE00, M5P_QRTABLE10, M5P_QRTABLE20,
+	M5P_QRTABLE30, M5P_RCOMP0, M5P_TEMPCO, M5P_ICHGTERM, M5P_TGAIN, M5P_TOFF,
+	M5P_TCURVE, M5P_MISCCFG, M5P_ATRATE, M5P_CONVGCFG, M5P_FILTERCFG,
+	M5P_TASKPERIOD, M5P_COUNT
+};
+
+/*
+ * The model/parameter registers live outside the driver's normal restricted
+ * map (0x60-0xFF, 0x80-0xAF), so the reload drives them through a private
+ * permissive regmap built on the same i2c client.
+ */
+static const struct regmap_config max1720x_m5load_regmap_cfg = {
+	.name = "m5load",
+	.reg_bits = 8,
+	.val_bits = 16,
+	.max_register = MAX172XX_M5_VFSOC,
+	.val_format_endian = REGMAP_ENDIAN_LITTLE, /* the gauge is little-endian */
+};
+
+/*
+ * Write and verify the 48-word characterized model into 0x80..0xAF.
+ *
+ * The unlock, the model block, and the lock are each issued as a single raw
+ * (multi-word) transaction — the gauge only opens model access for an atomic
+ * two-word write of the unlock code, so per-register writes leave it locked
+ * (the model then reads back as all-0xffff).
+ */
+static int max1720x_m5_write_model(struct device *dev, struct regmap *rm,
+				   const u16 *model)
+{
+	u16 rb[MAX172XX_M5_FG_MODEL_COUNT];
+	const u16 unlock[2] = { 0x0059, 0x00C4 };
+	const u16 lock[2] = { 0x0000, 0x0000 };
+	int i, ret;
+
+	/* unlock model access (single 2-word write to 0x62/0x63) */
+	ret = regmap_raw_write(rm, MAX172XX_M5_UNLOCK_MODEL0, unlock,
+			       sizeof(unlock));
+	if (ret)
+		return ret;
+
+	ret = regmap_raw_write(rm, MAX172XX_M5_FG_MODEL_START, model,
+			       MAX172XX_M5_FG_MODEL_COUNT * sizeof(u16));
+	if (ret)
+		goto relock;
+
+	ret = regmap_raw_read(rm, MAX172XX_M5_FG_MODEL_START, rb, sizeof(rb));
+	if (ret)
+		goto relock;
+
+	for (i = 0; i < MAX172XX_M5_FG_MODEL_COUNT; i++) {
+		if (rb[i] != model[i]) {
+			dev_err(dev, "m5 model verify failed at %d (%#x != %#x)\n",
+				i, rb[i], model[i]);
+			ret = -EIO;
+			goto relock;
+		}
+	}
+relock:
+	/* lock model access regardless of outcome */
+	regmap_raw_write(rm, MAX172XX_M5_UNLOCK_MODEL0, lock, sizeof(lock));
+	return ret;
+}
+
+/* Write the custom parameters (Maxim m5 "custom full INI", step 7). */
+static int max1720x_m5_write_params(struct regmap *rm, const u16 *p)
+{
+	unsigned int vfsoc;
+	int ret;
+
+	ret = regmap_write(rm, MAX172XX_M5_REPCAP, 0);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_RELAXCFG, p[M5P_RELAXCFG]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_UNLOCK_EXTRA,
+				   MAX172XX_M5_UNLOCK_EXTRA_CODE);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(rm, MAX172XX_M5_VFSOC, &vfsoc);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_VFSOC0, vfsoc);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_LEARNCFG, p[M5P_LEARNCFG]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_CONFIG, p[M5P_CONFIG]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_CONFIG2, p[M5P_CONFIG2]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_FULLSOCTHR, p[M5P_FULLSOCTHR]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_FULLCAPREP, p[M5P_FULLCAPREP]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_DESIGN_CAP, p[M5P_DESIGNCAP]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_DPACC, p[M5P_DPACC]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_DQACC, p[M5P_DQACC]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_FULLCAPNOM, p[M5P_FULLCAPNOM]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_VEMPTY, p[M5P_VEMPTY]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_QRTABLE00, p[M5P_QRTABLE00]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_QR_TABLE10, p[M5P_QRTABLE10]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_QRTABLE20, p[M5P_QRTABLE20]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_QRTABLE30, p[M5P_QRTABLE30]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_RCOMP0, p[M5P_RCOMP0]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_TEMPCO, p[M5P_TEMPCO]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_TASKPERIOD, p[M5P_TASKPERIOD]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_ICHGTERM, p[M5P_ICHGTERM]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_TGAIN, p[M5P_TGAIN]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_TOFF, p[M5P_TOFF]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_MISCCFG, p[M5P_MISCCFG]);
+	if (ret)
+		return ret;
+
+	/* second batch needs the extra-config unlock re-applied */
+	ret = regmap_write(rm, MAX172XX_M5_UNLOCK_EXTRA,
+			   MAX172XX_M5_UNLOCK_EXTRA_CODE);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_ATRATE, p[M5P_ATRATE]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_CV_MIXCAP,
+				   (p[M5P_FULLCAPNOM] * 75) / 100);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_CV_HALFTIME, 0x600);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_CONVGCFG, p[M5P_CONVGCFG]);
+
+	/* lock the extra config back up */
+	regmap_write(rm, MAX172XX_M5_UNLOCK_EXTRA, MAX172XX_M5_LOCK_EXTRA_CODE);
+	if (ret)
+		return ret;
+
+	/* tcurve and filtercfg are not part of the model proper */
+	ret = regmap_write(rm, MAX172XX_TCURVE, p[M5P_TCURVE]);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_FILTERCFG, p[M5P_FILTERCFG]);
+	return ret;
+}
+
+/*
+ * Reload the ModelGauge m5 characterized model after a power-on reset.
+ *
+ * A gauge with an nvmem companion restores its own model on power-up. The felix
+ * base pack's gauge has none, so on every power loss it comes up on POR defaults
+ * and its learned full-capacity mis-converges (observed collapsing to ~half of
+ * design), making SoC read garbage. When the DT supplies the golden model
+ * (maxim,fg-model + maxim,fg-params, the AOSP characterized battery-data),
+ * rewrite it whenever the POR bit is set and then clear POR. Absent the
+ * properties (e.g. the nvram-backed secondary pack) this is a no-op.
+ */
+static void max1720x_load_m5_model(struct max1720x_device_info *info,
+				   struct device *dev)
+{
+	u16 model[MAX172XX_M5_FG_MODEL_COUNT], params[M5P_COUNT];
+	unsigned int status, dcap, cfg2, repcap;
+	u32 rsense_uohm;
+	struct regmap *rm;
+	int ret, retries;
+
+	if (device_property_read_u16_array(dev, "maxim,fg-model", model,
+					   MAX172XX_M5_FG_MODEL_COUNT))
+		return;
+	if (device_property_read_u16_array(dev, "maxim,fg-params", params,
+					   M5P_COUNT)) {
+		dev_warn(dev, "maxim,fg-model without a valid maxim,fg-params; skipping model reload\n");
+		return;
+	}
+
+	/*
+	 * Reload if the gauge came up on POR, or if its DesignCap doesn't match the
+	 * golden model (never loaded / mis-converged). A warm reboot with the model
+	 * already in place keeps it and only re-applies rsense below.
+	 */
+	if (regmap_read(info->regmap, MAX172XX_STATUS, &status) ||
+	    regmap_read(info->regmap, MAX172XX_DESIGN_CAP, &dcap))
+		return;
+	if (!(status & MAX172XX_STATUS_POR) && dcap == params[M5P_DESIGNCAP])
+		goto apply_rsense;
+
+	rm = devm_regmap_init_i2c(to_i2c_client(dev),
+				  &max1720x_m5load_regmap_cfg);
+	if (IS_ERR(rm)) {
+		dev_warn(dev, "m5 load regmap init failed (%ld)\n", PTR_ERR(rm));
+		return;
+	}
+
+	/* wait for the gauge's data-not-ready flag to clear */
+	for (retries = 20; retries > 0; retries--) {
+		if (!regmap_read(rm, MAX172XX_M5_FSTAT, &status) &&
+		    !(status & MAX172XX_M5_FSTAT_DNR))
+			break;
+		msleep(50);
+	}
+
+	if (!regmap_read(rm, MAX172XX_M5_CONFIG2, &cfg2) &&
+	    (cfg2 & MAX172XX_M5_CONFIG2_LDMDL)) {
+		dev_err(dev, "m5 model load already in progress (%#x)\n", cfg2);
+		return;
+	}
+
+	if (max1720x_m5_write_model(dev, rm, model)) {
+		dev_err(dev, "m5 model write failed\n");
+		return;
+	}
+	if (max1720x_m5_write_params(rm, params)) {
+		dev_err(dev, "m5 params write failed\n");
+		return;
+	}
+
+	/* trigger the gauge to recompute its state from the new model */
+	ret = regmap_read(rm, MAX172XX_M5_CONFIG2, &cfg2);
+	if (!ret)
+		ret = regmap_write(rm, MAX172XX_M5_CONFIG2,
+				   cfg2 | MAX172XX_M5_CONFIG2_LDMDL);
+	if (ret) {
+		dev_err(dev, "m5 load trigger failed (%d)\n", ret);
+		return;
+	}
+	for (retries = 20; retries > 0; retries--) {
+		msleep(50);
+		if (regmap_read(rm, MAX172XX_M5_CONFIG2, &cfg2) ||
+		    (cfg2 & MAX172XX_M5_CONFIG2_LDMDL))
+			continue;
+		if (!regmap_read(rm, MAX172XX_M5_REPCAP, &repcap) && repcap)
+			break;
+	}
+	if (retries == 0) {
+		dev_warn(dev, "m5 model load did not settle\n");
+		return;
+	}
+
+	/* clear POR so a warm reboot won't reload the model */
+	regmap_update_bits(rm, MAX172XX_STATUS, MAX172XX_STATUS_POR, 0);
+
+	/*
+	 * The model was written through this private regmap, so the driver's main
+	 * (cached) regmap still holds pre-reload values for any non-volatile
+	 * register it caches — notably DesignCap (0x18). Drop the cache so
+	 * subsequent reads (e.g. CHARGE_FULL_DESIGN) reflect the new model.
+	 */
+	regcache_drop_region(info->regmap, MAX172XX_DESIGN_CAP,
+			     MAX172XX_DESIGN_CAP);
+	dev_info(dev, "m5 characterized model reloaded\n");
+
+apply_rsense:
+	/*
+	 * The model's capacity registers only read out correctly with the pack's
+	 * real sense resistor. Apply it here rather than in probe so a failed
+	 * reload (which returns early above, leaving the stale 4x-too-large
+	 * DesignCap) can't be paired with the new rsense.
+	 */
+	if (device_property_read_u32(dev, "shunt-resistor-micro-ohms",
+				     &rsense_uohm) == 0 && rsense_uohm)
+		info->rsense = rsense_uohm / 10; /* to 10^-5 Ohm */
+}
+
 static int max1720x_probe(struct i2c_client *client)
 {
 	struct power_supply_config psy_cfg = {};
@@ -692,6 +1012,13 @@ static int max1720x_probe(struct i2c_client *client)
 
 	/* Restore volatile thermistor cal for gauges without an nvram companion. */
 	max1720x_program_thermistor_cal(info, dev);
+
+	/*
+	 * Reload the characterized m5 model for a gauge without nvmem (the felix
+	 * base pack). This also applies the pack's real sense resistor (from
+	 * shunt-resistor-micro-ohms), which must match the loaded DesignCap.
+	 */
+	max1720x_load_m5_model(info, dev);
 
 	/*
 	 * Copy the template desc so a per-instance name can be applied — felix
