@@ -34,6 +34,8 @@
 #include <linux/platform_device.h>
 #include <linux/irq.h>
 #include <linux/pm_runtime.h>
+#include <linux/mfd/syscon.h>
+#include <linux/regmap.h>
 #include <linux/console.h>
 #include <linux/iommu.h>
 #include <uapi/linux/sched/types.h>
@@ -1588,6 +1590,62 @@ static void decon_exit_hibernation(struct decon_device *decon)
 	DPU_EVENT_LOG(DPU_EVT_EXIT_HIBERNATION_OUT, decon->id, NULL);
 }
 
+/*
+ * gs201/felix: force the DPU power domains ON before touching any DECON MMIO.
+ *
+ * This image does not register the pd_dpu/pd_disp genpds (enabling them caused a
+ * separate ~40s boot-loop), so the domains are "left as the bootloader set them"
+ * -- but ACPM autonomously gates them while the display sits idle. On a fresh
+ * boot decon_enable runs LATE (~t137, after the console waits for DHCP); if
+ * pd_dpu has been gated by then, the first decon_reg_init register access hangs
+ * the CPU on the AXI bus forever (a bus access has no timeout) -> RCU stall ->
+ * watchdog reset -> the intermittent "boot loop". Early boots that bring decon
+ * up before the gate complete fine -- exactly the observed early/late split.
+ *
+ * The gs201 PMU is EL3-only: a direct MMIO write does not work, it must go
+ * through the SMC-routed regmap exynos-pmu.c installs for "google,gs201-pmu"
+ * (the same path gs201-pm-domains.c uses). Mirror its CONFIGURATION/STATUS poke.
+ */
+#define GS201_PMU_PD_DPU	0x2200
+#define GS201_PMU_PD_DISP	0x2280
+#define GS201_PMU_PD_STATUS	0x4
+#define GS201_PMU_PD_PWR_EN	BIT(0)
+
+static void decon_force_dpu_power(struct decon_device *decon)
+{
+	static struct regmap *pmureg;
+	static const u32 pd_off[] = { GS201_PMU_PD_DISP, GS201_PMU_PD_DPU };
+	u32 status;
+	int i, ret;
+
+	if (!pmureg) {
+		pmureg = syscon_regmap_lookup_by_compatible("google,gs201-pmu");
+		if (IS_ERR(pmureg)) {
+			decon_warn(decon, "no gs201-pmu regmap (%ld); cannot guard DPU power\n",
+				   PTR_ERR(pmureg));
+			pmureg = NULL;
+			return;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(pd_off); i++) {
+		if (regmap_read(pmureg, pd_off[i] + GS201_PMU_PD_STATUS, &status))
+			continue;
+		if (status & GS201_PMU_PD_PWR_EN)
+			continue;	/* already on -- the common case */
+		decon_info(decon, "DPU domain @0x%x was GATED; powering on before MMIO\n",
+			   pd_off[i]);
+		regmap_update_bits(pmureg, pd_off[i], GS201_PMU_PD_PWR_EN,
+				   GS201_PMU_PD_PWR_EN);
+		ret = regmap_read_poll_timeout(pmureg, pd_off[i] + GS201_PMU_PD_STATUS,
+					       status, status & GS201_PMU_PD_PWR_EN,
+					       100, USEC_PER_SEC);
+		if (ret)
+			decon_warn(decon, "DPU domain @0x%x did not power on (%d)\n",
+				   pd_off[i], ret);
+	}
+}
+
 static void decon_enable(struct exynos_drm_crtc *exynos_crtc, struct drm_crtc_state *old_crtc_state)
 {
 	const struct drm_crtc_state *crtc_state = exynos_crtc->base.state;
@@ -1618,6 +1676,13 @@ static void decon_enable(struct exynos_drm_crtc *exynos_crtc, struct drm_crtc_st
 	}
 
 	decon_info(decon, "%s +\n", __func__);
+
+	/*
+	 * Guard against the intermittent boot-loop: pd_dpu/pd_disp can be
+	 * ACPM-gated after an idle window, and the first DECON MMIO below (or in
+	 * decon_reg_init) AXI-hangs the CPU on a gated domain. Force them on first.
+	 */
+	decon_force_dpu_power(decon);
 
 	if (crtc_state->mode_changed || crtc_state->connectors_changed) {
 		const struct drm_atomic_state *state = old_crtc_state->state;
