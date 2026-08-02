@@ -49,21 +49,6 @@ static int panthor_clk_init(struct panthor_device *ptdev)
 				     PTR_ERR(ptdev->clks.coregroup),
 				     "get 'coregroup' clock failed");
 
-	/* gs201 g3dl2 bandwidth fix (validation): the GPU OPP only scales the
-	 * "core" clock, leaving "stacks" (g3dl2 = L2/bus/memory-interface clock)
-	 * at its ~151MHz boot rate and throttling GPU memory bandwidth ~3x vs the
-	 * closed stack (which runs it at 996MHz). Pin it high to test the recovery.
-	 */
-	if (ptdev->clks.stacks) {
-		int _r = clk_prepare_enable(ptdev->clks.stacks);
-
-		if (!_r) {
-			clk_set_rate(ptdev->clks.stacks, 996000000);
-			drm_info(&ptdev->base, "g3dl2/stacks pinned: rate = %lu\n",
-				 clk_get_rate(ptdev->clks.stacks));
-		}
-	}
-
 	drm_info(&ptdev->base, "clock rate = %lu\n", clk_get_rate(ptdev->clks.core));
 	return 0;
 }
@@ -534,6 +519,17 @@ int panthor_device_resume(struct device *dev)
 	if (ret)
 		goto err_disable_core_clk;
 
+	/*
+	 * gs201: g3dl2 ("stacks", the GPU L2/bus/memory-interface clock, which the
+	 * GPU OPP does NOT scale) is raised to full rate ON DEMAND in
+	 * panthor_devfreq_target() -- deliberately NOT here. Forcing it to 996MHz in
+	 * resume fired at probe (pm_runtime_resume_and_get) during the ~12s boot
+	 * ramp, and a lone 151->996MHz step on the G3D rail there sagged the IF-PMIC
+	 * into UVLO (full battery, transient rail sag). Leave stacks at its low
+	 * default until a real GPU job drives devfreq above its idle floor; it stays
+	 * clk_prepare_enable'd (above) so the target callback can change its rate.
+	 */
+
 	ret = clk_prepare_enable(ptdev->clks.coregroup);
 	if (ret)
 		goto err_disable_stacks_clk;
@@ -636,6 +632,13 @@ int panthor_device_suspend(struct device *dev)
 	panthor_devfreq_suspend(ptdev);
 
 	clk_disable_unprepare(ptdev->clks.coregroup);
+
+	/*
+	 * gs201: drop g3dl2/stacks back to its low idle rate before gating, so the
+	 * L2/bus clock isn't left at 996MHz burning power while the GPU is idle.
+	 */
+	if (ptdev->clks.stacks)
+		clk_set_rate(ptdev->clks.stacks, 151000000);
 	clk_disable_unprepare(ptdev->clks.stacks);
 	clk_disable_unprepare(ptdev->clks.core);
 	atomic_set(&ptdev->pm.state, PANTHOR_DEVICE_PM_STATE_SUSPENDED);

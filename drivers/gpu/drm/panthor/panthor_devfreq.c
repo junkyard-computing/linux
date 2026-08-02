@@ -63,6 +63,7 @@ static void panthor_devfreq_update_utilization(struct panthor_devfreq *pdevfreq)
 static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
 				  u32 flags)
 {
+	struct panthor_device *ptdev = dev_get_drvdata(dev);
 	struct dev_pm_opp *opp;
 	int err;
 
@@ -72,8 +73,30 @@ static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
 	dev_pm_opp_put(opp);
 
 	err = dev_pm_opp_set_rate(dev, *freq);
+	if (err)
+		return err;
 
-	return err;
+	/*
+	 * gs201: the GPU OPP only scales the "core" clock, so drive g3dl2
+	 * ("stacks", the L2/bus/memory-interface clock) from here, coupled to GPU
+	 * load: full rate when devfreq is above its idle floor (a real job needs
+	 * the memory bandwidth), low otherwise. This is where the old resume-time
+	 * pin moved to -- forcing 996MHz at probe/resume spiked the G3D rail during
+	 * the boot ramp and tripped IF-PMIC UVLO. Demand-driven keeps the bandwidth
+	 * without the boot pile-up.
+	 */
+	if (ptdev->clks.stacks) {
+		unsigned long min_freq = 0;
+
+		/* min_freq=0 -> ceil returns the lowest OPP's frequency */
+		opp = dev_pm_opp_find_freq_ceil(dev, &min_freq);
+		if (!IS_ERR(opp))
+			dev_pm_opp_put(opp);
+		clk_set_rate(ptdev->clks.stacks,
+			     *freq > min_freq ? 996000000 : 151000000);
+	}
+
+	return 0;
 }
 
 static void panthor_devfreq_reset(struct panthor_devfreq *pdevfreq)
