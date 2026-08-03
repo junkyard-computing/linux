@@ -282,7 +282,6 @@ void dwc3_ep0_out_start(struct dwc3 *dwc)
 	struct dwc3_ep			*dep;
 	int				ret;
 	int                             i;
-	u32				phycfg, gctl, dctl, dsts;
 
 	complete(&dwc->ep0_in_setup);
 
@@ -292,48 +291,6 @@ void dwc3_ep0_out_start(struct dwc3 *dwc)
 	ret = dwc3_ep0_start_trans(dep);
 	if (ret < 0)
 		dev_err(dwc->dev, "ep0 out start transfer failed: %d\n", ret);
-
-	phycfg = dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0));
-	gctl = dwc3_readl(dwc, DWC3_GCTL);
-	dctl = dwc3_readl(dwc, DWC3_DCTL);
-	dsts = dwc3_readl(dwc, DWC3_DSTS);
-	dev_info(dwc->dev,
-		 "DWC3-DBG: ep0_out_start ret=%d GUSB2PHYCFG=0x%08x GCTL=0x%08x DCTL=0x%08x DSTS=0x%08x\n",
-		 ret, phycfg, gctl, dctl, dsts);
-	{
-		/*
-		 * Phase G.9 EP0 instrumentation (felix gs201): dump enough
-		 * controller state to bisect the SETUP-no-show further.
-		 *
-		 * - GRXFIFOSIZ(0)/GTXFIFOSIZ(0): EP0 RX/TX FIFO depth+start.
-		 *   Misconfigured FIFO == SETUP bytes dropped at the MAC layer
-		 *   even though the link layer already returned CONDONE.
-		 * - DALEPENA: confirms EP0 OUT/IN active (we already log this
-		 *   at conndone time but reprint here in case it transitioned).
-		 * - DEPCMDPAR0/1: the TRB DMA address that DWC3_DEPCMD_STARTTRANSFER
-		 *   was issued with. Should match the bottom 32 bits of
-		 *   dwc->ep0_trb_addr.
-		 * - dwc->ep0_trb[0] (CTRL TRB body): readback so we can see the
-		 *   current bpl/bph/size/ctrl just after we wrote them. HWO=1
-		 *   means controller still owns it (no SETUP arrived yet); HWO=0
-		 *   would mean it consumed and we missed the event.
-		 */
-		u32 grxfifo0 = dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0));
-		u32 gtxfifo0 = dwc3_readl(dwc, DWC3_GTXFIFOSIZ(0));
-		u32 dalepena = dwc3_readl(dwc, DWC3_DALEPENA);
-		u32 par0     = dwc3_readl(dwc, DWC3_DEPCMDPAR0(0));
-		u32 par1     = dwc3_readl(dwc, DWC3_DEPCMDPAR1(0));
-		u32 ep0depcmd = dwc3_readl(dwc, DWC3_DEPCMD(0));
-		struct dwc3_trb *trb0 = &dwc->ep0_trb[0];
-
-		dev_info(dwc->dev,
-			 "DWC3-DBG: ep0_out_start GRXFIFO0=0x%08x GTXFIFO0=0x%08x DALEPENA=0x%08x DEPCMD0=0x%08x PAR0=0x%08x PAR1=0x%08x\n",
-			 grxfifo0, gtxfifo0, dalepena, ep0depcmd, par0, par1);
-		dev_info(dwc->dev,
-			 "DWC3-DBG: ep0_out_start ep0_trb_addr=0x%llx ep0_trb[0]={bpl=0x%08x bph=0x%08x size=0x%08x ctrl=0x%08x}\n",
-			 (unsigned long long)dwc->ep0_trb_addr,
-			 trb0->bpl, trb0->bph, trb0->size, trb0->ctrl);
-	}
 
 	for (i = 2; i < DWC3_ENDPOINTS_NUM; i++) {
 		struct dwc3_ep *dwc3_ep;
@@ -873,12 +830,6 @@ static void dwc3_ep0_inspect_setup(struct dwc3 *dwc,
 	int ret = -EINVAL;
 	u32 len;
 
-	dev_info(dwc->dev,
-		 "DWC3-DBG: ep0 inspect_setup bRequestType=0x%02x bRequest=0x%02x wValue=0x%04x wIndex=0x%04x wLength=%u (gadget_driver=%p softconnect=%d connected=%d)\n",
-		 ctrl->bRequestType, ctrl->bRequest,
-		 le16_to_cpu(ctrl->wValue), le16_to_cpu(ctrl->wIndex),
-		 le16_to_cpu(ctrl->wLength),
-		 dwc->gadget_driver, dwc->softconnect, dwc->connected);
 
 	if (!dwc->gadget_driver || !dwc->softconnect || !dwc->connected)
 		goto out;
