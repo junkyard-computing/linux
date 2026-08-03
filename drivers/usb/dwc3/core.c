@@ -503,10 +503,6 @@ static void dwc3_ref_clk_period(struct dwc3 *dwc)
 	 * data (SETUP, etc.) gets dropped. AOSP unconditionally programs
 	 * 19.2-MHz values for DWC31 180A-190A; we want to verify ours match.
 	 */
-	dev_info(dwc->dev,
-		 "DWC3-DBG: ref_clk_period rate=%lu period=%luns fladj=%lu decr=%lu lpm_sel=%d GUCTL=0x%08x GFLADJ=0x%08x\n",
-		 rate, period, fladj, decr, dwc->gfladj_refclk_lpm_sel,
-		 dwc3_readl(dwc, DWC3_GUCTL), dwc3_readl(dwc, DWC3_GFLADJ));
 }
 
 /**
@@ -1726,9 +1722,6 @@ int dwc3_core_init(struct dwc3 *dwc)
 		 * AOSP's dwc3_core_susphy_set(1) at the end of core bring-up.
 		 */
 		dwc3_enable_susphy(dwc, true);
-
-		dev_info(dwc->dev,
-			 "DWC3-DBG: applied DWC31 180A-190A AOSP workaround block + deferred SUSPHY\n");
 	}
 
 	return 0;
