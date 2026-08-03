@@ -147,8 +147,6 @@ int dwc3_host_init(struct dwc3 *dwc)
 	reg = dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0));
 	reg |= DWC3_GUSB2PHYCFG_SUSPHY | DWC3_GUSB2PHYCFG_ENBLSLPM;
 	dwc3_writel(dwc, DWC3_GUSB2PHYCFG(0), reg);
-	dev_info(dwc->dev, "DWC3-DBG: felix GUSB2PHYCFG=0x%08x (SUSPHY+ENBLSLPM)\n",
-		 dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0)));
 
 	/*
 	 * Some platforms need to power off all Root hub ports immediately after DWC3 set to host

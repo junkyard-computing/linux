@@ -4134,7 +4134,6 @@ static void dwc3_gadget_reset_interrupt(struct dwc3 *dwc)
 {
 	u32			reg;
 
-	dev_info(dwc->dev, "DWC3-DBG: reset_interrupt entry\n");
 	dwc->suspended = false;
 
 	/*
@@ -4279,7 +4278,6 @@ static void dwc3_gadget_conndone_interrupt(struct dwc3 *dwc)
 		dwc3_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(64);
 		dwc->gadget->ep0->maxpacket = 64;
 		dwc->gadget->speed = USB_SPEED_HIGH;
-		dev_info(dwc->dev, "DWC3-DBG: conndone HIGHSPEED ep0 maxpkt=64\n");
 		break;
 	case DWC3_DSTS_FULLSPEED:
 		dwc3_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(64);
@@ -4355,44 +4353,6 @@ static void dwc3_gadget_conndone_interrupt(struct dwc3 *dwc)
 	 * In both cases reset values should be sufficient.
 	 */
 
-	/*
-	 * Instrumentation 2026-05-07: dump controller state at the end of
-	 * conndone — at this point both ep0out + ep0in have been re-MODIFY'd
-	 * via __dwc3_gadget_ep_enable above. If the controller is going to
-	 * receive a SETUP packet from the host, all of the following should
-	 * be in good shape:
-	 *   - DCTL.RUN_STOP=1
-	 *   - DALEPENA bits 0 (ep0out) and 1 (ep0in) set
-	 *   - DEVTEN has reasonable mask
-	 *   - GHWPARAMS6 reveals the controller revision (logged once via
-	 *     pr-style; printed every conndone for simplicity)
-	 *   - GEVNTCOUNT(0) = 0 (event buffer drained right before host
-	 *     starts sending SETUP)
-	 *   - GUSB2PHYCFG / GCTL / DSTS / DCFG state
-	 */
-	{
-		u32 dctl, dcfg, dsts, dalepena, devten, gevntcount;
-		u32 gusb2phycfg, gctl, gsbuscfg0, ghwparams6;
-
-		dctl = dwc3_readl(dwc, DWC3_DCTL);
-		dcfg = dwc3_readl(dwc, DWC3_DCFG);
-		dsts = dwc3_readl(dwc, DWC3_DSTS);
-		dalepena = dwc3_readl(dwc, DWC3_DALEPENA);
-		devten = dwc3_readl(dwc, DWC3_DEVTEN);
-		gevntcount = dwc3_readl(dwc, DWC3_GEVNTCOUNT(0));
-		gusb2phycfg = dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0));
-		gctl = dwc3_readl(dwc, DWC3_GCTL);
-		gsbuscfg0 = dwc3_readl(dwc, DWC3_GSBUSCFG0);
-		ghwparams6 = dwc3_readl(dwc, DWC3_GHWPARAMS6);
-
-		dev_info(dwc->dev,
-			"DWC3-DBG: post-conndone DCTL=0x%08x DCFG=0x%08x DSTS=0x%08x DALEPENA=0x%08x DEVTEN=0x%08x GEVNTCOUNT=0x%x\n",
-			dctl, dcfg, dsts, dalepena, devten, gevntcount);
-		dev_info(dwc->dev,
-			"DWC3-DBG: post-conndone GUSB2PHYCFG=0x%08x GCTL=0x%08x GSBUSCFG0=0x%08x GHWPARAMS6=0x%08x ip=0x%x rev=0x%x\n",
-			gusb2phycfg, gctl, gsbuscfg0, ghwparams6,
-			dwc->ip, dwc->revision);
-	}
 }
 
 static void dwc3_gadget_wakeup_interrupt(struct dwc3 *dwc, unsigned int evtinfo)
@@ -4585,13 +4545,6 @@ static void dwc3_gadget_interrupt(struct dwc3 *dwc,
 static void dwc3_process_event_entry(struct dwc3 *dwc,
 		const union dwc3_event *event)
 {
-	dev_info(dwc->dev,
-		 "DWC3-DBG: event raw=0x%08x is_devspec=%u devt_type=%u depevt_ep=%u depevt_type=%u\n",
-		 event->raw,
-		 event->type.is_devspec,
-		 event->type.is_devspec ? event->devt.type : 0,
-		 event->type.is_devspec ? 0 : event->depevt.endpoint_number,
-		 event->type.is_devspec ? 0 : event->depevt.endpoint_event);
 	trace_dwc3_event(event->raw, dwc);
 
 	if (!event->type.is_devspec)
