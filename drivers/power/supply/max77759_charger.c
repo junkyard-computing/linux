@@ -7,6 +7,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/cleanup.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/devm-helpers.h>
 #include <linux/interrupt.h>
@@ -84,6 +85,13 @@ struct max77759_charger {
 	int irqs[NUM_IRQS];
 	struct mutex lock; /* protects the state below */
 	enum max77759_chgr_mode mode;
+	/*
+	 * OTG regulator intent (host-mode VBUS requested), independent of the
+	 * hardware MODE field. While set, the PD-sink BUCK path (psy_work) must
+	 * not touch the charger mode -- OTG owns it. This is the arbitration
+	 * that stops the two writers thrashing CHG_CNFG_00.MODE at cold boot.
+	 */
+	bool otg_enabled;
 };
 
 static inline int unlock_prot_regs(struct max77759_charger *chg, bool unlock)
@@ -423,12 +431,11 @@ static const struct power_supply_desc max77759_charger_desc = {
 	.get_property = max77759_charger_get_property,
 };
 
-static int charger_set_mode(struct max77759_charger *chg,
-			    enum max77759_chgr_mode mode)
+/* Caller must hold chg->lock. */
+static int __charger_set_mode(struct max77759_charger *chg,
+			      enum max77759_chgr_mode mode)
 {
 	int ret;
-
-	guard(mutex)(&chg->lock);
 
 	if (chg->mode == mode)
 		return 0;
@@ -453,6 +460,16 @@ static int charger_set_mode(struct max77759_charger *chg,
 			return ret;
 
 		chg->mode = MAX77759_CHGR_MODE_OFF;
+
+		/*
+		 * Let the just-disabled converter actually collapse to OFF
+		 * before the opposite one hard-starts. Without this settle the
+		 * boost re-starts while the BUCK inrush still loads VSYS; a
+		 * concurrent sink<->source transition dips the IF-PMIC rail and
+		 * can trip its UVLO (0xcfcd). Mirrors the msleep(100) in AOSP's
+		 * max77759 usecase standby transition.
+		 */
+		msleep(100);
 	}
 
 	ret = regmap_update_bits(chg->regmap, MAX77759_CHGR_REG_CHG_CNFG_00,
@@ -464,10 +481,26 @@ static int charger_set_mode(struct max77759_charger *chg,
 	return 0;
 }
 
+static int charger_set_mode(struct max77759_charger *chg,
+			    enum max77759_chgr_mode mode)
+{
+	guard(mutex)(&chg->lock);
+
+	return __charger_set_mode(chg, mode);
+}
+
 static int enable_chgin_otg(struct regulator_dev *rdev)
 {
 	struct max77759_charger *chg = rdev_get_drvdata(rdev);
 	int ret;
+
+	/*
+	 * Claim the charger mode for OTG before touching hardware so the PD-sink
+	 * BUCK path (psy_work) backs off instead of racing us onto the MODE
+	 * field. See struct max77759_charger.otg_enabled.
+	 */
+	scoped_guard(mutex, &chg->lock)
+		chg->otg_enabled = true;
 
 	/*
 	 * Raise the reverse-boost (host-mode VBUS) current limit to 1500mA before
@@ -480,16 +513,82 @@ static int enable_chgin_otg(struct regulator_dev *rdev)
 				 MAX77759_CHGR_REG_CHG_CNFG_05_OTG_ILIM,
 				 MAX77759_CHGR_REG_CHG_CNFG_05_OTG_ILIM_1500MA);
 	if (ret)
-		return ret;
+		goto fail;
 
-	return charger_set_mode(chg, MAX77759_CHGR_MODE_OTG_BOOST_ON);
+	/*
+	 * Soft-start the boost: program the bypass output setpoint (5.1V) and
+	 * enable OTG_V_PGM *before* enabling the boost, so it comes up to a
+	 * defined voltage rather than hard-starting into a discharged VBUS cap +
+	 * dongle inrush -- the transient that (stacked on the boot power pile-up
+	 * and a concurrent BUCK inrush from a PD dock) dips the IF-PMIC into
+	 * 0xcfcd UVLO at cold boot. CHG_CNFG_11/_18 are CHGPROT-protected, so
+	 * unlock around the writes exactly as max77759_charger_init() does.
+	 * Mirrors AOSP max77759_usecase.c gs101_otg_bypass_enable().
+	 */
+	ret = unlock_prot_regs(chg, true);
+	if (ret)
+		goto fail;
+
+	ret = regmap_write(chg->regmap, MAX77759_CHGR_REG_CHG_CNFG_11,
+			   MAX77759_CHGR_REG_CHG_CNFG_11_VBYPSET_5100MV);
+	if (!ret)
+		ret = regmap_update_bits(chg->regmap,
+					 MAX77759_CHGR_REG_CHG_CNFG_18,
+					 MAX77759_CHGR_REG_CHG_CNFG_18_OTG_V_PGM,
+					 MAX77759_CHGR_REG_CHG_CNFG_18_OTG_V_PGM);
+	if (ret)
+		(void)unlock_prot_regs(chg, false);
+	else
+		ret = unlock_prot_regs(chg, false);
+	if (ret)
+		goto fail;
+
+	ret = charger_set_mode(chg, MAX77759_CHGR_MODE_OTG_BOOST_ON);
+	if (ret)
+		goto fail;
+
+	return 0;
+
+fail:
+	/* Release the mode claim so psy_work isn't inhibited by a dead OTG. */
+	scoped_guard(mutex, &chg->lock)
+		chg->otg_enabled = false;
+	return ret;
 }
 
 static int disable_chgin_otg(struct regulator_dev *rdev)
 {
 	struct max77759_charger *chg = rdev_get_drvdata(rdev);
+	int ret;
 
-	return charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
+	scoped_guard(mutex, &chg->lock)
+		chg->otg_enabled = false;
+
+	ret = charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
+	if (ret)
+		return ret;
+
+	/* Undo the OTG voltage program (AOSP gs101_otg_bypass_disable()). */
+	ret = unlock_prot_regs(chg, true);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(chg->regmap, MAX77759_CHGR_REG_CHG_CNFG_18,
+				 MAX77759_CHGR_REG_CHG_CNFG_18_OTG_V_PGM, 0);
+	if (ret)
+		(void)unlock_prot_regs(chg, false);
+	else
+		ret = unlock_prot_regs(chg, false);
+	if (ret)
+		return ret;
+
+	/*
+	 * OTG released -- re-evaluate whether the PD-sink BUCK charger should now
+	 * run (psy_work was inhibited while OTG owned the mode). Safe even if no
+	 * tcpm-source has ever been seen: psy_work_item() returns early when
+	 * chg->tcpm_psy is NULL.
+	 */
+	schedule_delayed_work(&chg->psy_work, 0);
+	return 0;
 }
 
 static int chgin_otg_status(struct regulator_dev *rdev)
@@ -630,7 +729,28 @@ static void psy_work_item(struct work_struct *work)
 	struct max77759_charger *chg =
 		container_of(work, struct max77759_charger, psy_work.work);
 	union power_supply_propval current_limit, online;
-	int ret;
+	bool otg_active = false;
+	int ret = 0;
+
+	if (!chg->tcpm_psy)
+		return;
+
+	/*
+	 * OTG arbitration. Host-mode OTG (the chgin-otg regulator sourcing VBUS
+	 * to a dongle) and this PD-sink BUCK path are two independent writers of
+	 * CHG_CNFG_00.MODE. At cold boot with a dongle+PD dock both fire inside
+	 * the boot power pile-up and thrash BUCK<->OFF<->OTG, whose repeated
+	 * boost restarts dip the IF-PMIC into 0xcfcd UVLO. AOSP funnels both into
+	 * one arbitrated use-case; approximate that as "OTG wins while enabled".
+	 */
+	scoped_guard(mutex, &chg->lock)
+		otg_active = chg->otg_enabled;
+	if (otg_active) {
+		dev_dbg(chg->dev, "OTG active; deferring BUCK charger mode\n");
+		scoped_guard(mutex, &chg->retry_lock)
+			chg->psy_work_retry_cnt = 0;
+		return;
+	}
 
 	ret = power_supply_get_property(chg->tcpm_psy,
 					POWER_SUPPLY_PROP_CURRENT_MAX,
@@ -651,17 +771,35 @@ static void psy_work_item(struct work_struct *work)
 		goto err;
 	}
 
-	if (online.intval && current_limit.intval) {
-		ret = set_input_current_limit(chg, current_limit.intval);
-		if (ret) {
-			dev_err(chg->dev,
-				"Unable to set current limit, ret=%d\n", ret);
-			goto err;
+	scoped_guard(mutex, &chg->lock) {
+		/*
+		 * Re-check under the same lock that serializes the mode: an OTG
+		 * enable that raced in after the early check still wins, so we
+		 * never stomp an active boost with BUCK.
+		 */
+		if (chg->otg_enabled) {
+			otg_active = true;
+		} else if (online.intval && current_limit.intval) {
+			ret = set_input_current_limit(chg, current_limit.intval);
+			if (!ret)
+				ret = __charger_set_mode(chg,
+						MAX77759_CHGR_MODE_CHG_BUCK_ON);
+		} else {
+			ret = __charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
 		}
+	}
 
-		charger_set_mode(chg, MAX77759_CHGR_MODE_CHG_BUCK_ON);
-	} else {
-		charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
+	if (otg_active) {
+		dev_dbg(chg->dev, "OTG active; deferring BUCK charger mode\n");
+		scoped_guard(mutex, &chg->retry_lock)
+			chg->psy_work_retry_cnt = 0;
+		return;
+	}
+
+	if (ret) {
+		dev_err(chg->dev, "Unable to set charger mode/limit, ret=%d\n",
+			ret);
+		goto err;
 	}
 
 	scoped_guard(mutex, &chg->retry_lock) {
@@ -675,7 +813,11 @@ static void psy_work_item(struct work_struct *work)
 	return;
 
 err:
-	charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
+	/* Don't force OFF if OTG owns the mode -- that would kill host VBUS. */
+	scoped_guard(mutex, &chg->lock) {
+		if (!chg->otg_enabled)
+			(void)__charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
+	}
 	scoped_guard(mutex, &chg->retry_lock) {
 		if (chg->psy_work_retry_cnt >= MAX_NUM_RETRIES) {
 			dev_err(chg->dev, "chg psy work failed, giving up\n");

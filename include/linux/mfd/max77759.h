@@ -120,6 +120,15 @@
 #define   MAX77759_CHGR_REG_CHG_CNFG_09_NO_AUTOIBUS     BIT(7)
 #define MAX77759_CHGR_REG_CHG_CNFG_10                  0xc3
 #define MAX77759_CHGR_REG_CHG_CNFG_11                  0xc4
+/*
+ * VBYPSET[7:0]: reverse-boost (OTG) bypass output-voltage setpoint, applied to
+ * the boost when CHG_CNFG_18.OTG_V_PGM is set. 0x02 = 5100mV (AOSP's felix
+ * value, max77759_regs.h OTG_VBYP_5100MV). Programming a defined setpoint
+ * before enabling the boost soft-starts it to that voltage instead of letting
+ * it hard-start into a discharged VBUS cap.
+ */
+#define   MAX77759_CHGR_REG_CHG_CNFG_11_VBYPSET        GENMASK(7, 0)
+#define   MAX77759_CHGR_REG_CHG_CNFG_11_VBYPSET_5100MV 0x02
 #define MAX77759_CHGR_REG_CHG_CNFG_12                  0xc5
 /* Setting this enables the Wireless Charging input channel. */
 #define   MAX77759_CHGR_REG_CHG_CNFG_12_WCINSEL        BIT(6)
@@ -132,6 +141,8 @@
 #define MAX77759_CHGR_REG_CHG_CNFG_17                  0xca
 #define MAX77759_CHGR_REG_CHG_CNFG_18                  0xcb
 #define   MAX77759_CHGR_REG_CHG_CNFG_18_WDTEN          BIT(0)
+/* Program the OTG boost output voltage from CHG_CNFG_11.VBYPSET. */
+#define   MAX77759_CHGR_REG_CHG_CNFG_18_OTG_V_PGM      BIT(3)
 #define MAX77759_CHGR_REG_CHG_CNFG_19                  0xcc
 
 /* MaxQ opcodes for max77759_maxq_command() */
