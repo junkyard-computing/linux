@@ -3133,6 +3133,151 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_gs201_aosp[] = {
 	},
 };
 
+/*
+ * Re-run ONLY the SuperSpeed combo (G2) PMA bring-up, on a fresh info struct.
+ *
+ * ⚠ KEEP THE info STRUCT BELOW IN SYNC with exynos5_usbdrd_gs201_aosp_utmi_init()
+ * above — this is deliberately the SS-only subset of that boot-time init,
+ * re-executed on each host entry (see exynos5_usbdrd_gs201_aosp_set_mode). The
+ * ONLY intended difference is used_phy_port: boot phy_init runs at ~0.32s before
+ * the Type-C orientation resolves and guesses the lane; here the caller passes
+ * the live orientation. The HS/UTMI path is intentionally NOT touched (re-running
+ * it killed reverted attempt 5189e2be); and this never pokes a live PMA
+ * (g2_pma_ready re-asserts resets first, which wedged reverted attempt 1e5261ff).
+ */
+static void exynos5_usbdrd_gs201_aosp_ss_reinit(struct exynos5_usbdrd_phy *phy_drd,
+						int used_phy_port)
+{
+	struct phy_usb_instance *inst = &phy_drd->phys[0];
+	static struct exynos_usb_tune_param felix_hs_tune_param[] = {
+		{ .name = "tx_vref",         .value = 0x8 },
+		{ .name = "tx_rise",         .value = 0x1 },
+		{ .name = "tx_res",          .value = 0x3 },
+		{ .name = "tx_pre_emp",      .value = 0x1 },
+		{ .name = "tx_pre_emp_plus", .value = 0x0 },
+		{ .name = "tx_hsxv",         .value = 0x3 },
+		{ .name = "tx_fsls",         .value = 0x3 },
+		{ .name = "rx_sqrx",         .value = 0x2 },
+		{ .name = "otg",             .value = 0x3 },
+		{ .name = "compdis",         .value = 0x7 },
+		{ .name = "",                .value = EXYNOS_USB_TUNE_LAST },
+	};
+	struct exynos_usbphy_info info = {
+		.dev			= phy_drd->dev,
+		.version		= EXYNOS_USBCON_VER_03_0_1,
+		.refclk			= USBPHY_REFCLK_DIFF_19_2MHZ,
+		.refsel			= USBPHY_REFSEL_CLKCORE,
+		.use_io_for_ovc		= false,
+		.common_block_disable	= true,
+		.not_used_vbus_pad	= true,
+		.regs_base		= phy_drd->reg_phy,
+		.hs_tune		= NULL,
+		.ss_tune		= NULL,
+		.tune_param		= felix_hs_tune_param,
+		.hw_version		= 0,
+		.regs_base_2nd		= NULL,
+		.pma_base		= phy_drd->reg_pma,
+		.pcs_base		= phy_drd->reg_pcs,
+		.ctrl_base		= phy_drd->reg_phy,
+		.link_base		= NULL,
+		.used_phy_port		= used_phy_port,
+		.alt_ref_clk		= false,
+		.hs_rewa		= 0,
+		.dual_phy		= false,
+		.sel_sof		= 0,
+		.usbdp_mode		= 0,
+		.add_val_magic		= 0,
+	};
+
+	/*
+	 * SS-only power-cycle, mirroring the boot sequence at
+	 * exynos5_usbdrd_gs201_aosp_utmi_init():3059-3064. De-isolate the USBDP
+	 * power domain, then g2_pma_ready() re-asserts the PMA resets (a proper
+	 * reset even on a running PMA), g2_v4_enable() reloads the full gen2-v4
+	 * table, releases the resets, and re-polls LCPLL/RX-CDR lock (this is the
+	 * step that re-trains a stale SS link across a warm reboot), and
+	 * g2_link_pclk_sel() re-routes the live pipe3 clock to the dwc3 link.
+	 */
+	if (inst->reg_pmu)
+		regmap_update_bits(inst->reg_pmu, GS101_PHY_CTRL_USBDP,
+				   EXYNOS4_PHY_ENABLE, EXYNOS4_PHY_ENABLE);
+	phy_exynos_usb_v3p1_g2_pma_ready(&info);
+	phy_exynos_usbdp_g2_v4_enable(&info);
+	phy_exynos_usb_v3p1_g2_link_pclk_sel(&info);
+}
+
+/*
+ * felix charge-through-host fix: re-train the SS combo PMA on every entry into
+ * HOST mode.
+ *
+ * dwc3 calls phy_set_mode(PHY_MODE_USB_HOST) on each host entry, but the shared
+ * gs101 phy_ops has no .set_mode, so today it is a silent no-op. The SS gen2-v4
+ * bring-up therefore runs exactly once, from the refcounted boot phy_init
+ * (~0.32s) — before the Type-C orientation is known, with the lane mux guessed,
+ * and with no re-lock across a warm reboot. Result: a SuperSpeed dongle behind a
+ * PD dock intermittently comes up dead or silently falls back to 480Mbps. AOSP's
+ * vendor dwc3 re-runs a full PHY power-cycle on every host entry; this mirrors
+ * that for the SS PHY only.
+ */
+static int exynos5_usbdrd_gs201_aosp_set_mode(struct phy *phy, enum phy_mode mode,
+					      int submode)
+{
+	struct phy_usb_instance *inst = phy_get_drvdata(phy);
+	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
+	int used_phy_port, ret;
+
+	/*
+	 * Gate this to a genuine host attach:
+	 *  - host mode only;
+	 *  - the UTMI instance only — the felix combo bring-up lives on the UTMI
+	 *    init (aosp_utmi_init), and dwc3 calls set_mode on both the usb2 (UTMI)
+	 *    and usb3 (PIPE3) phys, so this keys off one to run the re-train once;
+	 *  - orientation must be resolved. dwc3 (role-switch-default-mode="host")
+	 *    enters host mode at ~0.34s, BEFORE the role switch flips it to device
+	 *    for the gadget and BEFORE the TCPC resolves the cable orientation
+	 *    (phy_drd->orientation still NONE). Re-training the SS PMA in that boot
+	 *    transient disturbs the shared HS analog and corrupts the CDC-NCM gadget
+	 *    ("configfs-gadget: Wrong NTH SIGN") -> no network. A real dongle attach
+	 *    always has the orientation resolved by the time host mode is entered,
+	 *    so NONE means "boot transient, not a real host session" -> skip.
+	 */
+	if (inst->phy_cfg->id != EXYNOS5_DRDPHY_UTMI || mode != PHY_MODE_USB_HOST ||
+	    phy_drd->orientation == TYPEC_ORIENTATION_NONE)
+		return 0;
+
+	/*
+	 * used_phy_port selects which Type-C differential pair carries SS. Unlike
+	 * boot phy_init, the orientation is resolved by host-entry time (set from
+	 * the TCPC in exynos5_usbdrd_orien_sw_set): reverse == CC2 == port 1.
+	 */
+	used_phy_port = (phy_drd->orientation == TYPEC_ORIENTATION_REVERSE) ? 1 : 0;
+
+	ret = clk_bulk_prepare_enable(phy_drd->drv_data->n_clks, phy_drd->clks);
+	if (ret)
+		return ret;
+
+	scoped_guard(mutex, &phy_drd->phy_mutex)
+		exynos5_usbdrd_gs201_aosp_ss_reinit(phy_drd, used_phy_port);
+
+	clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks, phy_drd->clks);
+
+	dev_info(phy_drd->dev,
+		 "gs201: re-trained SS PHY on host entry (port=%d orientation=%d)\n",
+		 used_phy_port, phy_drd->orientation);
+	return 0;
+}
+
+/*
+ * felix-only phy_ops: the shared gs101_usbdrd_phy_ops plus .set_mode for the
+ * SS host-entry re-train above. gs101 and the non-AOSP gs201 keep the plain ops.
+ */
+static const struct phy_ops gs201_aosp_usbdrd_phy_ops = {
+	.init		= exynos5_usbdrd_gs101_phy_init,
+	.exit		= exynos5_usbdrd_gs101_phy_exit,
+	.set_mode	= exynos5_usbdrd_gs201_aosp_set_mode,
+	.owner		= THIS_MODULE,
+};
+
 static const struct exynos5_usbdrd_phy_tuning gs101_tunes_utmi_postinit[] = {
 	PHY_TUNING_ENTRY_PHY(EXYNOS850_DRD_HSPPARACON,
 			     (HSPPARACON_TXVREF | HSPPARACON_TXRES |
@@ -3374,7 +3519,7 @@ static const struct exynos5_usbdrd_phy_drvdata gs201_usbd31rd_phy = {
 static const struct exynos5_usbdrd_phy_drvdata gs201_aosp_usbd31rd_phy = {
 	.phy_cfg			= phy_cfg_gs201_aosp,
 	.phy_tunes			= NULL,
-	.phy_ops			= &gs101_usbdrd_phy_ops,
+	.phy_ops			= &gs201_aosp_usbdrd_phy_ops,
 	.pmu_offset_usbdrd0_phy		= GS101_PHY_CTRL_USB20,
 	.pmu_offset_usbdrd0_phy_ss	= GS101_PHY_CTRL_USBDP,
 	.clk_names			= gs101_clk_names,
