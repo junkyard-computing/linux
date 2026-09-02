@@ -20,6 +20,7 @@
 #define CLKS_NR_TOP	(CLK_GOUT_CMU_TPU_UART + 1)
 #define CLKS_NR_APM	(CLK_APM_PLL_DIV16_APM + 1)
 #define CLKS_NR_DPU	(CLK_GOUT_DPU_SYSREG_DPU_PCLK + 1)
+#define CLKS_NR_DISP	(CLK_GOUT_DISP_QCH_SYSREG + 1)
 #define CLKS_NR_HSI0	(CLK_DOUT_HSI0_USB + 1)
 #define CLKS_NR_HSI2	(CLK_GOUT_HSI2_XIU_P_HSI2_ACLK + 1)
 #define CLKS_NR_MISC	(CLK_GOUT_MISC_XIU_D_MISC_ACLK + 1)
@@ -2660,6 +2661,154 @@ static const struct samsung_cmu_info dpu_cmu_info __initconst = {
 	.gate_dbg_offset        = GS101_GATE_DBG_OFFSET,
 	.option_offset		= DPU_CMU_DPU_CONTROLLER_OPTION,
 	.drcg_offset		= GS101_DRCG_EN_OFFSET,
+};
+
+/* ---- CMU_DISP (gs201 only) ---------------------------------------------- */
+/*
+ * felix: the DECON display-controller clock gates live in CMU_DISP, and the
+ * hardware idle-gates them; a late modeset then touches a powered-but-unclocked
+ * DECON block and the AXI access stalls forever -> hard lockup boot storm. This
+ * block exposes those gates through the clk framework with auto_clock_gate=false
+ * (do NOT arm DRCG) and the DECON access-path gates marked CLK_IS_CRITICAL, so
+ * the clock is held permanently on and never idle-gates. Offsets are the gs201
+ * CMU_DISP layout (base 0x1c200000) from the AOSP cmucal; the gs101 CMU_DISP
+ * gate map is shifted/renamed and must NOT be used here.
+ */
+
+/* Register Offset definitions for CMU_DISP (0x1c200000) */
+#define PLL_CON0_MUX_CLKCMU_DISP_NOC_USER					0x0600
+#define PLL_CON1_MUX_CLKCMU_DISP_NOC_USER					0x0604
+#define DISP_CMU_DISP_CONTROLLER_OPTION						0x0800
+#define CLK_CON_DIV_DIV_CLK_DISP_NOCP						0x1804
+#define CLK_CON_GAT_CLK_BLK_DISP_UID_DISP_CMU_DISP_IPCLKPORT_PCLK		0x2000
+#define CLK_CON_GAT_CLK_BLK_DISP_UID_SLH_AXI_MI_P_DISP_IPCLKPORT_I_CLK		0x200c
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_AD_APB_DECON_MAIN_IPCLKPORT_PCLKM		0x2010
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_DPUB_IPCLKPORT_ACLK_DECON			0x2014
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_D_TZPC_DISP_IPCLKPORT_PCLK			0x2018
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_GPC_DISP_IPCLKPORT_PCLK			0x201c
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_NOCD_IPCLKPORT_CLK	0x2020
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_NOCP_IPCLKPORT_CLK	0x2024
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_OSCCLK_IPCLKPORT_CLK	0x2028
+#define CLK_CON_GAT_GOUT_BLK_DISP_UID_SYSREG_DISP_IPCLKPORT_PCLK			0x202c
+#define QCH_CON_DISP_CMU_DISP_QCH						0x3008
+#define QCH_CON_DPUB_QCH							0x300c
+#define QCH_CON_D_TZPC_DISP_QCH							0x3010
+#define QCH_CON_GPC_DISP_QCH							0x3014
+#define QCH_CON_SLH_AXI_MI_P_DISP_QCH						0x301c
+#define QCH_CON_SYSREG_DISP_QCH							0x3020
+
+static const unsigned long disp_clk_regs[] __initconst = {
+	PLL_CON0_MUX_CLKCMU_DISP_NOC_USER,
+	PLL_CON1_MUX_CLKCMU_DISP_NOC_USER,
+	DISP_CMU_DISP_CONTROLLER_OPTION,
+	CLK_CON_DIV_DIV_CLK_DISP_NOCP,
+	CLK_CON_GAT_CLK_BLK_DISP_UID_DISP_CMU_DISP_IPCLKPORT_PCLK,
+	CLK_CON_GAT_CLK_BLK_DISP_UID_SLH_AXI_MI_P_DISP_IPCLKPORT_I_CLK,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_AD_APB_DECON_MAIN_IPCLKPORT_PCLKM,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_DPUB_IPCLKPORT_ACLK_DECON,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_D_TZPC_DISP_IPCLKPORT_PCLK,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_GPC_DISP_IPCLKPORT_PCLK,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_NOCD_IPCLKPORT_CLK,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_NOCP_IPCLKPORT_CLK,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_OSCCLK_IPCLKPORT_CLK,
+	CLK_CON_GAT_GOUT_BLK_DISP_UID_SYSREG_DISP_IPCLKPORT_PCLK,
+	QCH_CON_DISP_CMU_DISP_QCH,
+	QCH_CON_DPUB_QCH,
+	QCH_CON_D_TZPC_DISP_QCH,
+	QCH_CON_GPC_DISP_QCH,
+	QCH_CON_SLH_AXI_MI_P_DISP_QCH,
+	QCH_CON_SYSREG_DISP_QCH,
+};
+
+/* List of parent clocks for Muxes in CMU_DISP */
+PNAME(mout_disp_noc_user_p)	= { "oscclk", "dout_cmu_disp_bus" };
+
+static const struct samsung_mux_clock disp_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_DISP_NOC_USER, "mout_disp_noc_user",
+	    mout_disp_noc_user_p, PLL_CON0_MUX_CLKCMU_DISP_NOC_USER, 4, 1),
+};
+
+static const struct samsung_div_clock disp_div_clks[] __initconst = {
+	DIV(CLK_DOUT_DISP_NOCP, "dout_disp_nocp", "mout_disp_noc_user",
+	    CLK_CON_DIV_DIV_CLK_DISP_NOCP, 0, 4),
+};
+
+static const struct samsung_gate_clock disp_gate_clks[] __initconst = {
+	GATE(CLK_GOUT_DISP_CMU_DISP_PCLK, "gout_disp_cmu_disp_pclk",
+	     "dout_disp_nocp",
+	     CLK_CON_GAT_CLK_BLK_DISP_UID_DISP_CMU_DISP_IPCLKPORT_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_DISP_SLH_AXI_MI_P_DISP_I_CLK,
+	     "gout_disp_slh_axi_mi_p_disp_i_clk", "dout_disp_nocp",
+	     CLK_CON_GAT_CLK_BLK_DISP_UID_SLH_AXI_MI_P_DISP_IPCLKPORT_I_CLK,
+	     21, CLK_IS_CRITICAL, 0),
+	/* DECON register-access (APB) clock -- the one whose idle-gate hangs. */
+	GATE(CLK_GOUT_DISP_AD_APB_DECON_MAIN_PCLKM,
+	     "gout_disp_ad_apb_decon_main_pclkm", "mout_disp_noc_user",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_AD_APB_DECON_MAIN_IPCLKPORT_PCLKM,
+	     21, CLK_IS_CRITICAL, 0),
+	/* DECON functional (ACLK) clock. */
+	GATE(CLK_GOUT_DISP_DPUB_ACLK_DECON, "gout_disp_dpub_aclk_decon",
+	     "mout_disp_noc_user",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_DPUB_IPCLKPORT_ACLK_DECON,
+	     21, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_D_TZPC_DISP_PCLK, "gout_disp_d_tzpc_disp_pclk",
+	     "dout_disp_nocp",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_D_TZPC_DISP_IPCLKPORT_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_DISP_GPC_DISP_PCLK, "gout_disp_gpc_disp_pclk",
+	     "dout_disp_nocp",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_GPC_DISP_IPCLKPORT_PCLK, 21, 0, 0),
+	GATE(CLK_GOUT_DISP_CLK_DISP_NOCD_CLK, "gout_disp_clk_disp_nocd_clk",
+	     "mout_disp_noc_user",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_NOCD_IPCLKPORT_CLK,
+	     21, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_CLK_DISP_NOCP_CLK, "gout_disp_clk_disp_nocp_clk",
+	     "dout_disp_nocp",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_NOCP_IPCLKPORT_CLK,
+	     21, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_CLK_DISP_OSCCLK_CLK, "gout_disp_clk_disp_oscclk_clk",
+	     "oscclk",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_RSTNSYNC_CLK_DISP_OSCCLK_IPCLKPORT_CLK,
+	     21, 0, 0),
+	GATE(CLK_GOUT_DISP_SYSREG_DISP_PCLK, "gout_disp_sysreg_disp_pclk",
+	     "dout_disp_nocp",
+	     CLK_CON_GAT_GOUT_BLK_DISP_UID_SYSREG_DISP_IPCLKPORT_PCLK,
+	     21, CLK_IS_CRITICAL, 0),
+	/*
+	 * Q-channel CLOCK_REQ (bit 1, gs201 QCH_CON layout: bit0=ENABLE,
+	 * bit1=CLOCK_REQ) forced on -- the gate-enable bit above (bit 21)
+	 * alone does NOT stop the hardware Q-channel from idle-gating the
+	 * DECON clock (a late modeset still AXI-hung with only bit21 held).
+	 * Holding CLOCK_REQ high via a CLK_IS_CRITICAL gate keeps the block
+	 * clock live regardless of the idle signal. Same pattern as
+	 * clk-artpec8.c's CLK_CON_DMYQCH_CON_*_QCH gates.
+	 */
+	GATE(CLK_GOUT_DISP_QCH_DISP_CMU, "gout_disp_qch_disp_cmu",
+	     "dout_disp_nocp", QCH_CON_DISP_CMU_DISP_QCH, 1, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_QCH_DPUB, "gout_disp_qch_dpub",
+	     "mout_disp_noc_user", QCH_CON_DPUB_QCH, 1, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_QCH_D_TZPC, "gout_disp_qch_d_tzpc",
+	     "dout_disp_nocp", QCH_CON_D_TZPC_DISP_QCH, 1, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_QCH_GPC, "gout_disp_qch_gpc",
+	     "dout_disp_nocp", QCH_CON_GPC_DISP_QCH, 1, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_QCH_SLH_AXI, "gout_disp_qch_slh_axi",
+	     "dout_disp_nocp", QCH_CON_SLH_AXI_MI_P_DISP_QCH, 1, CLK_IS_CRITICAL, 0),
+	GATE(CLK_GOUT_DISP_QCH_SYSREG, "gout_disp_qch_sysreg",
+	     "dout_disp_nocp", QCH_CON_SYSREG_DISP_QCH, 1, CLK_IS_CRITICAL, 0),
+};
+
+static const struct samsung_cmu_info disp_cmu_info __initconst = {
+	.mux_clks		= disp_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(disp_mux_clks),
+	.div_clks		= disp_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(disp_div_clks),
+	.gate_clks		= disp_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(disp_gate_clks),
+	.nr_clk_ids		= CLKS_NR_DISP,
+	.clk_regs		= disp_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(disp_clk_regs),
+	.clk_name		= "bus",
+	.auto_clock_gate	= false,
+	.option_offset		= DISP_CMU_DISP_CONTROLLER_OPTION,
 };
 
 /* ---- CMU_HSI0 ------------------------------------------------------------ */
@@ -5635,6 +5784,9 @@ static const struct of_device_id gs101_cmu_of_match[] = {
 	}, {
 		.compatible = "google,gs201-cmu-dpu",
 		.data = &dpu_cmu_info,
+	}, {
+		.compatible = "google,gs201-cmu-disp",
+		.data = &disp_cmu_info,
 	}, {
 		.compatible = "google,gs201-cmu-hsi0",
 		.data = &hsi0_cmu_info,
