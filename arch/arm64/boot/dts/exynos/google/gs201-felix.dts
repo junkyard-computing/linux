@@ -828,27 +828,37 @@
 			};
 
 			/*
-			 * S1S_VDD_CAM. Deliberately NO regulator-always-on and
-			 * NO regulator-boot-on: this is the one rail we WANT
-			 * regulator_init_complete()'s unused-regulator cleanup
-			 * to switch off ~30 s into boot.
+			 * S1S_VDD_CAM. MUST stay on (regulator-always-on), exactly
+			 * as AOSP has it (gs201-pmic.dtsi BUCK1S: always-on,
+			 * subsys-name "Multimedia"). Despite the CAM name, the
+			 * display pipe depends on it.
 			 *
-			 * The bootloader leaves B1S_CTRL at 0xf8 (bits[7:6]=11,
-			 * forced on) where the neighbouring bucks sit at 0xb8,
-			 * and nothing in this tree drives a camera, so the rail
-			 * idles at ~62 mW. An AOSP device on the same silicon
-			 * reads 0.7 mW on this ODPM channel, i.e. off.
+			 * This rail used to be left for regulator_init_complete()'s
+			 * unused-regulator cleanup to switch off ~30 s into boot,
+			 * to save its ~62 mW idle draw (the bootloader leaves
+			 * B1S_CTRL at 0xf8, forced on; nothing here drives a
+			 * camera). That reap WAS the felix "0xcfcd UVLO" bug: once
+			 * it fires, the first DECON SFR access of any later modeset
+			 * bus-stalls the CPU forever -> hard lockup -> software
+			 * reset that the bootloader mislabels as UVLO.
 			 *
-			 * This is the exact inverse of the ldo4s/ldo28s case
-			 * above: there the reap was the bug, here it is the
-			 * mechanism. If a camera driver ever lands it must take
-			 * this as its supply, at which point the reap stops
-			 * applying by itself.
+			 * Measured 2026-09-24 with the modeset forced late (35 s
+			 * kmscon delay): reaped, 0/6 modesets at t31-t102 survived;
+			 * kept on, 11/11 at t51-t123 completed - including 5/5 with
+			 * every CMU_DISP/CMU_TOP clock-gating change switched off,
+			 * so the rail alone is the fix. It also explains the sharp
+			 * t25-31 boundary seen for weeks (a modeset that lands
+			 * before the reap always worked) and why two weeks of
+			 * clock-gate work never moved it.
+			 *
+			 * Do not drop this to save the 62 mW without first finding
+			 * which display-side block the rail really feeds.
 			 */
 			buck1s: buck1s {
 				regulator-name = "s2mpg13_buck1s_vdd_cam";
 				regulator-min-microvolt = <450000>;
 				regulator-max-microvolt = <1300000>;
+				regulator-always-on;
 			};
 		};
 	};
