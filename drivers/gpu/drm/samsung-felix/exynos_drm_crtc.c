@@ -243,8 +243,19 @@ static int exynos_crtc_atomic_check(struct drm_crtc *crtc,
 		new_exynos_state->skip_update = true;
 	} else if (drm_atomic_crtc_effectively_active(old_crtc_state) &&
 		   (crtc_state->plane_mask & (~exynos_crtc->rcd_plane_mask)) == 0) {
-		DRM_WARN("%s: plane-less update is detected, mask=0x%08X\n", __func__,
-			 crtc_state->plane_mask);
+		/*
+		 * A plane-less commit has nothing to flush to the panel, yet
+		 * letting it through still performs DECON SFR accesses. On felix
+		 * the unclaimed inner panel's self-refresh helper generated a
+		 * steady stream of these, and each one was a chance to hit the
+		 * DECON register stall that hard-locked the CPU ("0xcfcd UVLO",
+		 * ~t130-210). Skip the DECON update, as the self_refresh and
+		 * hibernation cases above already do: with no planes it is a
+		 * no-op for the display anyway.
+		 */
+		DRM_WARN("%s: plane-less update is detected, mask=0x%08X (skipping)\n",
+			 __func__, crtc_state->plane_mask);
+		new_exynos_state->skip_update = true;
 	}
 
 	if (decon->rcd) {
