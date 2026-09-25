@@ -838,6 +838,19 @@ static bool tcpm_log_full(struct tcpm_port *port)
 }
 
 __printf(2, 0)
+/*
+ * Mirror every TCPM log entry to the kernel log. The debugfs ring above is in
+ * memory only, stops recording once full, is gone on reboot, and needs a shell
+ * to read -- none of which helps diagnose a port that came up without a data
+ * path (felix landing sink+device instead of sink+host leaves the device with
+ * no network at all). In dmesg the history survives a replug within the boot
+ * and can be persisted by userspace before any reboot. KERN_INFO keeps it off
+ * a loglevel=4 console.
+ */
+static bool log_printk = true;
+module_param(log_printk, bool, 0644);
+MODULE_PARM_DESC(log_printk, "Also emit TCPM log entries to the kernel log");
+
 static void _tcpm_log(struct tcpm_port *port, const char *fmt, va_list args)
 {
 	char tmpbuffer[LOG_BUFFER_ENTRY_SIZE];
@@ -855,6 +868,9 @@ static void _tcpm_log(struct tcpm_port *port, const char *fmt, va_list args)
 	}
 
 	vsnprintf(tmpbuffer, sizeof(tmpbuffer), fmt, args);
+
+	if (log_printk)
+		dev_info(port->dev, "tcpm: %s\n", tmpbuffer);
 
 	if (tcpm_log_full(port)) {
 		port->logbuffer_head = max(port->logbuffer_head - 1, 0);
