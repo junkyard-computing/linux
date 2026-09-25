@@ -2977,7 +2977,14 @@ static int exynos_drm_connector_check_mode(struct exynos_panel *ctx,
 	is_video_mode = (pmode->exynos_mode.mode_flags & MIPI_DSI_MODE_VIDEO) != 0;
 
 	/* self refresh is only supported in command mode */
-	connector_state->self_refresh_aware = !is_video_mode;
+	/*
+	 * ...but not on felix for now: the unclaimed inner panel is command
+	 * mode, and drm_self_refresh_helper cycling it produced the plane-less
+	 * commits behind the ~t130-210 runtime lockup. That lockup predates the
+	 * buck1s always-on fix and is probably the same rail, but it has not been
+	 * re-tested with self-refresh restored, so keep it off until it is.
+	 */
+	connector_state->self_refresh_aware = false;
 
 	if (crtc_state->connectors_changed || !is_panel_active(ctx))
 		exynos_connector_state->seamless_possible = false;
