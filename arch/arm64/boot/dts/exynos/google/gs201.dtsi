@@ -1963,6 +1963,14 @@
 	 * out of genpd (like dpu/disp) keeps the TPU powered so edgetpu/finch keep
 	 * working; forfeits the ~6C tpu share until edgetpu wires runtime PM to
 	 * <&pd_tpu>. The 12 imaging domains + aur still gate (the bulk of the win).
+	 *
+	 * CONFIRMED 2026-09-04: re-enabling this (status="okay" + a phandle on
+	 * edgetpu) hard-locks CPU7 at the late_initcall reap, exactly as the note
+	 * above warned -- genpd_power_off_unused() gates pd_tpu while edgetpu.ko
+	 * is still unprobed, and the block power-off wedges. The phandle does NOT
+	 * save it: at late_initcall nothing holds the domain, so it is reaped
+	 * before dev_pm_domain_attach ever runs. Watchdog panic ~10s later. Keep
+	 * pd_tpu out of genpd until edgetpu owns it with real runtime PM.
 	 */
 	pd_tpu: power-domain-tpu {
 		compatible = "google,gs201-pd";
