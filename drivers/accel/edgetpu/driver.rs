@@ -3,7 +3,7 @@
 use kernel::{
     bindings,
     clk::{Clk, Hertz},
-    device::Core,
+    device::{Core, DeviceContext},
     dma::{
         Device as DmaDevice,
         DmaMask, //
@@ -36,13 +36,14 @@ use crate::vii::Vii;
 pub(crate) struct EdgeTpuDriver;
 
 /// Convenience alias for the DRM device type for this driver.
-pub(crate) type EdgeTpuDevice<Ctx = drm::Registered> = drm::Device<EdgeTpuDriver, Ctx>;
+pub(crate) type EdgeTpuDevice<Ctx = drm::Normal> = drm::Device<EdgeTpuDriver, Ctx>;
 
 pub(crate) struct EdgeTpuPlatformDriver;
 
 #[pin_data(PinnedDrop)]
-pub(crate) struct EdgeTpuPlatformData {
-    _device: ARef<EdgeTpuDevice>,
+pub(crate) struct EdgeTpuPlatformData<'bound> {
+    // The DRM registration: dropped (unregistering the accel node) on unbind.
+    _reg: drm::Registration<'bound, EdgeTpuDriver>,
     // The ACPM DVFS clock ("tpu", channel 7) is the TPU block's rail-power
     // primitive (same model as the mainline GPU). Held for the device's
     // lifetime so the rail stays powered while the firmware runs.
@@ -60,14 +61,13 @@ pub(crate) struct EdgeTpuData {
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
     <EdgeTpuPlatformDriver as platform::Driver>::IdInfo,
     [(of::DeviceId::new(c"google,edgetpu-gs201"), ())]
 );
 
 impl platform::Driver for EdgeTpuPlatformDriver {
     type IdInfo = ();
-    type Data<'bound> = EdgeTpuPlatformData;
+    type Data<'bound> = EdgeTpuPlatformData<'bound>;
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
 
     fn probe<'bound>(
@@ -176,20 +176,22 @@ impl platform::Driver for EdgeTpuPlatformDriver {
             }),
         });
 
-        let tdev = drm::UnregisteredDevice::<EdgeTpuDriver>::new(pdev.as_ref(), data)?;
-        let tdev = drm::driver::Registration::new_foreign_owned(tdev, pdev.as_ref(), 0)?;
+        let tdev = drm::UnregisteredDevice::<EdgeTpuDriver>::new(pdev, data)?;
+        // SAFETY: `reg` is stored in `EdgeTpuPlatformData` and dropped when the driver is
+        // unbound; it is never forgotten.
+        let reg = unsafe { drm::Registration::new(pdev.as_ref(), tdev, Ok::<(), Error>(()), 0)? };
 
         dev_info!(pdev, "Edge TPU (gs201): accel device registered.\n");
 
         Ok(EdgeTpuPlatformData {
-            _device: tdev.into(),
+            _reg: reg,
             _clk: clk,
         })
     }
 }
 
 #[pinned_drop]
-impl PinnedDrop for EdgeTpuPlatformData {
+impl PinnedDrop for EdgeTpuPlatformData<'_> {
     fn drop(self: Pin<&mut Self>) {}
 }
 
@@ -204,8 +206,10 @@ const INFO: drm::DriverInfo = drm::DriverInfo {
 #[vtable]
 impl drm::Driver for EdgeTpuDriver {
     type Data = EdgeTpuData;
+    type RegistrationData<'a> = ();
     type File = EdgeTpuFileData;
-    type Object<R: drm::DeviceContext> = drm::gem::shmem::Object<BoData, R>;
+    type Object = drm::gem::shmem::Object<BoData>;
+    type ParentDevice<Ctx: DeviceContext> = platform::Device<Ctx>;
 
     const INFO: drm::DriverInfo = INFO;
     const FEAT_ACCEL: bool = true;

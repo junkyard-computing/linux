@@ -10,6 +10,7 @@ use kernel::{
     alloc::KVec,
     bindings,
     device::Device,
+    drm,
     prelude::*,
     uaccess::{UserPtr, UserSlice},
     uapi,
@@ -73,7 +74,8 @@ const BO_MAX: u64 = 4 * 1024 * 1024;
 impl EdgeTpuFileData {
     /// Allocate a carveout BO and return its handle + TPU device-VA.
     pub(crate) fn create_bo(
-        ddev: &EdgeTpuDevice,
+        ddev: &EdgeTpuDevice<drm::Registered>,
+        _reg: &(),
         args: &mut uapi::drm_edgetpu_create_bo,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
@@ -92,7 +94,8 @@ impl EdgeTpuFileData {
 
     /// Copy userspace bytes into a BO.
     pub(crate) fn bo_write(
-        ddev: &EdgeTpuDevice,
+        ddev: &EdgeTpuDevice<drm::Registered>,
+        _reg: &(),
         args: &mut uapi::drm_edgetpu_bo_write,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
@@ -124,7 +127,8 @@ impl EdgeTpuFileData {
 
     /// Copy BO bytes back out to userspace.
     pub(crate) fn bo_read(
-        ddev: &EdgeTpuDevice,
+        ddev: &EdgeTpuDevice<drm::Registered>,
+        _reg: &(),
         args: &mut uapi::drm_edgetpu_bo_read,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
@@ -156,7 +160,8 @@ impl EdgeTpuFileData {
     /// two concurrent VCID contexts and dispatch each registered graph to the
     /// mailbox that holds its registration (register-once-dispatch).
     pub(crate) fn submit(
-        ddev: &EdgeTpuDevice,
+        ddev: &EdgeTpuDevice<drm::Registered>,
+        _reg: &(),
         args: &mut uapi::drm_edgetpu_submit,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
@@ -177,7 +182,8 @@ impl EdgeTpuFileData {
     /// client can recycle mid-run without re-opening the fd. See
     /// [`MailboxState::reset_client`].
     pub(crate) fn reset(
-        ddev: &EdgeTpuDevice,
+        ddev: &EdgeTpuDevice<drm::Registered>,
+        _reg: &(),
         args: &mut uapi::drm_edgetpu_reset,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
