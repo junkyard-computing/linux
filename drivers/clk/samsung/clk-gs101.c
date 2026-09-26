@@ -5743,6 +5743,55 @@ static const struct samsung_cmu_info peric1_cmu_info __initconst = {
 	.drcg_offset		= GS101_DRCG_EN_OFFSET,
 };
 
+/*
+ * Always-on interconnect / memory-interface CMU blocks: NOCL0, NOCL1A, NOCL1B,
+ * NOCL2A, MIF, EH and HSI1. This port never instantiated them, so their hardware
+ * auto-clock-gating (HWACG) was never enabled and the NoC/DRAM-interface fabric
+ * clocks free-run -- measured ~+407 mW at idle vs the AOSP vendor stack, which
+ * programs the CONTROLLER_OPTION auto-gate on all 44 gs201 CMU blocks.
+ *
+ * We do NOT manage these clocks' rates -- ACPM owns gs201 DVFS (see clk-acpm.c)
+ * -- we only need HWACG. Registering the block with .auto_clock_gate +
+ * .option_offset makes exynos_arm64_init_clocks() write
+ * CMU_OPT_GLOBAL_EN_AUTO_GATING to CONTROLLER_OPTION, so the Q-channel idle-gates
+ * the fabric clocks exactly as the vendor cmucal does. No clock tree is needed:
+ * nr_clk_ids = 0 registers no clocks (nothing references these providers) and
+ * .clk_name is unset so exynos_arm64_enable_bus_clk() is a no-op (the parent is
+ * already running from the bootloader). The DT reg is the standard 0x10000 CMU
+ * block window (the vendor cmucal SFR range is 0x8000 within it), which is also
+ * what samsung_is_auto_capable() requires to arm auto mode.
+ *
+ * NOT included: CMU_DISP (DECON's clock; untested since the buck1s rail fix) and
+ * CMU_PERIC0 (auto mode SErrors on gs201).
+ */
+#define GS201_CMU_CONTROLLER_OPTION	0x0800
+
+/*
+ * Register such a block via CLK_OF_DECLARE (of_clk_init, very early) rather than
+ * the platform_driver below, which has no match entry for these blocks and would
+ * only bind later anyway. enable_bus_clk is a no-op (no clk_name) and no clocks are
+ * registered (nr_clk_ids = 0), so early registration is safe.
+ */
+#define GS201_CMU_HWACG_ONLY(blk)					\
+	static const struct samsung_cmu_info blk##_cmu_info __initconst = { \
+		.auto_clock_gate	= true,				\
+		.option_offset		= GS201_CMU_CONTROLLER_OPTION,	\
+	};								\
+	static void __init gs201_cmu_##blk##_init(struct device_node *np) \
+	{								\
+		exynos_arm64_register_cmu(NULL, np, &blk##_cmu_info);	\
+	}								\
+	CLK_OF_DECLARE(gs201_cmu_##blk, "google,gs201-cmu-" #blk,	\
+		       gs201_cmu_##blk##_init)
+
+GS201_CMU_HWACG_ONLY(nocl0);
+GS201_CMU_HWACG_ONLY(nocl1a);
+GS201_CMU_HWACG_ONLY(nocl1b);
+GS201_CMU_HWACG_ONLY(nocl2a);
+GS201_CMU_HWACG_ONLY(mif);
+GS201_CMU_HWACG_ONLY(eh);
+GS201_CMU_HWACG_ONLY(hsi1);
+
 /* ---- platform_driver ----------------------------------------------------- */
 
 static int __init gs101_cmu_probe(struct platform_device *pdev)

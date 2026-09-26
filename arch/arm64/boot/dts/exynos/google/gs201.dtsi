@@ -402,6 +402,57 @@
 	};
 
 	/*
+	 * Always-on interconnect (NoC) and DRAM-interface CMU blocks. These carry
+	 * no clock tree in mainline (ACPM owns their DVFS); the nodes exist only so
+	 * clk-gs101.c can enable each block's hardware auto-clock-gating (HWACG /
+	 * CONTROLLER_OPTION), which the vendor cmucal does on every gs201 CMU but
+	 * this port never did -- leaving the fabric clocks free-running (the measured
+	 * ~+407 mW idle gap vs AOSP). reg is the standard 0x10000 CMU window; #clock-cells = 0 (empty
+	 * provider, no consumers). See the nocl/mif cmu_info in clk-gs101.c.
+	 */
+	cmu_nocl0: clock-controller@1e000000 {
+		compatible = "google,gs201-cmu-nocl0";
+		reg = <0x0 0x1e000000 0x10000>;
+		#clock-cells = <1>;
+	};
+
+	cmu_nocl1a: clock-controller@20000000 {
+		compatible = "google,gs201-cmu-nocl1a";
+		reg = <0x0 0x20000000 0x10000>;
+		#clock-cells = <1>;
+	};
+
+	cmu_nocl1b: clock-controller@1e800000 {
+		compatible = "google,gs201-cmu-nocl1b";
+		reg = <0x0 0x1e800000 0x10000>;
+		#clock-cells = <1>;
+	};
+
+	cmu_nocl2a: clock-controller@1f000000 {
+		compatible = "google,gs201-cmu-nocl2a";
+		reg = <0x0 0x1f000000 0x10000>;
+		#clock-cells = <1>;
+	};
+
+	cmu_mif: clock-controller@20800000 {
+		compatible = "google,gs201-cmu-mif";
+		reg = <0x0 0x20800000 0x10000>;
+		#clock-cells = <1>;
+	};
+
+	cmu_eh: clock-controller@17000000 {
+		compatible = "google,gs201-cmu-eh";
+		reg = <0x0 0x17000000 0x10000>;
+		#clock-cells = <1>;
+	};
+
+	cmu_hsi1: clock-controller@11800000 {
+		compatible = "google,gs201-cmu-hsi1";
+		reg = <0x0 0x11800000 0x10000>;
+		#clock-cells = <1>;
+	};
+
+	/*
 	 * PERIC0 CMU — supplies clocks to USI0 UART (ttySAC0), I2C/SPI/I3C
 	 * masters in the PERIC0 domain, GPIO/sysreg PCLKs, etc. Driver shares
 	 * `peric0_cmu_info` with the gs101 variant; if a future investigation
