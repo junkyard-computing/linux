@@ -5402,7 +5402,7 @@ static const struct drm_bridge_funcs exynos_panel_bridge_funcs = {
 	.atomic_post_disable = exynos_panel_bridge_post_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.mode_set = exynos_panel_bridge_mode_set,
 };
 
@@ -5892,7 +5892,14 @@ int exynos_panel_common_init(struct mipi_dsi_device *dsi,
 	mutex_init(&ctx->bl_state_lock);
 	mutex_init(&ctx->lp_state_lock);
 
-	drm_panel_init(&ctx->panel, dev, ctx->desc->panel_func, DRM_MODE_CONNECTOR_DSI);
+	/*
+	 * drm_panel is refcounted since 7.3 and drm_panel_init() no longer
+	 * initialises the kref: the panel must come from devm_drm_panel_alloc()
+	 * (see the allocators in exynos_panel_probe() and the per-panel probes),
+	 * which also calls drm_panel_init(). Catch any allocator that did not.
+	 */
+	if (WARN_ON(!ctx->panel.container))
+		return -EINVAL;
 
 	ret = exynos_panel_of_backlight(ctx);
 	if (ret) {
@@ -5975,9 +5982,15 @@ int exynos_panel_probe(struct mipi_dsi_device *dsi)
 {
 	struct exynos_panel *ctx;
 
-	ctx = devm_kzalloc(&dsi->dev, sizeof(struct exynos_panel), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	const struct exynos_panel_desc *desc = of_device_get_match_data(&dsi->dev);
+
+	if (!desc || !desc->panel_func)
+		return -ENODEV;
+	/* refcounted since 7.3: see exynos_panel_common_init() */
+	ctx = devm_drm_panel_alloc(&dsi->dev, struct exynos_panel, panel,
+				   desc->panel_func, DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	return exynos_panel_common_init(dsi, ctx);
 }
