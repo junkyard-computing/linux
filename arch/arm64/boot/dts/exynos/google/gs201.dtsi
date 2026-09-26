@@ -600,6 +600,7 @@
 	drmdecon0: drmdecon@1c240000 {
 		status = "okay";
 		compatible = "samsung,exynos-decon";
+		hibernation;	/* as AOSP gs201-drm-dpu.dtsi: idle DECON power-down (self-refresh) */
 		reg = <0x0 0x1c240000 0x6000>,	/* MAIN */
 		      <0x0 0x1c250000 0x6000>,	/* WIN (shared) */
 		      <0x0 0x1c260000 0x10000>,	/* SUB (shared) */
@@ -646,6 +647,7 @@
 	drmdecon1: drmdecon@1c241000 {
 		status = "okay";
 		compatible = "samsung,exynos-decon";
+		hibernation;	/* as AOSP gs201-drm-dpu.dtsi: idle DECON power-down (self-refresh) */
 		reg = <0x0 0x1c241000 0x6000>,	/* MAIN */
 		      <0x0 0x1c250000 0x6000>,	/* WIN */
 		      <0x0 0x1c260000 0x10000>,	/* SUB */
