@@ -623,9 +623,17 @@ static int ea8182_f10_panel_probe(struct mipi_dsi_device *dsi)
 {
 	struct ea8182_f10_panel *spanel;
 
-	spanel = devm_kzalloc(&dsi->dev, sizeof(*spanel), GFP_KERNEL);
-	if (!spanel)
-		return -ENOMEM;
+	const struct exynos_panel_desc *desc = of_device_get_match_data(&dsi->dev);
+
+	if (!desc || !desc->panel_func)
+		return -ENODEV;
+	/* drm_panel is refcounted since 7.3: allocate the whole container through
+	 * devm_drm_panel_alloc() so its kref is initialised (see
+	 * exynos_panel_common_init()). */
+	spanel = devm_drm_panel_alloc(&dsi->dev, struct ea8182_f10_panel, base.panel,
+				      desc->panel_func, DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(spanel))
+		return PTR_ERR(spanel);
 
 	spanel->is_pixel_off = false;
 
