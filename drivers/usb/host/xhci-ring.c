@@ -1386,6 +1386,74 @@ static void xhci_kill_endpoint_urbs(struct xhci_hcd *xhci,
  * Call with xhci->lock held.
  * lock is relased and re-acquired while giving back urb.
  */
+/*
+ * Recover a dead host controller in place by re-probing it.
+ *
+ * Some xHCs (seen on the gs201 DWC3) wedge their command engine after a
+ * SuperSpeed link drops to SS.Inactive: the Stop Endpoint issued for the
+ * device reset never completes, the command ring cannot be aborted, and the
+ * controller is declared dead. Nothing brings it back until the driver is
+ * rebound -- which re-runs probe, resets the controller (HCRST) and recreates
+ * the root hubs. Doing that from userspace (unbind/bind in sysfs) restores
+ * the attached device within seconds, so do the same here, after
+ * xhci_hc_died() has returned every URB.
+ *
+ * Opt-in, and capped per boot so a controller that dies on every probe
+ * cannot loop forever.
+ */
+static bool reinit_on_death;
+module_param(reinit_on_death, bool, 0644);
+MODULE_PARM_DESC(reinit_on_death, "re-probe the host controller after it is declared dead");
+
+#define XHCI_REINIT_MAX		20
+#define XHCI_REINIT_DELAY	(3 * HZ)
+
+static atomic_t xhci_reinit_count = ATOMIC_INIT(0);
+
+struct xhci_reinit_work {
+	struct delayed_work	work;
+	struct device		*dev;
+	int			n;
+};
+
+static void xhci_reinit_fn(struct work_struct *w)
+{
+	struct xhci_reinit_work *rw =
+		container_of(to_delayed_work(w), struct xhci_reinit_work, work);
+	int ret;
+
+	dev_warn(rw->dev, "re-initialising dead host controller (%d/%d)\n",
+		 rw->n, XHCI_REINIT_MAX);
+	ret = device_reprobe(rw->dev);
+	if (ret)
+		dev_err(rw->dev, "host controller re-probe failed: %d\n", ret);
+	put_device(rw->dev);
+	kfree(rw);
+}
+
+static void xhci_schedule_reinit(struct xhci_hcd *xhci)
+{
+	struct device *dev = xhci_to_hcd(xhci)->self.controller;
+	struct xhci_reinit_work *rw;
+	int n;
+
+	if (!reinit_on_death)
+		return;
+	n = atomic_inc_return(&xhci_reinit_count);
+	if (n > XHCI_REINIT_MAX) {
+		if (n == XHCI_REINIT_MAX + 1)
+			xhci_err(xhci, "controller died %d times, leaving it dead\n", n);
+		return;
+	}
+	rw = kzalloc(sizeof(*rw), GFP_ATOMIC);
+	if (!rw)
+		return;
+	rw->dev = get_device(dev);
+	rw->n = n;
+	INIT_DELAYED_WORK(&rw->work, xhci_reinit_fn);
+	schedule_delayed_work(&rw->work, XHCI_REINIT_DELAY);
+}
+
 void xhci_hc_died(struct xhci_hcd *xhci)
 {
 	bool notify;
@@ -1410,8 +1478,10 @@ void xhci_hc_died(struct xhci_hcd *xhci)
 	}
 
 	/* inform usb core hc died if PCI remove isn't already handling it */
-	if (notify)
+	if (notify) {
 		usb_hc_died(xhci_to_hcd(xhci));
+		xhci_schedule_reinit(xhci);
+	}
 }
 
 /*
