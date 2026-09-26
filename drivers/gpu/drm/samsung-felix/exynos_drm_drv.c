@@ -513,6 +513,7 @@ static struct drm_private_state *exynos_atomic_create_priv_state(struct drm_priv
 		return ERR_PTR(-ENOMEM);
 
 	priv_state->available_win_mask = BIT(MAX_WIN_PER_DECON) - 1;
+	__drm_atomic_helper_private_obj_create_state(obj, &priv_state->base);
 
 	return &priv_state->base;
 }
