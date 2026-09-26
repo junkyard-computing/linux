@@ -589,21 +589,6 @@
 	};
 
 	/*
-	 * felix: CMU_DISP clock-controller. Exposes the DECON clock gates so the
-	 * clk driver holds them enabled (CLK_IS_CRITICAL + auto_clock_gate off in
-	 * disp_cmu_info), defeating the hardware idle-gate that otherwise leaves a
-	 * late DECON modeset touching a powered-but-unclocked block -> AXI stall ->
-	 * hard-lockup boot storm. "bus" parent is cmu_top's DISP distribution clock.
-	 */
-	cmu_disp: clock-controller@1c200000 {
-		compatible = "google,gs201-cmu-disp";
-		reg = <0x0 0x1c200000 0x10000>;
-		#clock-cells = <1>;
-		clocks = <&oscclk>, <&cmu_top CLK_DOUT_CMU_DISP_BUS>;
-		clock-names = "oscclk", "bus";
-	};
-
-	/*
 	 * DECON0 — the INNER/main fold display pipe (ana6707-f10, 1840x2208).
 	 * Ported from AOSP gs201-drm-dpu.dtsi with the same simplifications the
 	 * DECON1 node below already makes: no `iommus`/`samsung,iommu-group`
