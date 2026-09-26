@@ -5,10 +5,7 @@
 //! IOMMU-mapped CREATE_BO path (per-fd device address space) lands in M2.
 
 use kernel::{
-    drm::{
-        gem,
-        DeviceContext, //
-    },
+    drm::gem,
     prelude::*, //
 };
 
@@ -28,8 +25,8 @@ impl gem::DriverObject for BoData {
     type Driver = EdgeTpuDriver;
     type Args = BoCreateArgs;
 
-    fn new<Ctx: DeviceContext>(
-        _dev: &EdgeTpuDevice<Ctx>,
+    fn new(
+        _dev: &EdgeTpuDevice,
         _size: usize,
         _args: BoCreateArgs,
     ) -> impl PinInit<Self, Error> {
