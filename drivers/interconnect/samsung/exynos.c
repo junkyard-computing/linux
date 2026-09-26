@@ -144,37 +144,41 @@ static int exynos_generic_icc_probe(struct platform_device *pdev)
 		priv->bus_clk_ratio = EXYNOS_ICC_DEFAULT_BUS_CLK_RATIO;
 
 	icc_node->data = priv;
-	icc_node_add(icc_node, provider);
 
 	/*
-	 * Register a PM QoS request for the parent (devfreq) device.
+	 * Register a PM QoS request for the parent (devfreq) device. This must
+	 * precede icc_node_add(): with no ->get_bw() the core starts the node at
+	 * INT_MAX and applies that through ->set(), which updates this request.
 	 */
 	ret = dev_pm_qos_add_request(bus_dev, &priv->qos_req,
 				     DEV_PM_QOS_MIN_FREQUENCY, 0);
-	if (ret < 0)
-		goto err_node_del;
+	if (ret < 0) {
+		icc_node_destroy(pdev->id);
+		return ret;
+	}
+
+	icc_node_add(icc_node, provider);
 
 	icc_parent_node = exynos_icc_get_parent(bus_dev->of_node);
 	if (IS_ERR(icc_parent_node)) {
 		ret = PTR_ERR(icc_parent_node);
-		goto err_pmqos_del;
+		goto err_node_del;
 	}
 	if (icc_parent_node) {
 		ret = icc_link_create(icc_node, icc_parent_node->id);
 		if (ret < 0)
-			goto err_pmqos_del;
+			goto err_node_del;
 	}
 
 	ret = icc_provider_register(provider);
 	if (ret < 0)
-		goto err_pmqos_del;
+		goto err_node_del;
 
 	return 0;
 
-err_pmqos_del:
-	dev_pm_qos_remove_request(&priv->qos_req);
 err_node_del:
 	icc_nodes_remove(provider);
+	dev_pm_qos_remove_request(&priv->qos_req);
 
 	return ret;
 }
