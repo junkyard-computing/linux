@@ -74,6 +74,17 @@ impl platform::Driver for EdgeTpuPlatformDriver {
         pdev: &'bound platform::Device<Core<'_>>,
         _info: Option<&'bound Self::IdInfo>,
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+        // Defer until the TPU is attached to its SysMMU. samsung_iommu loads in
+        // parallel with this module; binding first makes the IOMMU attach late
+        // ("late IOMMU probe at driver bind", seen on 1 of 11 fast boots), under
+        // a driver that already set up its buffers. Nothing is acquired yet, so
+        // deferring here unwinds cleanly.
+        // SAFETY: `pdev` is a valid bound platform device for the call.
+        if !unsafe { bindings::edgetpu_iommu_ready(pdev.as_ref().as_raw()) } {
+            dev_info!(pdev, "edgetpu: SysMMU not attached yet, deferring probe\n");
+            Err::<(), _>(EPROBE_DEFER)?;
+        }
+
         // Gate the whole probe on GSA/Trusty IPC being reachable, BEFORE acquiring
         // any resources. edgetpu's platform device probes ~10-80 ms before the
         // trusty_ipc virtio transport comes online, so on the very first cold boot

@@ -120,6 +120,7 @@ void edgetpu_csr_write32(u32 off, u32 val);
  * (in the DT `dma-window`, 0x18000000+). The firmware reaches VII inference
  * buffers through these translations. @dev is the edgetpu platform device.
  */
+bool edgetpu_iommu_ready(struct device *dev);
 int edgetpu_iommu_map(struct device *dev, u64 iova, phys_addr_t paddr, size_t size);
 void edgetpu_iommu_unmap(struct device *dev, u64 iova, size_t size);
 

@@ -647,6 +647,18 @@ module_exit(edgetpu_gsa_exit);
  * device's default (unmanaged) domain, attached by the IOMMU core via the
  * `iommus = <&sysmmu_tpu>` DT link. @dev is the edgetpu platform device.
  */
+/*
+ * Whether  is attached to its SysMMU yet. samsung_iommu is a module loaded in
+ * parallel with edgetpu; if edgetpu binds first, the IOMMU attaches late
+ * ("late IOMMU probe at driver bind") and BO mappings would target a domain the
+ * driver never saw at probe. Probe defers until this is true.
+ */
+bool edgetpu_iommu_ready(struct device *dev)
+{
+	return iommu_get_domain_for_dev(dev) != NULL;
+}
+EXPORT_SYMBOL_GPL(edgetpu_iommu_ready);
+
 int edgetpu_iommu_map(struct device *dev, u64 iova, phys_addr_t paddr, size_t size)
 {
 	struct iommu_domain *dom = iommu_get_domain_for_dev(dev);
