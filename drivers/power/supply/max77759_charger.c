@@ -784,23 +784,6 @@ static void psy_work_item(struct work_struct *work)
 			if (!ret)
 				ret = __charger_set_mode(chg,
 						MAX77759_CHGR_MODE_CHG_BUCK_ON);
-		} else if (charger_input_valid(chg) > 0) {
-			/*
-			 * Input still present but the PD path isn't offering current
-			 * (typically battery full -> sink contract dropped). Stay in
-			 * BUCK rather than going OFF: on a unit WITH a battery, BUCK
-			 * keeps VSYS regulated from the input, so the next boot's ~t12
-			 * display-init transient can't sag VSYS into the max77759
-			 * SYS_UVLO / S2MPG13 IF-PMIC UVLO (0xcfcd). Charge current just
-			 * tapers -- this is normal power-path behaviour. Going OFF here
-			 * (the old default) drops VSYS onto the unregulated battery FET,
-			 * which is exactly why full-battery boots and warm reboots trip
-			 * 0xcfcd while charging-SoC/cold boots (charger buck-on) survive.
-			 * Battery-less field units always have input present and so are
-			 * unaffected/already covered.
-			 */
-			ret = __charger_set_mode(chg,
-						MAX77759_CHGR_MODE_CHG_BUCK_ON);
 		} else {
 			ret = __charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
 		}
@@ -947,33 +930,20 @@ static void max77759_charger_shutdown(struct platform_device *pdev)
 {
 	struct max77759_charger *chg = platform_get_drvdata(pdev);
 
-	if (!chg)
-		return;
-
 	/*
-	 * Safe the reverse-boost (host-mode VBUS / chgin-otg) before the system
-	 * resets: on gs201/felix a warm reset (reboot=warm -> PSCI SYSTEM_RESET2)
-	 * does not tear down the Type-C link, and nothing else disables the boost,
-	 * so it would stay in OTG_BOOST_ON / ILIM=1500mA straight through the
-	 * reset and trip the IF-PMIC UVLO ("0xcfcd"); a UVLO reset preserves the
-	 * boost state, so every subsequent boot re-trips it -> a reset loop only a
-	 * cold power-off clears.
-	 *
-	 * But safe ONLY the boost. This handler used to force MODE=OFF
-	 * unconditionally, which also tore down the BUCK (sink) path -- and THAT
-	 * is what made OS/warm reboots trip a *different* 0xcfcd: the sink BUCK
-	 * regulates VSYS from the input, and leaving it on across the warm reset
-	 * holds VSYS stiff through the next boot's ~t12 display-init transient,
-	 * exactly as a cold boot inherits buck-on from the bootloader. Forcing it
-	 * off here dropped VSYS onto the battery FET for the warm boot, and the
-	 * transient sagged VSYS into the max77759 SYS_UVLO / S2MPG13 IF-PMIC UVLO
-	 * -- reproducible as "cold/fastboot boots clean, OS reboots UVLO", at any
-	 * battery SoC. So preserve BUCK; only OTG_BOOST is dangerous to carry.
+	 * Force the charger OFF before the system resets. This matters most for
+	 * the reverse-boost (host-mode VBUS / chgin-otg) that sources a dongle:
+	 * on gs201/felix a warm reset (reboot=warm -> PSCI SYSTEM_RESET2) does
+	 * not tear down the Type-C link, and nothing else disables the boost via
+	 * the regulator path, so it stays in OTG_BOOST_ON / ILIM=1500mA straight
+	 * through the reset. That trips the IF-PMIC under-voltage lockout
+	 * ("0xcfcd - UVLO (IF-PMIC)"); worse, a UVLO reset preserves the boost
+	 * state, so every subsequent boot re-trips it -> a reset loop that only a
+	 * cold power-off clears. Writing CHG_CNFG_00 MODE=OFF here safes the boost
+	 * before the reset so warm reboots are reliable.
 	 */
-	scoped_guard(mutex, &chg->lock) {
-		if (chg->mode == MAX77759_CHGR_MODE_OTG_BOOST_ON)
-			__charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
-	}
+	if (chg)
+		charger_set_mode(chg, MAX77759_CHGR_MODE_OFF);
 }
 
 static const struct platform_device_id max77759_charger_id[] = {
