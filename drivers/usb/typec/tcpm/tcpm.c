@@ -456,6 +456,9 @@ enum aug_req_type {
 	PD_SPR_AVS,
 };
 
+/* vSafe0V polls in SRC_ATTACH_WAIT before restarting toggling (~5 s at PD_T_SAFE_0V) */
+#define SRC_ATTACH_VSAFE0V_POLLS	8
+
 struct tcpm_port {
 	struct device *dev;
 
@@ -507,6 +510,8 @@ struct tcpm_port {
 	 * Set to false when vbus is greater than VSAFE0V max.
 	 */
 	bool vbus_vsafe0v;
+	/* SRC_ATTACH_WAIT vSafe0V polls without an alert, see run_state_machine() */
+	unsigned int vsafe0v_polls;
 
 	bool vbus_never_low;
 	bool vbus_source;
@@ -5433,6 +5438,7 @@ static void run_state_machine(struct tcpm_port *port)
 	case SRC_UNATTACHED:
 		if (!port->non_pd_role_swap)
 			tcpm_swap_complete(port, -ENOTCONN);
+		port->vsafe0v_polls = 0;
 		tcpm_src_detach(port);
 		if (port->potential_contaminant) {
 			tcpm_set_state(port, CHECK_CONTAMINANT, 0);
@@ -5458,6 +5464,31 @@ static void run_state_machine(struct tcpm_port *port)
 				       tcpm_try_snk(port) ? SNK_TRY
 							  : SRC_ATTACHED,
 				       port->timings.cc_debounce_time);
+		else if (tcpm_port_is_source(port) && !port->vbus_present &&
+			 port->tcpc->is_vbus_vsafe0v) {
+			/*
+			 * vbus_vsafe0v is only refreshed by a VBUS event. When VBUS
+			 * was switched off while still above vSafe0V, the flag stays
+			 * false until the TCPC raises its vSafe0V alert; if that
+			 * alert is missed, this state waits forever with the partner
+			 * attached (seen on a MAX77759: 8 h, no further state change).
+			 * Poll the level instead, and if VBUS genuinely never gets to
+			 * vSafe0V, restart toggling rather than wait indefinitely.
+			 */
+			if (port->tcpc->is_vbus_vsafe0v(port->tcpc)) {
+				tcpm_log(port, "vSafe0V reached without an alert");
+				port->vbus_vsafe0v = true;
+				tcpm_set_state(port,
+					       tcpm_try_snk(port) ? SNK_TRY
+								  : SRC_ATTACHED,
+					       port->timings.cc_debounce_time);
+			} else if (++port->vsafe0v_polls > SRC_ATTACH_VSAFE0V_POLLS) {
+				tcpm_log(port, "VBUS never reached vSafe0V, restarting toggling");
+				tcpm_set_state(port, SRC_UNATTACHED, 0);
+			} else {
+				tcpm_set_state(port, SRC_ATTACH_WAIT, PD_T_SAFE_0V);
+			}
+		}
 		break;
 
 	case SNK_TRY:
