@@ -837,7 +837,6 @@ static bool tcpm_log_full(struct tcpm_port *port)
 		(port->logbuffer_head + 1) % LOG_BUFFER_ENTRIES;
 }
 
-__printf(2, 0)
 /*
  * Mirror every TCPM log entry to the kernel log. The debugfs ring above is in
  * memory only, stops recording once full, is gone on reboot, and needs a shell
@@ -851,6 +850,7 @@ static bool log_printk = true;
 module_param(log_printk, bool, 0644);
 MODULE_PARM_DESC(log_printk, "Also emit TCPM log entries to the kernel log");
 
+__printf(2, 0)
 static void _tcpm_log(struct tcpm_port *port, const char *fmt, va_list args)
 {
 	char tmpbuffer[LOG_BUFFER_ENTRY_SIZE];
