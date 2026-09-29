@@ -14,6 +14,7 @@ int panthor_devfreq_init(struct panthor_device *ptdev);
 
 void panthor_devfreq_resume(struct panthor_device *ptdev);
 void panthor_devfreq_suspend(struct panthor_device *ptdev);
+unsigned long panthor_devfreq_gs201_g3dl2_rate(unsigned long g3d_rate);
 
 void panthor_devfreq_record_busy(struct panthor_device *ptdev);
 void panthor_devfreq_record_idle(struct panthor_device *ptdev);

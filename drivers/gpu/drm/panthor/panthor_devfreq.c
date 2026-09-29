@@ -60,10 +60,44 @@ static void panthor_devfreq_update_utilization(struct panthor_devfreq *pdevfreq)
 	pdevfreq->time_last_update = now;
 }
 
+/*
+ * gs201: the GPU OPP only scales the "core" (G3D, shader) clock; g3dl2
+ * ("stacks", the L2/bus/memory-interface clock) must be kept at or above it.
+ * AOSP's pixel DVFS states the constraint (CLK_G3DL2 >= CLK_G3D) and pairs
+ * every G3D level with a G3DL2 rate in gs201-gpu.dtsi's gpu_dvfs_table; this
+ * is that pairing. Letting G3D run above G3DL2 -- the old code left g3dl2 at
+ * 151MHz at the lowest OPP, after every resume, and for the window between
+ * the two clk_set_rate() calls on every upward step -- corrupts GPU work:
+ * wrong results, runaway shaders and stray writes (panthor page faults),
+ * reproducible by switching the G3D rate under load.
+ */
+unsigned long panthor_devfreq_gs201_g3dl2_rate(unsigned long g3d_rate)
+{
+	static const struct {
+		unsigned long g3d_max, g3dl2;
+	} pairs[] = {
+		{ 251000000, 302000000 },
+		{ 351000000, 470000000 },
+		{ 471000000, 603000000 },
+		{ 572000000, 750000000 },
+		{ 701000000, 885000000 },
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(pairs); i++) {
+		if (g3d_rate <= pairs[i].g3d_max)
+			return pairs[i].g3dl2;
+	}
+
+	return 996000000;
+}
+
 static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
 				  u32 flags)
 {
 	struct panthor_device *ptdev = dev_get_drvdata(dev);
+	unsigned long old_freq = clk_get_rate(ptdev->clks.core);
+	unsigned long l2_rate;
 	struct dev_pm_opp *opp;
 	int err;
 
@@ -71,30 +105,19 @@ static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
 	if (IS_ERR(opp))
 		return PTR_ERR(opp);
 	dev_pm_opp_put(opp);
+	l2_rate = panthor_devfreq_gs201_g3dl2_rate(*freq);
+
+	/* Keep G3DL2 >= G3D throughout: raise L2 before G3D goes up... */
+	if (ptdev->clks.stacks && *freq > old_freq)
+		clk_set_rate(ptdev->clks.stacks, l2_rate);
 
 	err = dev_pm_opp_set_rate(dev, *freq);
 	if (err)
 		return err;
 
-	/*
-	 * gs201: the GPU OPP only scales the "core" clock, so drive g3dl2
-	 * ("stacks", the L2/bus/memory-interface clock) from here, coupled to GPU
-	 * load: full rate when devfreq is above its idle floor (a real job needs
-	 * the memory bandwidth), low otherwise. This is where the old resume-time
-	 * pin moved to -- forcing 996MHz at probe/resume spiked the G3D rail during
-	 * the boot ramp and tripped IF-PMIC UVLO. Demand-driven keeps the bandwidth
-	 * without the boot pile-up.
-	 */
-	if (ptdev->clks.stacks) {
-		unsigned long min_freq = 0;
-
-		/* min_freq=0 -> ceil returns the lowest OPP's frequency */
-		opp = dev_pm_opp_find_freq_ceil(dev, &min_freq);
-		if (!IS_ERR(opp))
-			dev_pm_opp_put(opp);
-		clk_set_rate(ptdev->clks.stacks,
-			     *freq > min_freq ? 996000000 : 151000000);
-	}
+	/* ...and only lower it once G3D has come down. */
+	if (ptdev->clks.stacks && *freq <= old_freq)
+		clk_set_rate(ptdev->clks.stacks, l2_rate);
 
 	return 0;
 }
