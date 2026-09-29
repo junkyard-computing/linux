@@ -520,15 +520,17 @@ int panthor_device_resume(struct device *dev)
 		goto err_disable_core_clk;
 
 	/*
-	 * gs201: g3dl2 ("stacks", the GPU L2/bus/memory-interface clock, which the
-	 * GPU OPP does NOT scale) is raised to full rate ON DEMAND in
-	 * panthor_devfreq_target() -- deliberately NOT here. Forcing it to 996MHz in
-	 * resume fired at probe (pm_runtime_resume_and_get) during the ~12s boot
-	 * ramp, and a lone 151->996MHz step on the G3D rail there sagged the IF-PMIC
-	 * into UVLO (full battery, transient rail sag). Leave stacks at its low
-	 * default until a real GPU job drives devfreq above its idle floor; it stays
-	 * clk_prepare_enable'd (above) so the target callback can change its rate.
+	 * gs201: suspend drops g3dl2 ("stacks") to 151MHz but leaves G3D at its
+	 * last OPP, so re-pair g3dl2 with the current G3D rate before the GPU runs
+	 * anything (G3DL2 >= G3D, see panthor_devfreq_gs201_g3dl2_rate()).
+	 * Otherwise work submitted right after resume runs with G3D above G3DL2
+	 * until devfreq next re-targets. At probe G3D sits at its lowest OPP, so
+	 * this is a small step to 302MHz, not the lone 151->996MHz step that used
+	 * to sag the IF-PMIC into UVLO during the boot ramp.
 	 */
+	if (ptdev->clks.stacks)
+		clk_set_rate(ptdev->clks.stacks,
+			     panthor_devfreq_gs201_g3dl2_rate(clk_get_rate(ptdev->clks.core)));
 
 	ret = clk_prepare_enable(ptdev->clks.coregroup);
 	if (ret)
