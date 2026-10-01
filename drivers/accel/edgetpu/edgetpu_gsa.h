@@ -143,4 +143,22 @@ void edgetpu_bo_sysmem_free(struct device *dev, void *cpu_va, u64 iova, size_t s
 void edgetpu_bo_write_bytes(void *cpu_va, u64 offset, const void *src, size_t len);
 void edgetpu_bo_read_bytes(const void *cpu_va, u64 offset, void *dst, size_t len);
 
+/*
+ * dma-buf import (PRIME). A buffer allocated elsewhere -- a udmabuf over a
+ * memfd that io_uring fills, a dma-heap buffer, a GPU export -- is attached to
+ * the edgetpu device and mapped through the DMA API into the same SysMMU
+ * domain, and its DMA address is the TPU-VA. The DMA API allocates top-down
+ * from the end of the firmware's window, so imports sit above the driver's own
+ * IOVA bump (which ends at EDGETPU_IOVA_BUMP_END); an import that lands in the
+ * bump range, past the window, or not as one contiguous IOVA range is refused.
+ *
+ * edgetpu_dmabuf_import takes a reference on the dma-buf behind @fd and returns
+ * an opaque @handle for edgetpu_dmabuf_release, plus the TPU-VA and byte size.
+ */
+#define EDGETPU_IOVA_BUMP_END	0x80000000ULL
+#define EDGETPU_IOVA_WINDOW_END	0xfffff000ULL
+
+int edgetpu_dmabuf_import(struct device *dev, int fd, void **handle, u64 *iova, u64 *size);
+void edgetpu_dmabuf_release(void *handle);
+
 #endif /* __EDGETPU_GSA_H */

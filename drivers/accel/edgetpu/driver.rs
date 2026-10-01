@@ -231,5 +231,6 @@ impl drm::Driver for EdgeTpuDriver {
         (EDGETPU_BO_READ, drm_edgetpu_bo_read, ioctl::RENDER_ALLOW, EdgeTpuFileData::bo_read),
         (EDGETPU_SUBMIT, drm_edgetpu_submit, ioctl::RENDER_ALLOW, EdgeTpuFileData::submit),
         (EDGETPU_RESET, drm_edgetpu_reset, ioctl::RENDER_ALLOW, EdgeTpuFileData::reset),
+        (EDGETPU_IMPORT_BO, drm_edgetpu_import_bo, ioctl::RENDER_ALLOW, EdgeTpuFileData::import_bo),
     }
 }

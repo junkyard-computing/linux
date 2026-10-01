@@ -127,10 +127,14 @@ pub(crate) fn read(phys: u64, bytes: &mut [u8]) -> Result {
 /// at `iova`. Host access (BO_WRITE/BO_READ) memcpy's through `cpu_va` (the
 /// backing pages' kernel VA); the firmware reaches it via `iova`. `size` is the
 /// page-aligned allocation the SysMMU mapping and free must both use.
+/// An imported dma-buf (see [`BoAllocator::import`]) has `cpu_va == 0` and a non-zero `import`,
+/// the C glue's handle for releasing it; it is reached from the host through the dma-buf's own
+/// mmap, never through BO_WRITE/BO_READ.
 pub(crate) struct BoEntry {
     pub(crate) cpu_va: u64,
     pub(crate) iova: u64,
     pub(crate) size: u64,
+    pub(crate) import: usize,
 }
 
 /// Copy `bytes` into the system-memory BO at kernel VA `cpu_va` + `offset`.
@@ -191,8 +195,28 @@ impl BoAllocator {
         }
         self.next_iova += aligned;
         let handle = self.table.len() as u32;
-        self.table.push(BoEntry { cpu_va: cpu_va as u64, iova, size: aligned }, GFP_KERNEL)?;
+        self.table.push(BoEntry { cpu_va: cpu_va as u64, iova, size: aligned, import: 0 }, GFP_KERNEL)?;
         Ok((handle, iova))
+    }
+
+    /// Import the dma-buf behind `fd` as a BO and return `(handle, iova, size)`. The C glue
+    /// attaches it to `dev` and maps it through the DMA API, which places it above the IOVA bump,
+    /// so the two never collide. Unlike [`alloc`], an import's IOVA can be reused by a later
+    /// import once this one is released; the firmware's registration dedup keys on (IOVA,
+    /// content), so keep executables in [`alloc`]ed BOs and use imports for tensors.
+    pub(crate) fn import(&mut self, fd: i32, dev: *mut bindings::device) -> Result<(u32, u64, u64)> {
+        let mut handle: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut iova: u64 = 0;
+        let mut size: u64 = 0;
+        // SAFETY: `dev` is the live edgetpu device; the out-pointers are valid locals.
+        to_result(unsafe { bindings::edgetpu_dmabuf_import(dev, fd, &mut handle, &mut iova, &mut size) })?;
+        let bo = self.table.len() as u32;
+        if let Err(e) = self.table.push(BoEntry { cpu_va: 0, iova, size, import: handle as usize }, GFP_KERNEL) {
+            // SAFETY: `handle` came from edgetpu_dmabuf_import and was not stored anywhere.
+            unsafe { bindings::edgetpu_dmabuf_release(handle) };
+            return Err(e.into());
+        }
+        Ok((bo, iova, size))
     }
 
     /// Look up a BO by handle.
@@ -209,6 +233,12 @@ impl BoAllocator {
     /// before wrapping, by which point the old sessions are long torn down.
     pub(crate) fn reset(&mut self, dev: *mut bindings::device) {
         for e in self.table.iter() {
+            if e.import != 0 {
+                // SAFETY: `import` came from edgetpu_dmabuf_import and is released exactly once,
+                // here, before the table is dropped.
+                unsafe { bindings::edgetpu_dmabuf_release(e.import as *mut _) };
+                continue;
+            }
             // SAFETY: `dev` is live; cpu_va/iova/size were returned by edgetpu_bo_sysmem_alloc.
             unsafe {
                 bindings::edgetpu_bo_sysmem_free(dev, e.cpu_va as *mut _, e.iova, e.size as usize)
