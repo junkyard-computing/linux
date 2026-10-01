@@ -23,7 +23,7 @@
 use kernel::{
     device::Device,
     prelude::*,
-    time::{delay::fsleep, Delta},
+    time::{delay::fsleep, Delta, Instant, Monotonic},
 };
 
 use crate::csr;
@@ -215,19 +215,29 @@ impl Vii {
         csr::write(self.cmd_base + CMD_TAIL, self.cmd_tail);
         csr::write(self.cmd_base + CMD_DOORBELL_SET, 1);
 
-        let budget = if timeout_ms == 0 { 1000 } else { timeout_ms as usize };
+        let budget = Delta::from_millis(if timeout_ms == 0 { 1000 } else { timeout_ms as i64 });
+        let spin = Delta::from_millis(1);
+        let start = Instant::<Monotonic>::now();
         let mut got = false;
-        // Hard-spin the response CSR before falling back to a short sleep: an in-kernel fsleep can
-        // overshoot a sub-millisecond firmware response by its own granularity, so spin long enough
-        // to catch the common case in-loop; the sleep tail only covers the (error) timeout budget.
-        'poll: for _ in 0..(budget * 20) {
-            for _ in 0..60000 {
+        // Hard-spin the response CSR for the first millisecond: an in-kernel fsleep can overshoot a
+        // sub-millisecond firmware response by its own granularity. After that, poll with short
+        // sleeps. The budget is wall-clock time: it used to be an iteration count (budget*20 rounds
+        // of 60000 MMIO reads), which for a 2 s budget ran for many minutes when the firmware never
+        // answered -- with the mailbox mutex held, so the next client hung and khungtaskd panicked.
+        'poll: loop {
+            for _ in 0..2000 {
                 if csr::read(self.resp_base + RESP_TAIL) != self.resp_head {
                     got = true;
                     break 'poll;
                 }
             }
-            fsleep(Delta::from_micros(50));
+            let waited = start.elapsed();
+            if waited > budget {
+                break;
+            }
+            if waited > spin {
+                fsleep(Delta::from_micros(50));
+            }
         }
         if !got {
             pr_err!(
