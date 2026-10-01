@@ -9,6 +9,7 @@
  */
 
 #include <linux/device.h>
+#include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
 #include <linux/gfp.h>
 #include <linux/io.h>
@@ -743,5 +744,99 @@ void edgetpu_bo_read_bytes(const void *cpu_va, u64 offset, void *dst, size_t len
 }
 EXPORT_SYMBOL_GPL(edgetpu_bo_read_bytes);
 
+/* dma-buf import (see edgetpu_gsa.h). */
+struct edgetpu_dmabuf {
+	struct dma_buf *buf;
+	struct dma_buf_attachment *attach;
+	struct sg_table *sgt;
+};
+
+int edgetpu_dmabuf_import(struct device *dev, int fd, void **handle, u64 *iova, u64 *size)
+{
+	struct edgetpu_dmabuf *imp;
+	struct scatterlist *sg;
+	dma_addr_t start, end;
+	unsigned int i;
+	int ret;
+
+	imp = kzalloc(sizeof(*imp), GFP_KERNEL);
+	if (!imp)
+		return -ENOMEM;
+
+	imp->buf = dma_buf_get(fd);
+	if (IS_ERR(imp->buf)) {
+		ret = PTR_ERR(imp->buf);
+		goto err_free;
+	}
+	imp->attach = dma_buf_attach(imp->buf, dev);
+	if (IS_ERR(imp->attach)) {
+		ret = PTR_ERR(imp->attach);
+		goto err_put;
+	}
+	/* Pins the exporter's pages and maps them into the TPU's SysMMU domain. */
+	imp->sgt = dma_buf_map_attachment_unlocked(imp->attach, DMA_BIDIRECTIONAL);
+	if (IS_ERR(imp->sgt)) {
+		ret = PTR_ERR(imp->sgt);
+		goto err_detach;
+	}
+
+	/*
+	 * The firmware takes one base address per buffer, so the mapping must be
+	 * one contiguous IOVA range. iommu-dma maps a whole sg_table into one
+	 * range; check rather than assume, since the segments are what we get.
+	 */
+	start = sg_dma_address(imp->sgt->sgl);
+	end = start;
+	for_each_sgtable_dma_sg(imp->sgt, sg, i) {
+		if (sg_dma_address(sg) != end) {
+			dev_err(dev, "edgetpu: dma-buf import not IOVA-contiguous (segment %u at %pad)\n",
+				i, &sg_dma_address(sg));
+			ret = -EINVAL;
+			goto err_unmap;
+		}
+		end += sg_dma_len(sg);
+	}
+	if (end - start < imp->buf->size) {
+		dev_err(dev, "edgetpu: dma-buf import maps %llu of %zu bytes\n",
+			(u64)(end - start), imp->buf->size);
+		ret = -EINVAL;
+		goto err_unmap;
+	}
+	if (start < EDGETPU_IOVA_BUMP_END || end > EDGETPU_IOVA_WINDOW_END) {
+		dev_err(dev, "edgetpu: dma-buf import at %pad..%pad is outside the import window\n",
+			&start, &end);
+		ret = -ENOSPC;
+		goto err_unmap;
+	}
+
+	*handle = imp;
+	*iova = start;
+	*size = imp->buf->size;
+	return 0;
+
+err_unmap:
+	dma_buf_unmap_attachment_unlocked(imp->attach, imp->sgt, DMA_BIDIRECTIONAL);
+err_detach:
+	dma_buf_detach(imp->buf, imp->attach);
+err_put:
+	dma_buf_put(imp->buf);
+err_free:
+	kfree(imp);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(edgetpu_dmabuf_import);
+
+void edgetpu_dmabuf_release(void *handle)
+{
+	struct edgetpu_dmabuf *imp = handle;
+
+	dma_buf_unmap_attachment_unlocked(imp->attach, imp->sgt, DMA_BIDIRECTIONAL);
+	dma_buf_detach(imp->buf, imp->attach);
+	dma_buf_put(imp->buf);
+	kfree(imp);
+}
+EXPORT_SYMBOL_GPL(edgetpu_dmabuf_release);
+
 MODULE_DESCRIPTION("GSA secure-firmware glue for the gs201 Edge TPU accel driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("DMA_BUF");

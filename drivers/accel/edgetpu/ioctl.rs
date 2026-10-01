@@ -92,6 +92,22 @@ impl EdgeTpuFileData {
         Ok(0)
     }
 
+    /// Import a dma-buf as a BO and return its handle, TPU-VA and size.
+    pub(crate) fn import_bo(
+        ddev: &EdgeTpuDevice<drm::Registered>,
+        _reg: &(),
+        args: &mut uapi::drm_edgetpu_import_bo,
+        _file: &EdgeTpuFile,
+    ) -> Result<u32> {
+        let dev = ddev.pdev.as_ref().as_raw();
+        let mut st = ddev.mbox.lock();
+        let (handle, iova, size) = st.bo.import(args.fd, dev)?;
+        args.handle = handle;
+        args.tpu_va = iova;
+        args.size = size;
+        Ok(0)
+    }
+
     /// Copy userspace bytes into a BO.
     pub(crate) fn bo_write(
         ddev: &EdgeTpuDevice<drm::Registered>,
@@ -115,6 +131,10 @@ impl EdgeTpuFileData {
             let bo = st.bo.get(args.handle).ok_or(EINVAL)?;
             let end = args.offset.checked_add(args.size).ok_or(EINVAL)?;
             if end > bo.size {
+                return Err(EINVAL);
+            }
+            // Imported dma-bufs have no kernel mapping; the host uses the dma-buf's mmap.
+            if bo.cpu_va == 0 {
                 return Err(EINVAL);
             }
             bo.cpu_va
@@ -141,6 +161,10 @@ impl EdgeTpuFileData {
             let bo = st.bo.get(args.handle).ok_or(EINVAL)?;
             let end = args.offset.checked_add(args.size).ok_or(EINVAL)?;
             if end > bo.size {
+                return Err(EINVAL);
+            }
+            // Imported dma-bufs have no kernel mapping; the host uses the dma-buf's mmap.
+            if bo.cpu_va == 0 {
                 return Err(EINVAL);
             }
             bo.cpu_va

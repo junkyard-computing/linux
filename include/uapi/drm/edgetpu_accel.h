@@ -80,11 +80,30 @@ struct drm_edgetpu_reset {
 	__u32 pad;
 };
 
+/*
+ * Import a dma-buf (a udmabuf over a memfd, a dma-heap buffer, a GPU export)
+ * as a BO, so the TPU reads and writes the same pages as the other users of
+ * the buffer with no copy. Returns a TPU-VA for VII descriptors, the handle,
+ * and the buffer's size. The driver holds a reference on the dma-buf until
+ * the BO heap is reclaimed (RESET or fd close), so userspace may close @fd.
+ *
+ * Imported BOs have no kernel mapping: BO_WRITE / BO_READ on them fail with
+ * EINVAL. Access them through the dma-buf's own mmap, bracketed by
+ * DMA_BUF_IOCTL_SYNC.
+ */
+struct drm_edgetpu_import_bo {
+	__s32 fd;	/* in:  dma-buf fd */
+	__u32 handle;	/* out: BO handle */
+	__u64 tpu_va;	/* out: TPU device VA to embed in VII descriptors */
+	__u64 size;	/* out: bytes */
+};
+
 #define DRM_EDGETPU_CREATE_BO	0x00
 #define DRM_EDGETPU_BO_WRITE	0x01
 #define DRM_EDGETPU_BO_READ	0x02
 #define DRM_EDGETPU_SUBMIT	0x03
 #define DRM_EDGETPU_RESET	0x04
+#define DRM_EDGETPU_IMPORT_BO	0x05
 
 /*
  * The DRM_IOCTL_EDGETPU_* values live in an enum (not #define) so that the
@@ -107,6 +126,8 @@ enum {
 		DRM_IOCTL_EDGETPU(WR, SUBMIT, submit),
 	DRM_IOCTL_EDGETPU_RESET =
 		DRM_IOCTL_EDGETPU(W, RESET, reset),
+	DRM_IOCTL_EDGETPU_IMPORT_BO =
+		DRM_IOCTL_EDGETPU(WR, IMPORT_BO, import_bo),
 };
 
 #if defined(__cplusplus)
