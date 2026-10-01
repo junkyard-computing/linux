@@ -358,7 +358,14 @@ static int samsung_sysmmu_set_domain_range(struct iommu_domain *dom,
 	if (samsung_sysmmu_get_dma_window(dev->of_node, &start, &size))
 		return 0;
 
-	end = start + size;
+	/*
+	 * The aperture end is inclusive (iommu-dma allocates up to and
+	 * including aperture_end), while dma-window gives a size. start + size
+	 * would admit one page past the window -- on the TPU, the page at
+	 * 0xfffff000 that its firmware's 0x18000000 + 0xe7fff000 window
+	 * excludes.
+	 */
+	end = start + size - 1;
 
 	if (end > DMA_BIT_MASK(32))
 		end = DMA_BIT_MASK(32);
