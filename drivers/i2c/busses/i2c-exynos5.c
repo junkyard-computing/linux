@@ -505,12 +505,25 @@ static irqreturn_t exynos5_i2c_irq(int irqno, void *dev_id)
 	unsigned char byte;
 	int len = 0;
 
-	i2c->state = -EINVAL;
-
 	spin_lock(&i2c->lock);
 
 	int_status = readl(i2c->regs + HSI2C_INT_STATUS);
 	writel(int_status, i2c->regs + HSI2C_INT_STATUS);
+
+	/*
+	 * No transfer in progress: this interrupt belongs to one that already
+	 * returned, typically after timing out. Its message lives in the
+	 * caller's memory and may already be gone, so acknowledge and keep
+	 * the controller quiet rather than touch it.
+	 */
+	if (!i2c->msg) {
+		writel(0, i2c->regs + HSI2C_INT_ENABLE);
+		exynos5_i2c_clr_pend_irq(i2c);
+		spin_unlock(&i2c->lock);
+		return IRQ_HANDLED;
+	}
+
+	i2c->state = -EINVAL;
 
 	/* handle interrupt related to the transfer status */
 	switch (i2c->variant->hw) {
@@ -790,7 +803,7 @@ static bool exynos5_i2c_poll_irqs_timeout(struct exynos5_i2c *i2c,
 static int exynos5_i2c_xfer_msg(struct exynos5_i2c *i2c,
 			      struct i2c_msg *msgs, int stop)
 {
-	unsigned long time_left;
+	unsigned long time_left, flags;
 	int ret;
 
 	i2c->msg = msgs;
@@ -819,6 +832,21 @@ static int exynos5_i2c_xfer_msg(struct exynos5_i2c *i2c,
 	 */
 	if (ret == 0 && stop)
 		ret = exynos5_i2c_wait_bus_idle(i2c);
+
+	/*
+	 * Retire the message before returning: @msgs is the caller's and may
+	 * not outlive this call. After a timeout the transfer's interrupt can
+	 * still be pending, or running on another CPU; without this it then
+	 * dereferences the stale pointer and writes received bytes through
+	 * whatever msg->buf has become (seen on gs201 as a NULL-pointer oops in
+	 * exynos5_i2c_irq, after fuel-gauge reads timed out under heavy I/O).
+	 */
+	spin_lock_irqsave(&i2c->lock, flags);
+	writel(0, i2c->regs + HSI2C_INT_ENABLE);
+	i2c->msg = NULL;
+	spin_unlock_irqrestore(&i2c->lock, flags);
+	if (!i2c->atomic)
+		synchronize_irq(i2c->irq);
 
 	if (ret < 0) {
 		exynos5_i2c_reset(i2c);
