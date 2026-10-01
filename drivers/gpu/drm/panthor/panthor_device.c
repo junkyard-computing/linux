@@ -520,11 +520,11 @@ int panthor_device_resume(struct device *dev)
 		goto err_disable_core_clk;
 
 	/*
-	 * gs201: suspend drops g3dl2 ("stacks") to 151MHz but leaves G3D at its
-	 * last OPP, so re-pair g3dl2 with the current G3D rate before the GPU runs
-	 * anything (G3DL2 >= G3D, see panthor_devfreq_gs201_g3dl2_rate()).
-	 * Otherwise work submitted right after resume runs with G3D above G3DL2
-	 * until devfreq next re-targets. At probe G3D sits at its lowest OPP, so
+	 * gs201: make sure g3dl2 ("stacks") is paired with the current G3D rate
+	 * before the GPU runs anything (G3DL2 >= G3D, see
+	 * panthor_devfreq_gs201_g3dl2_rate()). Suspend leaves it paired, so this
+	 * only changes anything on the first resume after probe, where g3dl2 is
+	 * whatever the bootloader left it at. At probe G3D sits at its lowest OPP, so
 	 * this is a small step to 302MHz, not the lone 151->996MHz step that used
 	 * to sag the IF-PMIC into UVLO during the boot ramp.
 	 */
@@ -636,11 +636,14 @@ int panthor_device_suspend(struct device *dev)
 	clk_disable_unprepare(ptdev->clks.coregroup);
 
 	/*
-	 * gs201: drop g3dl2/stacks back to its low idle rate before gating, so the
-	 * L2/bus clock isn't left at 996MHz burning power while the GPU is idle.
+	 * gs201: leave g3dl2 ("stacks") at the rate paired with G3D. Dropping it
+	 * to its 151MHz floor here and stepping it back up on resume, just before
+	 * the L2 powers on again, corrupts GPU work under governor-driven DVFS:
+	 * a GPU_SHAREABILITY_FAULT and then a stray write to an unmapped address,
+	 * tens of ms after a resume, with both clocks stable and paired. AOSP
+	 * never changes the GPU clocks at power-off; devfreq lowers G3D (and with
+	 * it g3dl2) once the GPU idles, which is where the power saving belongs.
 	 */
-	if (ptdev->clks.stacks)
-		clk_set_rate(ptdev->clks.stacks, 151000000);
 	clk_disable_unprepare(ptdev->clks.stacks);
 	clk_disable_unprepare(ptdev->clks.core);
 	atomic_set(&ptdev->pm.state, PANTHOR_DEVICE_PM_STATE_SUSPENDED);
