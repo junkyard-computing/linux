@@ -125,40 +125,47 @@ int edgetpu_iommu_map(struct device *dev, u64 iova, phys_addr_t paddr, size_t si
 void edgetpu_iommu_unmap(struct device *dev, u64 iova, size_t size);
 
 /*
- * System-memory buffer objects. Instead of bump-allocating from the tiny (~704
- * KiB) firmware carveout, back each BO with physically-contiguous kernel pages
- * and SysMMU-map them at @iova (the driver's IOVA bump, 0x18000000+). This lifts
- * the heap ceiling to the whole 128 MiB IOVA window, so a whole model forward's
- * executables can stay resident (register-once-dispatch) instead of being
- * recycled every ~35 ops. The TPU is IO-coherent (edgetpu_enable_coherency +
- * IOMMU_CACHE), so the CPU's cached writes are snooped — no explicit cache
- * maintenance, just a barrier before the doorbell / after the response.
+ * System-memory buffer objects. Back each BO with kernel pages and SysMMU-map
+ * them into ONE contiguous range at @iova (the driver's monotonic IOVA bump,
+ * 0x18000000+); the firmware takes one base address per buffer, and that is all
+ * it sees. The pages need not be physically contiguous, so a BO is no longer
+ * bounded by the page allocator's largest block (4 MiB). They are allocated in
+ * the largest chunks available (up to 1 MiB, so the SysMMU can use large
+ * entries) and vmap()ed into one kernel VA for host copies. The TPU is
+ * IO-coherent (edgetpu_enable_coherency + IOMMU_CACHE), so the CPU's cached
+ * writes are snooped — no explicit cache maintenance, just a barrier before the
+ * doorbell / after the response.
  *
- * edgetpu_bo_sysmem_alloc allocates + maps @size bytes and returns the kernel VA
- * for host copies (NULL on failure); edgetpu_bo_sysmem_free unmaps + frees it.
- * edgetpu_bo_write_bytes / edgetpu_bo_read_bytes memcpy through that kernel VA.
+ * edgetpu_bo_sysmem_alloc allocates + maps @size bytes (a multiple of
+ * PAGE_SIZE) and returns the kernel VA for host copies (NULL on failure) plus an
+ * opaque @handle; edgetpu_bo_sysmem_free(@handle) unmaps + frees it.
+ * edgetpu_bo_write_bytes / edgetpu_bo_read_bytes memcpy through the kernel VA.
  */
-void *edgetpu_bo_sysmem_alloc(struct device *dev, u64 iova, size_t size);
-void edgetpu_bo_sysmem_free(struct device *dev, void *cpu_va, u64 iova, size_t size);
+void *edgetpu_bo_sysmem_alloc(struct device *dev, u64 iova, size_t size, void **handle);
+void edgetpu_bo_sysmem_free(struct device *dev, void *handle, u64 iova, size_t size);
 void edgetpu_bo_write_bytes(void *cpu_va, u64 offset, const void *src, size_t len);
 void edgetpu_bo_read_bytes(const void *cpu_va, u64 offset, void *dst, size_t len);
 
 /*
  * dma-buf import (PRIME). A buffer allocated elsewhere -- a udmabuf over a
  * memfd that io_uring fills, a dma-heap buffer, a GPU export -- is attached to
- * the edgetpu device and mapped through the DMA API into the same SysMMU
- * domain, and its DMA address is the TPU-VA. The DMA API allocates top-down
- * from the end of the firmware's window, so imports sit above the driver's own
- * IOVA bump (which ends at EDGETPU_IOVA_BUMP_END); an import that lands in the
- * bump range, past the window, or not as one contiguous IOVA range is refused.
+ * the edgetpu device (which pins it) and then mapped by the driver itself at an
+ * IOVA from its monotonic bump, exactly like a BO: the same shareable
+ * (IOMMU_CACHE) attributes, and an address that never repeats across sessions.
+ * The DMA API's own mapping of the attachment is not handed out. It gave
+ * neither property: the edgetpu node is not dma-coherent, so iommu-dma mapped
+ * imports non-shareable, and its allocator returned the same top-of-window
+ * IOVA for every session's import, which the firmware's registration dedup
+ * (keyed on IOVA + content) confuses with the previous session's buffer.
  *
- * edgetpu_dmabuf_import takes a reference on the dma-buf behind @fd and returns
- * an opaque @handle for edgetpu_dmabuf_release, plus the TPU-VA and byte size.
+ * edgetpu_dmabuf_import takes a reference on the dma-buf behind @fd, attaches
+ * it, and returns an opaque @handle plus its byte size (a multiple of
+ * PAGE_SIZE). edgetpu_dmabuf_map maps it at @iova, for which the caller has
+ * reserved that many bytes. edgetpu_dmabuf_release unmaps it (if mapped) and
+ * drops the reference.
  */
-#define EDGETPU_IOVA_BUMP_END	0x80000000ULL
-#define EDGETPU_IOVA_WINDOW_END	0xfffff000ULL
-
-int edgetpu_dmabuf_import(struct device *dev, int fd, void **handle, u64 *iova, u64 *size);
+int edgetpu_dmabuf_import(struct device *dev, int fd, void **handle, u64 *size);
+int edgetpu_dmabuf_map(void *handle, u64 iova);
 void edgetpu_dmabuf_release(void *handle);
 
 #endif /* __EDGETPU_GSA_H */

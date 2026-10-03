@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/vmalloc.h>
 
 #include <linux/gsa/gsa_tpu.h>
 
@@ -683,48 +684,120 @@ void edgetpu_iommu_unmap(struct device *dev, u64 iova, size_t size)
 EXPORT_SYMBOL_GPL(edgetpu_iommu_unmap);
 
 /*
- * System-memory buffer objects (see edgetpu_gsa.h). Back a BO with
- * physically-contiguous kernel pages and SysMMU-map them at @iova, so BOs are no
- * longer bounded by the ~704 KiB carveout. @size is page-aligned by the caller.
- * The TPU is IO-coherent, so the CPU's cacheable pages are snooped — no cache
- * maintenance needed, only a barrier around host access (write/read helpers).
+ * System-memory buffer objects (see edgetpu_gsa.h): kernel pages, not
+ * physically contiguous, SysMMU-mapped as one contiguous range at @iova and
+ * vmap()ed for host copies.
  */
-void *edgetpu_bo_sysmem_alloc(struct device *dev, u64 iova, size_t size)
+struct edgetpu_sysbo {
+	struct page **pages;
+	unsigned long npages;
+	void *vaddr;
+};
+
+/* Largest physically-contiguous chunk to try (2^8 pages = 1 MiB). */
+#define EDGETPU_BO_CHUNK_ORDER	8
+
+static void edgetpu_sysbo_free_pages(struct edgetpu_sysbo *bo, unsigned long n)
 {
-	unsigned int order = get_order(size);
-	struct page *pg;
-	void *va;
+	while (n)
+		__free_page(bo->pages[--n]);
+	kvfree(bo->pages);
+	kfree(bo);
+}
+
+void *edgetpu_bo_sysmem_alloc(struct device *dev, u64 iova, size_t size, void **handle)
+{
+	struct iommu_domain *dom = iommu_get_domain_for_dev(dev);
+	struct edgetpu_sysbo *bo;
+	unsigned long n = 0;
 	int ret;
 
-	pg = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
-	if (!pg) {
-		dev_err(dev, "edgetpu: BO alloc_pages(order=%u) failed\n", order);
+	if (!dom) {
+		dev_err(dev, "edgetpu: no IOMMU domain (sysmmu not attached?)\n");
 		return NULL;
 	}
-	va = page_address(pg);
+	if (!size || !PAGE_ALIGNED(size))
+		return NULL;
+
+	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	if (!bo)
+		return NULL;
+	bo->npages = size >> PAGE_SHIFT;
+	bo->pages = kvmalloc_array(bo->npages, sizeof(*bo->pages), GFP_KERNEL);
+	if (!bo->pages) {
+		kfree(bo);
+		return NULL;
+	}
+
 	/*
-	 * Map exactly @size (the caller's page-aligned request), NOT the
-	 * order-rounded allocation: the driver's IOVA bump advances by @size, so
-	 * mapping the larger 2^order block would overlap the next BO's IOVA and
-	 * iommu_map would reject it (-EADDRINUSE). The extra tail pages of the
-	 * allocation are simply left unmapped. @size is a multiple of PAGE_SIZE.
+	 * Fill from the largest chunk that still fits, falling back to smaller
+	 * orders when the allocator has none: big chunks keep the SysMMU's large
+	 * entries usable, single pages keep a fragmented system able to satisfy a
+	 * big BO at all. split_page() makes every page individually freeable.
 	 */
-	ret = edgetpu_iommu_map(dev, iova, page_to_phys(pg), size);
-	if (ret) {
-		dev_err(dev, "edgetpu: BO SysMMU map iova=%#llx failed (%d)\n", iova, ret);
-		__free_pages(pg, order);
-		return NULL;
+	while (n < bo->npages) {
+		unsigned int order = min_t(unsigned int, EDGETPU_BO_CHUNK_ORDER,
+					   ilog2(bo->npages - n));
+		struct page *pg;
+		unsigned long i;
+
+		for (;;) {
+			gfp_t gfp = GFP_KERNEL | __GFP_ZERO;
+
+			if (order)
+				gfp |= __GFP_NOWARN | __GFP_NORETRY;
+			pg = alloc_pages(gfp, order);
+			if (pg || !order)
+				break;
+			order--;
+		}
+		if (!pg) {
+			dev_err(dev, "edgetpu: BO alloc of %zu bytes failed after %lu pages\n",
+				size, n);
+			goto err_unmap;
+		}
+		if (order)
+			split_page(pg, order);
+		ret = iommu_map(dom, iova + ((u64)n << PAGE_SHIFT), page_to_phys(pg),
+				PAGE_SIZE << order, IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE,
+				GFP_KERNEL);
+		if (ret) {
+			dev_err(dev, "edgetpu: BO SysMMU map iova=%#llx failed (%d)\n",
+				iova + ((u64)n << PAGE_SHIFT), ret);
+			for (i = 0; i < (1UL << order); i++)
+				__free_page(pg + i);
+			goto err_unmap;
+		}
+		for (i = 0; i < (1UL << order); i++)
+			bo->pages[n++] = pg + i;
 	}
-	return va;
+
+	bo->vaddr = vmap(bo->pages, bo->npages, VM_MAP, PAGE_KERNEL);
+	if (!bo->vaddr) {
+		dev_err(dev, "edgetpu: BO vmap of %zu bytes failed\n", size);
+		goto err_unmap;
+	}
+	*handle = bo;
+	return bo->vaddr;
+
+err_unmap:
+	if (n)
+		iommu_unmap(dom, iova, (size_t)n << PAGE_SHIFT);
+	edgetpu_sysbo_free_pages(bo, n);
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(edgetpu_bo_sysmem_alloc);
 
-void edgetpu_bo_sysmem_free(struct device *dev, void *cpu_va, u64 iova, size_t size)
+void edgetpu_bo_sysmem_free(struct device *dev, void *handle, u64 iova, size_t size)
 {
+	struct edgetpu_sysbo *bo = handle;
+
 	/* Unmap the same @size that was mapped in alloc, then free the pages. */
 	edgetpu_iommu_unmap(dev, iova, size);
-	if (cpu_va)
-		__free_pages(virt_to_page(cpu_va), get_order(size));
+	if (!bo)
+		return;
+	vunmap(bo->vaddr);
+	edgetpu_sysbo_free_pages(bo, bo->npages);
 }
 EXPORT_SYMBOL_GPL(edgetpu_bo_sysmem_free);
 
@@ -749,73 +822,52 @@ struct edgetpu_dmabuf {
 	struct dma_buf *buf;
 	struct dma_buf_attachment *attach;
 	struct sg_table *sgt;
+	struct iommu_domain *dom;
+	u64 iova;		/* driver-chosen TPU-VA; 0 until mapped */
+	size_t mapped;		/* bytes mapped at @iova */
 };
 
-int edgetpu_dmabuf_import(struct device *dev, int fd, void **handle, u64 *iova, u64 *size)
+int edgetpu_dmabuf_import(struct device *dev, int fd, void **handle, u64 *size)
 {
 	struct edgetpu_dmabuf *imp;
-	struct scatterlist *sg;
-	dma_addr_t start, end;
-	unsigned int i;
 	int ret;
 
 	imp = kzalloc(sizeof(*imp), GFP_KERNEL);
 	if (!imp)
 		return -ENOMEM;
+	imp->dom = iommu_get_domain_for_dev(dev);
+	if (!imp->dom) {
+		ret = -ENODEV;
+		goto err_free;
+	}
 
 	imp->buf = dma_buf_get(fd);
 	if (IS_ERR(imp->buf)) {
 		ret = PTR_ERR(imp->buf);
 		goto err_free;
 	}
+	if (!imp->buf->size || !PAGE_ALIGNED(imp->buf->size)) {
+		dev_err(dev, "edgetpu: dma-buf import of %zu bytes is not page-sized\n",
+			imp->buf->size);
+		ret = -EINVAL;
+		goto err_put;
+	}
 	imp->attach = dma_buf_attach(imp->buf, dev);
 	if (IS_ERR(imp->attach)) {
 		ret = PTR_ERR(imp->attach);
 		goto err_put;
 	}
-	/* Pins the exporter's pages and maps them into the TPU's SysMMU domain. */
+	/* Pins the exporter's pages (and maps them through the DMA API, unused). */
 	imp->sgt = dma_buf_map_attachment_unlocked(imp->attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(imp->sgt)) {
 		ret = PTR_ERR(imp->sgt);
 		goto err_detach;
 	}
 
-	/*
-	 * The firmware takes one base address per buffer, so the mapping must be
-	 * one contiguous IOVA range. iommu-dma maps a whole sg_table into one
-	 * range; check rather than assume, since the segments are what we get.
-	 */
-	start = sg_dma_address(imp->sgt->sgl);
-	end = start;
-	for_each_sgtable_dma_sg(imp->sgt, sg, i) {
-		if (sg_dma_address(sg) != end) {
-			dev_err(dev, "edgetpu: dma-buf import not IOVA-contiguous (segment %u at %pad)\n",
-				i, &sg_dma_address(sg));
-			ret = -EINVAL;
-			goto err_unmap;
-		}
-		end += sg_dma_len(sg);
-	}
-	if (end - start < imp->buf->size) {
-		dev_err(dev, "edgetpu: dma-buf import maps %llu of %zu bytes\n",
-			(u64)(end - start), imp->buf->size);
-		ret = -EINVAL;
-		goto err_unmap;
-	}
-	if (start < EDGETPU_IOVA_BUMP_END || end > EDGETPU_IOVA_WINDOW_END) {
-		dev_err(dev, "edgetpu: dma-buf import at %pad..%pad is outside the import window\n",
-			&start, &end);
-		ret = -ENOSPC;
-		goto err_unmap;
-	}
-
 	*handle = imp;
-	*iova = start;
 	*size = imp->buf->size;
 	return 0;
 
-err_unmap:
-	dma_buf_unmap_attachment_unlocked(imp->attach, imp->sgt, DMA_BIDIRECTIONAL);
 err_detach:
 	dma_buf_detach(imp->buf, imp->attach);
 err_put:
@@ -826,10 +878,81 @@ err_free:
 }
 EXPORT_SYMBOL_GPL(edgetpu_dmabuf_import);
 
+int edgetpu_dmabuf_map(void *handle, u64 iova)
+{
+	struct edgetpu_dmabuf *imp = handle;
+	struct device *dev = imp->attach->dev;
+	struct scatterlist *sg;
+	size_t off = 0;
+	unsigned int i;
+	int ret;
+
+	/*
+	 * Walk the attachment's DMA mapping and translate each page back to its
+	 * physical address through the domain. The scatterlist's page pointers
+	 * are not ours to use: an importer may only use the DMA side, and with
+	 * CONFIG_DMABUF_DEBUG the core scrambles the page side deliberately.
+	 * Physically-contiguous runs are mapped in one call.
+	 */
+	for_each_sgtable_dma_sg(imp->sgt, sg, i) {
+		dma_addr_t a = sg_dma_address(sg);
+		size_t len = sg_dma_len(sg), done = 0;
+
+		if (!PAGE_ALIGNED(a) || !PAGE_ALIGNED(len)) {
+			dev_err(dev, "edgetpu: dma-buf segment %u (%pad +%zu) not page-aligned\n",
+				i, &a, len);
+			ret = -EINVAL;
+			goto err_unmap;
+		}
+		while (done < len) {
+			phys_addr_t p = iommu_iova_to_phys(imp->dom, a + done);
+			size_t run = PAGE_SIZE;
+
+			if (!p) {
+				dev_err(dev, "edgetpu: dma-buf page at %pad has no translation\n", &a);
+				ret = -EFAULT;
+				goto err_unmap;
+			}
+			while (done + run < len &&
+			       iommu_iova_to_phys(imp->dom, a + done + run) == p + run)
+				run += PAGE_SIZE;
+			if (off + run > imp->buf->size) {
+				ret = -EINVAL;
+				goto err_unmap;
+			}
+			ret = iommu_map(imp->dom, iova + off, p, run,
+					IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE, GFP_KERNEL);
+			if (ret) {
+				dev_err(dev, "edgetpu: dma-buf map at %#llx failed (%d)\n",
+					iova + off, ret);
+				goto err_unmap;
+			}
+			off += run;
+			done += run;
+		}
+	}
+	if (off != imp->buf->size) {
+		dev_err(dev, "edgetpu: dma-buf maps %zu of %zu bytes\n", off, imp->buf->size);
+		ret = -EINVAL;
+		goto err_unmap;
+	}
+	imp->iova = iova;
+	imp->mapped = off;
+	return 0;
+
+err_unmap:
+	if (off)
+		iommu_unmap(imp->dom, iova, off);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(edgetpu_dmabuf_map);
+
 void edgetpu_dmabuf_release(void *handle)
 {
 	struct edgetpu_dmabuf *imp = handle;
 
+	if (imp->mapped)
+		iommu_unmap(imp->dom, imp->iova, imp->mapped);
 	dma_buf_unmap_attachment_unlocked(imp->attach, imp->sgt, DMA_BIDIRECTIONAL);
 	dma_buf_detach(imp->buf, imp->attach);
 	dma_buf_put(imp->buf);

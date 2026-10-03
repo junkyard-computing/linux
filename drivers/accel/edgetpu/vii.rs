@@ -202,6 +202,13 @@ impl Vii {
         Ok(())
     }
 
+    /// The firmware has not even dequeued every command we queued: its cmd head lags our tail.
+    /// After a timeout this separates a firmware that stopped consuming the mailbox (wedged) from
+    /// one that took the command and is merely slow to answer it.
+    pub(crate) fn stalled(&self) -> bool {
+        csr::read(self.cmd_base + CMD_HEAD) != self.cmd_tail
+    }
+
     /// Submit one 48-byte VII command element and wait for its 24-byte response.
     /// Runs from ioctls, so all CSR access goes through the persistent mapping.
     pub(crate) fn submit(&mut self, command: &[u8; CMD_ELEM], timeout_ms: u32) -> Result<[u8; RESP_ELEM]> {

@@ -26,7 +26,7 @@ use crate::gem::BoData;
 use crate::ioctl::MailboxState;
 use crate::kci::Kci;
 use crate::mem::BoAllocator;
-use crate::vii::Vii;
+use crate::vii::{Vii, NUM_VII};
 
 // The Edge TPU "TOP" CSR block is a single MMIO window; the mailbox/power CSRs
 // we touch fit in 2 MiB. M2 drives the runtime VII mailbox from ioctls via a
@@ -184,6 +184,8 @@ impl platform::Driver for EdgeTpuPlatformDriver {
                 bo: BoAllocator::new(),
                 // Nobody holds the device until the node is opened; `file.rs` admits exactly one.
                 client_attached: false,
+                stalls: [0; NUM_VII],
+                lost: false,
             }),
         });
 

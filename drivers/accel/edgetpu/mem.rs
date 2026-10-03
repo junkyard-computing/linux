@@ -24,9 +24,10 @@
 //!
 //! Buffer objects are NO LONGER carveout-backed: the ~704 KiB gap could not hold
 //! a whole model forward's executables, forcing a VCID recycle every ~35 ops. BOs
-//! are now backed by physically-contiguous system memory (`BoAllocator`), mapped
-//! into the SysMMU at IOVAs in the 128 MiB `IOVA_BASE..IOVA_END` window, so the
-//! whole forward's executables can stay resident (register-once-dispatch).
+//! are now backed by system memory (`BoAllocator`; pages need not be physically
+//! contiguous), each mapped into the SysMMU as one contiguous range in the
+//! `IOVA_BASE..IOVA_END` window, so the whole forward's executables can stay
+//! resident (register-once-dispatch).
 
 use kernel::{
     alloc::KVec,
@@ -54,12 +55,16 @@ pub(crate) const fn tpu_va(phys: u64) -> u64 {
 /// graph registration by (IOVA, executable content) and hands back the *previous*
 /// session's token — which still references that session's now-freed backing page
 /// — when the same executable is re-registered at the same IOVA. Distinct IOVAs
-/// per session dodge the stale dedup. At ~11 MiB of resident BOs per register-once
-/// forward, this ~2 GiB window holds ~180 sessions before wrapping (far past any
-/// realistic run count against one driver load); a wrap re-poisons only if the
-/// exact same executable lands on a recycled IOVA.
+/// per session dodge the stale dedup. A wrap re-poisons only if the exact same
+/// executable lands on a recycled IOVA, so the window is as large as the DT allows:
+/// 3.1 GiB holds ~280 sessions of an ~11 MiB finch forward, or ~27 of the ~114 MiB
+/// Qwen3-235B predictor set, before wrapping.
+///
+/// The top 512 MiB of the `dma-window` stay with the DMA API: attaching an imported
+/// dma-buf still makes iommu-dma map it (top-down from the window end), although the
+/// driver hands the firmware its own bump mapping instead (see `edgetpu_gsa.h`).
 pub(crate) const IOVA_BASE: u64 = 0x1800_0000;
-pub(crate) const IOVA_END: u64 = 0x8000_0000;
+pub(crate) const IOVA_END: u64 = 0xE000_0000;
 
 /// Map the carveout data region (KCI/VII queues + BO heap) once, so runtime
 /// [`write`]/[`read`] memcpy through a persistent mapping instead of a
@@ -123,17 +128,18 @@ pub(crate) fn read(phys: u64, bytes: &mut [u8]) -> Result {
     to_result(unsafe { bindings::edgetpu_mem_read(phys, bytes.as_mut_ptr().cast(), bytes.len()) })
 }
 
-/// A buffer object: physically-contiguous system memory mapped into the SysMMU
-/// at `iova`. Host access (BO_WRITE/BO_READ) memcpy's through `cpu_va` (the
-/// backing pages' kernel VA); the firmware reaches it via `iova`. `size` is the
-/// page-aligned allocation the SysMMU mapping and free must both use.
-/// An imported dma-buf (see [`BoAllocator::import`]) has `cpu_va == 0` and a non-zero `import`,
-/// the C glue's handle for releasing it; it is reached from the host through the dma-buf's own
-/// mmap, never through BO_WRITE/BO_READ.
+/// A buffer object, mapped into the SysMMU as one contiguous range at `iova`.
+/// An allocated BO ([`BoAllocator::alloc`]) is system memory that need not be
+/// physically contiguous; host access (BO_WRITE/BO_READ) memcpy's through `cpu_va`, a kernel
+/// vmap of its pages, and `sysmem` is the C glue's handle for freeing it. An imported dma-buf
+/// ([`BoAllocator::import`]) has `cpu_va == 0` and a non-zero `import`, the glue's handle for
+/// releasing it; the host reaches it through the dma-buf's own mmap, never BO_WRITE/BO_READ.
+/// `size` is the page-aligned length mapped at `iova`.
 pub(crate) struct BoEntry {
     pub(crate) cpu_va: u64,
     pub(crate) iova: u64,
     pub(crate) size: u64,
+    pub(crate) sysmem: usize,
     pub(crate) import: usize,
 }
 
@@ -154,10 +160,9 @@ pub(crate) fn bo_read(cpu_va: u64, offset: u64, bytes: &mut [u8]) {
     };
 }
 
-/// Trivial bump allocator over the SysMMU IOVA window, backing each BO with
-/// physically-contiguous system memory. No per-BO free (a whole client's BOs are
-/// reclaimed at once by [`reset`], on each DRM open / RESET ioctl), which suits
-/// the map-once/submit-many pattern.
+/// Trivial bump allocator over the SysMMU IOVA window, for both allocated BOs and imported
+/// dma-bufs. No per-BO free (a whole client's BOs are reclaimed at once by [`reset`], on each
+/// DRM open / RESET ioctl), which suits the map-once/submit-many pattern.
 pub(crate) struct BoAllocator {
     next_iova: u64,
     table: KVec<BoEntry>,
@@ -171,49 +176,73 @@ impl BoAllocator {
         }
     }
 
+    /// Reserve `aligned` bytes of IOVA from the monotonic bump. It wraps only when this
+    /// reservation would overrun the window; it is NOT reset per client (see [`reset`]), so
+    /// distinct sessions get distinct IOVAs — the firmware otherwise serves a previous session's
+    /// registration (and its freed backing) when an IOVA is reused across an fd close/reopen.
+    fn reserve(&mut self, aligned: u64) -> Result<u64> {
+        if aligned == 0 || aligned > IOVA_END - IOVA_BASE {
+            return Err(EINVAL);
+        }
+        if self.next_iova + aligned > IOVA_END {
+            self.next_iova = IOVA_BASE;
+        }
+        Ok(self.next_iova)
+    }
+
     /// Allocate a page-aligned BO of `size` bytes backed by system memory, map it
     /// into the TPU SysMMU domain, and return `(handle, iova)`. `dev` is the
     /// edgetpu platform device (whose default domain the IOMMU core attached).
     pub(crate) fn alloc(&mut self, size: u64, dev: *mut bindings::device) -> Result<(u32, u64)> {
         let aligned = size.checked_add(0xfff).ok_or(EINVAL)? & !0xfff;
-        if aligned == 0 || aligned > IOVA_END - IOVA_BASE {
-            return Err(EINVAL);
-        }
-        // Wrap the monotonic IOVA bump only when this allocation would overrun the window. The bump
-        // is NOT reset per client (see `reset`), so distinct sessions get distinct IOVAs — the TPU
-        // otherwise serves stale content from a just-freed page when an IOVA is reused across an fd
-        // close/reopen (register-once keeps a whole forward's BOs resident, so this bites).
-        if self.next_iova + aligned > IOVA_END {
-            self.next_iova = IOVA_BASE;
-        }
-        let iova = self.next_iova;
+        let iova = self.reserve(aligned)?;
+        let mut sysmem: *mut core::ffi::c_void = core::ptr::null_mut();
         // Allocate system pages + SysMMU-map them so the firmware can reach the buffer.
-        // SAFETY: `dev` is the live edgetpu device; the glue allocates + maps `aligned` bytes.
-        let cpu_va = unsafe { bindings::edgetpu_bo_sysmem_alloc(dev, iova, aligned as usize) };
+        // SAFETY: `dev` is the live edgetpu device; the glue allocates + maps `aligned` bytes at
+        // the reserved `iova` and writes its handle to the valid local `sysmem`.
+        let cpu_va = unsafe { bindings::edgetpu_bo_sysmem_alloc(dev, iova, aligned as usize, &mut sysmem) };
         if cpu_va.is_null() {
             return Err(ENOMEM);
         }
         self.next_iova += aligned;
         let handle = self.table.len() as u32;
-        self.table.push(BoEntry { cpu_va: cpu_va as u64, iova, size: aligned, import: 0 }, GFP_KERNEL)?;
+        let entry = BoEntry { cpu_va: cpu_va as u64, iova, size: aligned, sysmem: sysmem as usize, import: 0 };
+        if let Err(e) = self.table.push(entry, GFP_KERNEL) {
+            // SAFETY: `sysmem` came from edgetpu_bo_sysmem_alloc above and was not stored anywhere.
+            unsafe { bindings::edgetpu_bo_sysmem_free(dev, sysmem, iova, aligned as usize) };
+            return Err(e.into());
+        }
         Ok((handle, iova))
     }
 
-    /// Import the dma-buf behind `fd` as a BO and return `(handle, iova, size)`. The C glue
-    /// attaches it to `dev` and maps it through the DMA API, which places it above the IOVA bump,
-    /// so the two never collide. Unlike [`alloc`], an import's IOVA can be reused by a later
-    /// import once this one is released; the firmware's registration dedup keys on (IOVA,
-    /// content), so keep executables in [`alloc`]ed BOs and use imports for tensors.
+    /// Import the dma-buf behind `fd` as a BO and return `(handle, iova, size)`. The glue attaches
+    /// (pins) it; it is then mapped at an IOVA from the same monotonic bump as [`alloc`], with the
+    /// same attributes, so an import gets a fresh IOVA every session just like a BO does.
     pub(crate) fn import(&mut self, fd: i32, dev: *mut bindings::device) -> Result<(u32, u64, u64)> {
         let mut handle: *mut core::ffi::c_void = core::ptr::null_mut();
-        let mut iova: u64 = 0;
         let mut size: u64 = 0;
         // SAFETY: `dev` is the live edgetpu device; the out-pointers are valid locals.
-        to_result(unsafe { bindings::edgetpu_dmabuf_import(dev, fd, &mut handle, &mut iova, &mut size) })?;
+        to_result(unsafe { bindings::edgetpu_dmabuf_import(dev, fd, &mut handle, &mut size) })?;
+        let release = |h: *mut core::ffi::c_void| {
+            // SAFETY: `h` came from edgetpu_dmabuf_import and is not stored anywhere.
+            unsafe { bindings::edgetpu_dmabuf_release(h) }
+        };
+        let iova = match self.reserve(size) {
+            Ok(iova) => iova,
+            Err(e) => {
+                release(handle);
+                return Err(e);
+            }
+        };
+        // SAFETY: `handle` is a live import; `size` bytes at `iova` are reserved for it.
+        if let Err(e) = to_result(unsafe { bindings::edgetpu_dmabuf_map(handle, iova) }) {
+            release(handle);
+            return Err(e);
+        }
+        self.next_iova += size;
         let bo = self.table.len() as u32;
-        if let Err(e) = self.table.push(BoEntry { cpu_va: 0, iova, size, import: handle as usize }, GFP_KERNEL) {
-            // SAFETY: `handle` came from edgetpu_dmabuf_import and was not stored anywhere.
-            unsafe { bindings::edgetpu_dmabuf_release(handle) };
+        if let Err(e) = self.table.push(BoEntry { cpu_va: 0, iova, size, sysmem: 0, import: handle as usize }, GFP_KERNEL) {
+            release(handle);
             return Err(e.into());
         }
         Ok((bo, iova, size))
@@ -224,13 +253,12 @@ impl BoAllocator {
         self.table.get(handle as usize)
     }
 
-    /// Reclaim the whole heap: unmap + free every BO's system memory. The IOVA bump is deliberately
-    /// NOT reset — a fresh client continues from where the last left off (wrapping in [`alloc`] only
-    /// at window-end), so an IOVA is not reused across an fd close/reopen. Reusing one there makes
-    /// the TPU read stale content from the freed page (register-once keeps a forward's BOs resident,
-    /// so the reused-IOVA window is a whole model of buffers), producing wrong output on the 2nd+
-    /// session against one driver load. The 128 MiB window holds ~25 register-once sessions' BOs
-    /// before wrapping, by which point the old sessions are long torn down.
+    /// Reclaim the whole heap: unmap + free every BO and release every import. The IOVA bump is
+    /// deliberately NOT reset — a fresh client continues from where the last left off (wrapping in
+    /// [`reserve`] only at window-end), so an IOVA is not reused across an fd close/reopen. Reusing
+    /// one there makes the TPU read stale content from the freed page (register-once keeps a
+    /// forward's BOs resident, so the reused-IOVA window is a whole model of buffers), producing
+    /// wrong output on the 2nd+ session against one driver load.
     pub(crate) fn reset(&mut self, dev: *mut bindings::device) {
         for e in self.table.iter() {
             if e.import != 0 {
@@ -239,9 +267,9 @@ impl BoAllocator {
                 unsafe { bindings::edgetpu_dmabuf_release(e.import as *mut _) };
                 continue;
             }
-            // SAFETY: `dev` is live; cpu_va/iova/size were returned by edgetpu_bo_sysmem_alloc.
+            // SAFETY: `dev` is live; sysmem/iova/size were returned by edgetpu_bo_sysmem_alloc.
             unsafe {
-                bindings::edgetpu_bo_sysmem_free(dev, e.cpu_va as *mut _, e.iova, e.size as usize)
+                bindings::edgetpu_bo_sysmem_free(dev, e.sysmem as *mut _, e.iova, e.size as usize)
             };
         }
         self.table = KVec::new();

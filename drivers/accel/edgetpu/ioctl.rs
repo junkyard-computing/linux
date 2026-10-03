@@ -37,7 +37,17 @@ pub(crate) struct MailboxState {
     /// Whether a client currently holds the device: set by `file.rs` on open (which refuses a
     /// second attach with `EBUSY`) and cleared when the fd closes.
     pub(crate) client_attached: bool,
+    /// Consecutive submit timeouts per mailbox in which the firmware had not even dequeued the
+    /// command (see [`Vii::stalled`]).
+    pub(crate) stalls: [u32; NUM_VII],
+    /// The driver restarted the firmware under this client (see [`recover`](Self::recover)), so
+    /// its registrations are gone. Submits fail with `EPIPE` until it RESETs or reopens.
+    pub(crate) lost: bool,
 }
+
+/// A mailbox that stops consuming commands for this many consecutive submit timeouts is taken as
+/// wedged (one timeout alone may be a legitimately slow op that the firmware has not reached yet).
+const WEDGE_STALLS: u32 = 2;
 
 impl MailboxState {
     /// Prepare a fresh session for a new client: reset EVERY VII context onto its FIXED VCID with
@@ -55,6 +65,37 @@ impl MailboxState {
             let _ = self.vii[i].reactivate(dev, &mut self.kci, i as u16);
         }
         self.bo.reset(dev_raw);
+        self.stalls = [0; NUM_VII];
+        self.lost = false;
+    }
+
+    /// After a submit on mailbox `ctx` timed out: decide whether the firmware is wedged, and if
+    /// so restart it in place rather than leave every later command to time out (and the device
+    /// dead until a client thinks to issue RESET flags=1). Wedged means the firmware said so (a
+    /// CRASH / JOB_LOCKUP reverse KCI) or it stopped dequeuing this mailbox for [`WEDGE_STALLS`]
+    /// timeouts running. The restart wipes every registration, so the client is marked lost.
+    fn recover(&mut self, dev: &Device, ctx: usize) {
+        let fatal = self.kci.take_fatal(dev);
+        if self.vii[ctx].stalled() {
+            self.stalls[ctx] += 1;
+        } else {
+            self.stalls[ctx] = 0;
+        }
+        if fatal.is_none() && self.stalls[ctx] < WEDGE_STALLS {
+            return;
+        }
+        dev_err!(
+            dev,
+            "edgetpu: TPU firmware wedged (mailbox {}: {} stalled timeouts, reverse KCI {:?}); restarting it\n",
+            ctx + 1,
+            self.stalls[ctx],
+            fatal
+        );
+        if let Err(e) = self.power_cycle(dev) {
+            dev_err!(dev, "edgetpu: firmware restart failed ({:?}); RESET flags=1 to retry\n", e);
+        }
+        self.stalls = [0; NUM_VII];
+        self.lost = true;
     }
 
     /// Full firmware power-cycle: GSA-restart the R52 in place and re-drive the
@@ -66,10 +107,15 @@ impl MailboxState {
     }
 }
 
-/// Largest single BO we allow — a sanity bound on one allocation, well under the
-/// page allocator's `MAX_ORDER` block (a contiguous system-memory BO). The whole
-/// forward's worth of BOs is bounded instead by the 128 MiB IOVA window.
-const BO_MAX: u64 = 4 * 1024 * 1024;
+/// Largest single BO we allow — a sanity bound on one allocation. A BO's pages need not be
+/// physically contiguous (it was capped at the page allocator's 4 MiB largest block while they
+/// had to be, which an 8-layer decode executable outgrew); the whole forward's worth of BOs is
+/// bounded by the IOVA window instead.
+const BO_MAX: u64 = 256 * 1024 * 1024;
+
+/// BO_WRITE/BO_READ stage through a kernel buffer of at most this many bytes per step, so a
+/// large copy needs no large contiguous kmalloc.
+const COPY_CHUNK: usize = 256 * 1024;
 
 impl EdgeTpuFileData {
     /// Allocate a carveout BO and return its handle + TPU device-VA.
@@ -115,34 +161,38 @@ impl EdgeTpuFileData {
         args: &mut uapi::drm_edgetpu_bo_write,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
-        if args.size == 0 || args.size > BO_MAX {
+        let cpu_va = Self::host_bo(ddev, args.handle, args.offset, args.size)?;
+        // Copy after dropping the lock: the copy can be large and the backing memory is stable
+        // for this client (only its own RESET/close frees it). Stage chunk by chunk, so no large
+        // kernel buffer is needed and a user fault leaves nothing half-staged in the lock.
+        let len = args.size as usize;
+        let mut buf = KVec::with_capacity(len.min(COPY_CHUNK), GFP_KERNEL)?;
+        let mut reader = UserSlice::new(UserPtr::from_addr(args.user_ptr as usize), len).reader();
+        let mut done = 0usize;
+        while done < len {
+            let n = (len - done).min(COPY_CHUNK);
+            buf.clear();
+            buf.resize(n, 0, GFP_KERNEL)?;
+            reader.read_slice(&mut buf)?;
+            mem::bo_write(cpu_va, args.offset + done as u64, &buf);
+            done += n;
+        }
+        Ok(0)
+    }
+
+    /// Validate a host copy of `size` bytes at `offset` into BO `handle` and return the BO's
+    /// kernel VA. Imported dma-bufs have none (the host uses the dma-buf's own mmap).
+    fn host_bo(ddev: &EdgeTpuDevice<drm::Registered>, handle: u32, offset: u64, size: u64) -> Result<u64> {
+        if size == 0 || size > BO_MAX {
             return Err(EINVAL);
         }
-        // Stage the user data first (may fault/sleep) before taking the lock.
-        let len = args.size as usize;
-        let mut buf = KVec::with_capacity(len, GFP_KERNEL)?;
-        buf.resize(len, 0, GFP_KERNEL)?;
-        UserSlice::new(UserPtr::from_addr(args.user_ptr as usize), len)
-            .reader()
-            .read_slice(&mut buf)?;
-
-        let cpu_va = {
-            let st = ddev.mbox.lock();
-            let bo = st.bo.get(args.handle).ok_or(EINVAL)?;
-            let end = args.offset.checked_add(args.size).ok_or(EINVAL)?;
-            if end > bo.size {
-                return Err(EINVAL);
-            }
-            // Imported dma-bufs have no kernel mapping; the host uses the dma-buf's mmap.
-            if bo.cpu_va == 0 {
-                return Err(EINVAL);
-            }
-            bo.cpu_va
-        };
-        // Copy after dropping the lock: the memcpy can be large and the backing
-        // memory is stable for this client (only its own RESET/close frees it).
-        mem::bo_write(cpu_va, args.offset, &buf);
-        Ok(0)
+        let st = ddev.mbox.lock();
+        let bo = st.bo.get(handle).ok_or(EINVAL)?;
+        let end = offset.checked_add(size).ok_or(EINVAL)?;
+        if end > bo.size || bo.cpu_va == 0 {
+            return Err(EINVAL);
+        }
+        Ok(bo.cpu_va)
     }
 
     /// Copy BO bytes back out to userspace.
@@ -152,30 +202,19 @@ impl EdgeTpuFileData {
         args: &mut uapi::drm_edgetpu_bo_read,
         _file: &EdgeTpuFile,
     ) -> Result<u32> {
-        if args.size == 0 || args.size > BO_MAX {
-            return Err(EINVAL);
-        }
+        let cpu_va = Self::host_bo(ddev, args.handle, args.offset, args.size)?;
         let len = args.size as usize;
-        let cpu_va = {
-            let st = ddev.mbox.lock();
-            let bo = st.bo.get(args.handle).ok_or(EINVAL)?;
-            let end = args.offset.checked_add(args.size).ok_or(EINVAL)?;
-            if end > bo.size {
-                return Err(EINVAL);
-            }
-            // Imported dma-bufs have no kernel mapping; the host uses the dma-buf's mmap.
-            if bo.cpu_va == 0 {
-                return Err(EINVAL);
-            }
-            bo.cpu_va
-        };
-
-        let mut buf = KVec::with_capacity(len, GFP_KERNEL)?;
-        buf.resize(len, 0, GFP_KERNEL)?;
-        mem::bo_read(cpu_va, args.offset, &mut buf);
-        UserSlice::new(UserPtr::from_addr(args.user_ptr as usize), len)
-            .writer()
-            .write_slice(&buf)?;
+        let mut buf = KVec::with_capacity(len.min(COPY_CHUNK), GFP_KERNEL)?;
+        let mut writer = UserSlice::new(UserPtr::from_addr(args.user_ptr as usize), len).writer();
+        let mut done = 0usize;
+        while done < len {
+            let n = (len - done).min(COPY_CHUNK);
+            buf.clear();
+            buf.resize(n, 0, GFP_KERNEL)?;
+            mem::bo_read(cpu_va, args.offset + done as u64, &mut buf);
+            writer.write_slice(&buf)?;
+            done += n;
+        }
         Ok(0)
     }
 
@@ -195,7 +234,19 @@ impl EdgeTpuFileData {
         }
         let cmd: [u8; CMD_ELEM] = args.command;
         let mut st = ddev.mbox.lock();
-        let resp: [u8; RESP_ELEM] = st.vii[ctx].submit(&cmd, args.timeout_ms)?;
+        if st.lost {
+            return Err(EPIPE);
+        }
+        let resp: [u8; RESP_ELEM] = match st.vii[ctx].submit(&cmd, args.timeout_ms) {
+            Ok(r) => r,
+            Err(e) => {
+                if e == ETIMEDOUT {
+                    st.recover(ddev.pdev.as_ref(), ctx);
+                }
+                return Err(e);
+            }
+        };
+        st.stalls[ctx] = 0;
         args.response = resp;
         args.context = 0;
         Ok(0)
@@ -218,7 +269,11 @@ impl EdgeTpuFileData {
         // validate the runtime restart path from userspace during TPU idle-PM
         // bring-up. bit 0 == 0 keeps the original soft-reset behaviour.
         if args.flags & 1 != 0 {
-            ddev.mbox.lock().power_cycle(pdev)?;
+            let mut st = ddev.mbox.lock();
+            st.power_cycle(pdev)?;
+            // The client asked for this restart, so it knows its registrations are gone.
+            st.stalls = [0; NUM_VII];
+            st.lost = false;
         } else {
             ddev.mbox.lock().reset_client(pdev, raw);
         }

@@ -18,7 +18,7 @@
 use kernel::{
     device::Device,
     prelude::*,
-    time::{delay::fsleep, Delta},
+    time::{delay::fsleep, Delta, Instant, Monotonic},
 };
 
 use crate::csr;
@@ -96,6 +96,18 @@ const KCI_CODE_CLOSE_DEVICE: u16 = 10;
 const KCI_ERROR_OK: u16 = 0;
 const KCI_ERROR_UNIMPLEMENTED: u16 = 12;
 
+/// A response element whose seq has the MSB set is a *reverse* KCI: a request the firmware sends
+/// on its own, not the reply to one of ours (janeiro `KCI_REVERSE_FLAG`). Codes up to 0x7fff are
+/// chip-specific requests (PM QoS, BTS, ...); 0x8000+ are generic, of which these two mean the
+/// firmware has lost the plot (janeiro `RKCI_FIRMWARE_CRASH`/`RKCI_JOB_LOCKUP`, retval = crash
+/// type / the locked-up VCID).
+const KCI_REVERSE_FLAG: u64 = 1 << 63;
+pub(crate) const RKCI_FIRMWARE_CRASH: u16 = 0x8000;
+pub(crate) const RKCI_JOB_LOCKUP: u16 = 0x8001;
+
+/// How long [`Kci::transact`] waits for its reply (janeiro `KCI_TIMEOUT`).
+const KCI_TIMEOUT_MS: i64 = 1000;
+
 /// The TPU's own S2MPU (s2mpu_tpu@1cc60000, gs201 == S2MPU_V1). Left enforcing,
 /// the firmware reads the AP-placed KCI queues as zeros; open it allow-all.
 const TPU_S2MPU_BASE: u64 = 0x1cc6_0000;
@@ -105,6 +117,9 @@ pub(crate) struct Kci {
     seq: u64,
     cmd_tail: u32,
     resp_head: u32,
+    /// The first fatal reverse KCI (crash / job lockup) seen since the last firmware (re)start,
+    /// as `(code, retval)`; taken by [`take_fatal`](Self::take_fatal).
+    fatal: Option<(u16, u32)>,
 }
 
 impl Kci {
@@ -113,6 +128,7 @@ impl Kci {
             seq: 0,
             cmd_tail: 0,
             resp_head: 0,
+            fatal: None,
         }
     }
 
@@ -157,6 +173,63 @@ impl Kci {
         self.seq = 0;
         self.cmd_tail = 0;
         self.resp_head = 0;
+        self.fatal = None;
+    }
+
+    /// Pop one element off the response queue, if any: `(seq, code, retval)`.
+    fn pop_response(&mut self) -> Result<Option<(u64, u16, u32)>> {
+        if csr::read(KCI_RESP_BASE + RESP_TAIL) == self.resp_head {
+            return Ok(None);
+        }
+        // Read the 16-byte response element (seq u64@0, code u16@8, retval u32@12).
+        let rslot = real_index(self.resp_head);
+        let mut resp = [0u8; RESP_ELEM];
+        mem::read(RESP_Q_PHYS + (rslot * RESP_ELEM) as u64, &mut resp)?;
+        let rseq = u64::from_le_bytes(resp[0..8].try_into().map_err(|_| EINVAL)?);
+        let rcode = u16::from_le_bytes(resp[8..10].try_into().map_err(|_| EINVAL)?);
+        let retval = u32::from_le_bytes(resp[12..16].try_into().map_err(|_| EINVAL)?);
+
+        // Ack: advance resp head (wrap-encoded), clear the resp doorbell.
+        self.resp_head = circ_inc(self.resp_head, QUEUE_SIZE);
+        csr::write(KCI_RESP_BASE + RESP_HEAD, self.resp_head);
+        csr::write(KCI_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
+        Ok(Some((rseq, rcode, retval)))
+    }
+
+    /// Consume one popped element that is not the reply being waited for. Returns `true` if it
+    /// was handled (a reverse KCI, or a stale reply to a command that already timed out) and the
+    /// caller should keep waiting; `false` if it is a reply from the future (a real protocol
+    /// error).
+    fn absorb(&mut self, dev: &Device, rseq: u64, rcode: u16, retval: u32) -> bool {
+        if rseq & KCI_REVERSE_FLAG != 0 {
+            match rcode {
+                RKCI_FIRMWARE_CRASH | RKCI_JOB_LOCKUP => {
+                    let what = if rcode == RKCI_FIRMWARE_CRASH { "a CRASH" } else { "a JOB LOCKUP" };
+                    dev_err!(dev, "edgetpu: firmware reports {} (retval {:#x})\n", what, retval);
+                    if self.fatal.is_none() {
+                        self.fatal = Some((rcode, retval));
+                    }
+                }
+                _ => dev_info!(dev, "edgetpu: ignoring reverse KCI code {:#x} retval {:#x}\n", rcode, retval),
+            }
+            return true;
+        }
+        if rseq < self.seq {
+            dev_warn!(dev, "edgetpu: dropping stale KCI reply seq {} (want {})\n", rseq, self.seq);
+            return true;
+        }
+        false
+    }
+
+    /// Drain everything the firmware has queued without waiting (reverse KCIs, late replies), and
+    /// return the first fatal reverse KCI since the last firmware start, clearing it.
+    pub(crate) fn take_fatal(&mut self, dev: &Device) -> Option<(u16, u32)> {
+        while let Ok(Some((rseq, rcode, retval))) = self.pop_response() {
+            if !self.absorb(dev, rseq, rcode, retval) {
+                dev_err!(dev, "edgetpu: unexpected KCI reply seq {} with none outstanding\n", rseq);
+            }
+        }
+        self.fatal.take()
     }
 
     /// Push one command element and wait for its response. Returns
@@ -186,55 +259,50 @@ impl Kci {
         csr::write(KCI_CMD_BASE + CMD_TAIL, self.cmd_tail);
         csr::write(KCI_CMD_BASE + CMD_DOORBELL_SET, 1);
 
-        // Poll the resp-queue tail for the reply (1 s budget, KCI_TIMEOUT).
-        let mut got = false;
-        // Firmware responds in microseconds; spin-read first, then fall back to a short sleep.
-        // The old 1ms sleep per mailbox round-trip dominated per-op latency (a full model forward
-        // is hundreds of ops × several KCI/VII round-trips), so a tight read loop is a big win.
-        'poll: for _ in 0..2000 {
+        // Wait (wall clock, KCI_TIMEOUT) for the element carrying this command's seq. The firmware
+        // echoes the seq verbatim. Anything else in the queue is absorbed, not mistaken for our
+        // reply: a reverse KCI (seq MSB set) the firmware sent on its own, or a late reply to an
+        // earlier command that already timed out. Taking either as the reply used to leave every
+        // later command reading its predecessor's reply ("resp seq N != N+1" forever, so
+        // OPEN_DEVICE "failed" with the previous command's code until a firmware restart).
+        // Firmware responds in microseconds: spin-read first, then fall back to short sleeps (a 1 ms
+        // sleep per round-trip used to dominate per-op latency).
+        let budget = Delta::from_millis(KCI_TIMEOUT_MS);
+        let start = Instant::<Monotonic>::now();
+        loop {
             for _ in 0..2000 {
                 if csr::read(KCI_RESP_BASE + RESP_TAIL) != self.resp_head {
-                    got = true;
-                    break 'poll;
+                    break;
                 }
+            }
+            while let Some((rseq, rcode, retval)) = self.pop_response()? {
+                if rseq == self.seq {
+                    self.seq += 1;
+                    return Ok((rcode, retval));
+                }
+                if !self.absorb(dev, rseq, rcode, retval) {
+                    dev_err!(dev, "edgetpu: KCI resp seq {} != {}\n", rseq, self.seq);
+                    return Err(EIO);
+                }
+            }
+            if start.elapsed() > budget {
+                break;
             }
             fsleep(Delta::from_micros(50));
         }
-        if !got {
-            dev_err!(
-                dev,
-                "edgetpu: KCI timeout (code {}): cmd[head={} tail={} err={:#x}] resp[tail={} err={:#x}]\n",
-                code,
-                csr::read(KCI_CMD_BASE + CMD_HEAD),
-                self.cmd_tail,
-                csr::read(KCI_CMD_BASE + CMD_ERROR_STATUS),
-                self.resp_head,
-                csr::read(KCI_RESP_BASE + RESP_ERROR_STATUS)
-            );
-            return Err(ETIMEDOUT);
-        }
-
-        // Read the 16-byte response element (seq u64@0, code u16@8, retval u32@12).
-        let rslot = real_index(self.resp_head);
-        let mut resp = [0u8; RESP_ELEM];
-        mem::read(RESP_Q_PHYS + (rslot * RESP_ELEM) as u64, &mut resp)?;
-        let rseq = u64::from_le_bytes(resp[0..8].try_into().map_err(|_| EINVAL)?);
-        let rcode = u16::from_le_bytes(resp[8..10].try_into().map_err(|_| EINVAL)?);
-        let retval = u32::from_le_bytes(resp[12..16].try_into().map_err(|_| EINVAL)?);
-
-        // Ack: advance resp head (wrap-encoded), clear the resp doorbell.
-        self.resp_head = circ_inc(self.resp_head, QUEUE_SIZE);
-        csr::write(KCI_RESP_BASE + RESP_HEAD, self.resp_head);
-        csr::write(KCI_RESP_BASE + RESP_DOORBELL_CLEAR, 1);
-
-        // The firmware echoes the command's seq verbatim; it's a plain monotonic counter (the earlier
-        // "resp seq 0 != N" at the wrap was a stale read from the wrong ring slot, now fixed above).
-        if rseq != self.seq {
-            dev_err!(dev, "edgetpu: KCI resp seq {} != {}\n", rseq, self.seq);
-            return Err(EIO);
-        }
+        dev_err!(
+            dev,
+            "edgetpu: KCI timeout (code {}): cmd[head={} tail={} err={:#x}] resp[tail={} err={:#x}]\n",
+            code,
+            csr::read(KCI_CMD_BASE + CMD_HEAD),
+            self.cmd_tail,
+            csr::read(KCI_CMD_BASE + CMD_ERROR_STATUS),
+            self.resp_head,
+            csr::read(KCI_RESP_BASE + RESP_ERROR_STATUS)
+        );
+        // This seq is spent: if its reply turns up later, `absorb` drops it as stale.
         self.seq += 1;
-        Ok((rcode, retval))
+        Err(ETIMEDOUT)
     }
 
     /// Send `FIRMWARE_INFO` and return the firmware flavor — proves the firmware
