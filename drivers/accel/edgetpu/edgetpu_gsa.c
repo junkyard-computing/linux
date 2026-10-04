@@ -734,10 +734,20 @@ void *edgetpu_bo_sysmem_alloc(struct device *dev, u64 iova, size_t size, void **
 	 * orders when the allocator has none: big chunks keep the SysMMU's large
 	 * entries usable, single pages keep a fragmented system able to satisfy a
 	 * big BO at all. split_page() makes every page individually freeable.
+	 *
+	 * A chunk's order is also capped by the alignment of its offset in the
+	 * BO (n's lowest set bit). alloc_pages() returns naturally aligned
+	 * blocks, and the caller aligns @iova to the largest SysMMU entry
+	 * (1 MiB / 64 KiB), so every chunk then has its IOVA and physical
+	 * address aligned alike and iommu_map() can use 64 KiB / 1 MiB entries
+	 * for it. A fallback to smaller chunks no longer misaligns the rest.
 	 */
 	while (n < bo->npages) {
 		unsigned int order = min_t(unsigned int, EDGETPU_BO_CHUNK_ORDER,
 					   ilog2(bo->npages - n));
+
+		if (n)
+			order = min_t(unsigned int, order, __ffs(n));
 		struct page *pg;
 		unsigned long i;
 

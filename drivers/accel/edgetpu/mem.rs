@@ -180,14 +180,25 @@ impl BoAllocator {
     /// reservation would overrun the window; it is NOT reset per client (see [`reset`]), so
     /// distinct sessions get distinct IOVAs — the firmware otherwise serves a previous session's
     /// registration (and its freed backing) when an IOVA is reused across an fd close/reopen.
+    ///
+    /// The start is aligned to the largest SysMMU entry the buffer can use (1 MiB section for a
+    /// buffer of at least 1 MiB, 64 KiB large page from 64 KiB), so physically contiguous chunks
+    /// of the backing map with large entries: `iommu_map` only uses one where the IOVA and the
+    /// physical address are both aligned to it. With a 4 KiB-aligned start every BO was mapped
+    /// with 4 KiB entries, and streaming a multi-MB executable's weights per run walked the
+    /// tables far more often than the DMA API's size-aligned mappings on AOSP do.
     fn reserve(&mut self, aligned: u64) -> Result<u64> {
         if aligned == 0 || aligned > IOVA_END - IOVA_BASE {
             return Err(EINVAL);
         }
-        if self.next_iova + aligned > IOVA_END {
-            self.next_iova = IOVA_BASE;
+        let align: u64 = if aligned >= 0x10_0000 { 0x10_0000 } else if aligned >= 0x1_0000 { 0x1_0000 } else { 0x1000 };
+        let mut iova = (self.next_iova + align - 1) & !(align - 1);
+        if iova + aligned > IOVA_END {
+            iova = IOVA_BASE;
         }
-        Ok(self.next_iova)
+        // Callers advance the bump past `aligned` bytes from here once the mapping succeeds.
+        self.next_iova = iova;
+        Ok(iova)
     }
 
     /// Allocate a page-aligned BO of `size` bytes backed by system memory, map it
