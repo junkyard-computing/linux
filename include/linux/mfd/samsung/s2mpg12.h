@@ -58,6 +58,9 @@ enum s2mpg12_common_reg {
  */
 enum s2mpg12_pmic_reg {
 	S2MPG12_PMIC_INT1,
+	S2MPG12_PMIC_PWRONSRC = 0x0c,	/* why the PMIC last powered on */
+	S2MPG12_PMIC_OFFSRC1 = 0x0d,	/* why it last powered off; latched */
+	S2MPG12_PMIC_OFFSRC2 = 0x0e,
 	S2MPG12_PMIC_SW_RESET = 0xec,	/* last PMIC register */
 };
 

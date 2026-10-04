@@ -414,12 +414,20 @@ static const struct regmap_access_table s2mpg12_pmic_rd_table = {
 };
 
 /*
- * Read-only by construction: no write ranges at all. Nothing in-tree should
- * ever write a main-PMIC register, and making that structural beats relying on
- * every future caller being careful.
+ * Read-only by construction except for the two power-off-source latches.
+ * Nothing in-tree should write a main-PMIC register, and making that
+ * structural beats relying on every future caller being careful. OFFSRC1/2
+ * are the one exception: probe clears them after logging them, so the next
+ * boot can tell what caused the reset in between (see
+ * sec_pmic_acpm_log_offsrc()).
  */
+static const struct regmap_range s2mpg12_pmic_wr_registers[] = {
+	regmap_reg_range(S2MPG12_PMIC_OFFSRC1, S2MPG12_PMIC_OFFSRC2),
+};
+
 static const struct regmap_access_table s2mpg12_pmic_wr_table = {
-	.n_yes_ranges = 0,
+	.yes_ranges = s2mpg12_pmic_wr_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg12_pmic_wr_registers),
 };
 
 static const struct regmap_config s2mpg12_regmap_config_pmic = {
@@ -504,7 +512,11 @@ static const struct regmap_range s2mpg13_pmic_registers[] = {
 
 static const struct regmap_range s2mpg13_pmic_ro_registers[] = {
 	regmap_reg_range(0x00, 0x03), /* INTx */
-	regmap_reg_range(0x0a, 0x0a), /* OFFSRC */
+	/*
+	 * OFFSRC (0x0a) stays writable: probe clears it after logging it, so the
+	 * next boot's value describes only the reset in between (see
+	 * sec_pmic_acpm_log_offsrc()).
+	 */
 };
 
 static const struct regmap_access_table s2mpg13_pmic_rd_table = {
@@ -723,6 +735,48 @@ static struct regmap *sec_pmic_acpm_regmap_init(struct device *dev,
 	return regmap;
 }
 
+/*
+ * gs201: log and clear the PMICs' power-off-source latches, as the AOSP BCL
+ * driver does every boot. Nothing else on mainline clears them, so without
+ * this they accumulate and a reset can't be attributed: the 2026-10-03 felix
+ * hard reset left sub-PMIC OFFSRC at 0x11 (the "UVLO (IF-PMIC)" signature),
+ * but an earlier UVLO could have set it just as well. PWRONSRC is logged only,
+ * like AOSP. The bit meanings are not public; the raw values are what we can
+ * correlate across resets.
+ */
+static void sec_pmic_acpm_log_offsrc(struct device *dev, unsigned long type,
+				     struct regmap *regmap_pmic)
+{
+	unsigned int on = 0, off1 = 0, off2 = 0;
+
+	switch (type) {
+	case S2MPG12:
+		if (regmap_read(regmap_pmic, S2MPG12_PMIC_PWRONSRC, &on) ||
+		    regmap_read(regmap_pmic, S2MPG12_PMIC_OFFSRC1, &off1) ||
+		    regmap_read(regmap_pmic, S2MPG12_PMIC_OFFSRC2, &off2)) {
+			dev_warn(dev, "failed to read power-on/off source\n");
+			return;
+		}
+		dev_info(dev, "main PMIC: PWRONSRC %#04x OFFSRC1 %#04x OFFSRC2 %#04x\n",
+			 on, off1, off2);
+		if (regmap_write(regmap_pmic, S2MPG12_PMIC_OFFSRC1, 0) ||
+		    regmap_write(regmap_pmic, S2MPG12_PMIC_OFFSRC2, 0))
+			dev_warn(dev, "failed to clear OFFSRC\n");
+		break;
+	case S2MPG13:
+		if (regmap_read(regmap_pmic, S2MPG13_PMIC_OFFSRC, &off1)) {
+			dev_warn(dev, "failed to read power-off source\n");
+			return;
+		}
+		dev_info(dev, "sub PMIC: OFFSRC %#04x\n", off1);
+		if (regmap_write(regmap_pmic, S2MPG13_PMIC_OFFSRC, 0))
+			dev_warn(dev, "failed to clear OFFSRC\n");
+		break;
+	default:
+		break;
+	}
+}
+
 static int sec_pmic_acpm_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap_common, *regmap_pmic, *regmap;
@@ -786,6 +840,8 @@ static int sec_pmic_acpm_probe(struct platform_device *pdev)
 		if (IS_ERR(regmap))
 			return PTR_ERR(regmap);
 	}
+
+	sec_pmic_acpm_log_offsrc(dev, pdata->device_type, regmap_pmic);
 
 	ret = sec_pmic_probe(dev, pdata->device_type, irq, regmap_pmic, NULL);
 	if (ret)
