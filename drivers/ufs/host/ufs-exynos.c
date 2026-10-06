@@ -3615,17 +3615,17 @@ static const struct exynos_ufs_drv_data gs201_ufs_drvs = {
 				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT,
 	.iocc_mask		= UFS_GS101_SHARABLE,
 	/*
-	 * (h2/h3) gs201 controller advertises MASK_64_ADDRESSING_SUPPORT in
-	 * caps reg (cap=0x1303ff1f, bit 24 set), but high-memory DMA writes
-	 * trip SYSTEM_BUS_FATAL_ERROR (IS BIT(17), saved_err=0x20000) the
-	 * moment the kernel hands out a >4GB buffer. Confirmed with the (h2)
-	 * OCS_INVALID dump showing PRD addr 0x899fbd000 immediately before
-	 * the bus fault. AOSP's ufs-exynos.c hard-codes
-	 * `static u64 exynos_ufs_dma_mask = DMA_BIT_MASK(32)` for the entire
-	 * exynos UFS family, suggesting this is a long-standing controller
-	 * issue across the Tensor SoCs.
+	 * No .dma_mask_bits: gs201 advertises MASK_64_ADDRESSING_SUPPORT and
+	 * gets a 64-bit mask, as on AOSP. A 32-bit mask was forced during the
+	 * PWM-era (h2/h3) bus-fault hunt, on the strength of one >4 GB PRD
+	 * address seen before a SYSTEM_BUS_FATAL_ERROR, but those faults came
+	 * from the masked-error quirks and the PWM-gear bug fixed since, and
+	 * AOSP's `exynos_ufs_dma_mask = DMA_BIT_MASK(32)` is overwritten by
+	 * ufshcd_set_dma_mask() (AOSP felix: max_hw_sectors_kb 1024, nothing
+	 * in swiotlb). With 10 GB of felix RAM above 4 GB, the 32-bit mask
+	 * bounced most reads through swiotlb and capped requests at its 256 KB
+	 * maximum mapping.
 	 */
-	.dma_mask_bits		= 32,
 	.drv_init		= gs201_ufs_drv_init,
 	.pre_link		= gs101_ufs_pre_link,
 	.post_link		= gs201_ufs_post_link,
