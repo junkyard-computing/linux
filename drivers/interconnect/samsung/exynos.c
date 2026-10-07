@@ -14,6 +14,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_qos.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #define EXYNOS_ICC_DEFAULT_BUS_CLK_RATIO	8
 
@@ -25,6 +26,8 @@ struct exynos_icc_priv {
 	struct icc_node *node;
 
 	struct dev_pm_qos_request qos_req;
+	struct work_struct qos_work;
+	s32 qos_freq;
 	u32 bus_clk_ratio;
 };
 
@@ -58,26 +61,41 @@ static struct icc_node *exynos_icc_get_parent(struct device_node *np)
 	return icc_node;
 }
 
+static void exynos_icc_qos_work(struct work_struct *work)
+{
+	struct exynos_icc_priv *priv =
+		container_of(work, struct exynos_icc_priv, qos_work);
+	int ret;
+
+	ret = dev_pm_qos_update_request(&priv->qos_req, READ_ONCE(priv->qos_freq));
+	if (ret < 0)
+		dev_err(priv->dev, "failed to update PM QoS of %s\n",
+			priv->node->name);
+}
+
+/*
+ * The bus frequency floors are applied from a work item rather than here.
+ * ->set() can run inside a PM QoS update: a consumer's devfreq transition
+ * started by a MIN/MAX_FREQUENCY request (a sysfs min_freq/max_freq write,
+ * or devfreq thermal cooling) calls dev_pm_opp_set_rate() -> icc_set_bw()
+ * from the QoS notifier, with the global dev_pm_qos mutex held. Calling
+ * dev_pm_qos_update_request() from there takes that mutex again, and the
+ * task deadlocks on itself.
+ */
+static void exynos_icc_queue_qos(struct exynos_icc_priv *priv, s32 freq)
+{
+	WRITE_ONCE(priv->qos_freq, freq);
+	queue_work(system_dfl_wq, &priv->qos_work);
+}
+
 static int exynos_generic_icc_set(struct icc_node *src, struct icc_node *dst)
 {
 	struct exynos_icc_priv *src_priv = src->data, *dst_priv = dst->data;
 	s32 src_freq = max(src->avg_bw, src->peak_bw) / src_priv->bus_clk_ratio;
 	s32 dst_freq = max(dst->avg_bw, dst->peak_bw) / dst_priv->bus_clk_ratio;
-	int ret;
 
-	ret = dev_pm_qos_update_request(&src_priv->qos_req, src_freq);
-	if (ret < 0) {
-		dev_err(src_priv->dev, "failed to update PM QoS of %s (src)\n",
-			src->name);
-		return ret;
-	}
-
-	ret = dev_pm_qos_update_request(&dst_priv->qos_req, dst_freq);
-	if (ret < 0) {
-		dev_err(dst_priv->dev, "failed to update PM QoS of %s (dst)\n",
-			dst->name);
-		return ret;
-	}
+	exynos_icc_queue_qos(src_priv, src_freq);
+	exynos_icc_queue_qos(dst_priv, dst_freq);
 
 	return 0;
 }
@@ -99,6 +117,8 @@ static void exynos_generic_icc_remove(struct platform_device *pdev)
 
 	icc_provider_deregister(&priv->provider);
 	icc_nodes_remove(&priv->provider);
+	cancel_work_sync(&priv->qos_work);
+	dev_pm_qos_remove_request(&priv->qos_req);
 }
 
 static int exynos_generic_icc_probe(struct platform_device *pdev)
@@ -144,6 +164,7 @@ static int exynos_generic_icc_probe(struct platform_device *pdev)
 		priv->bus_clk_ratio = EXYNOS_ICC_DEFAULT_BUS_CLK_RATIO;
 
 	icc_node->data = priv;
+	INIT_WORK(&priv->qos_work, exynos_icc_qos_work);
 
 	/*
 	 * Register a PM QoS request for the parent (devfreq) device. This must
@@ -178,6 +199,7 @@ static int exynos_generic_icc_probe(struct platform_device *pdev)
 
 err_node_del:
 	icc_nodes_remove(provider);
+	cancel_work_sync(&priv->qos_work);
 	dev_pm_qos_remove_request(&priv->qos_req);
 
 	return ret;
