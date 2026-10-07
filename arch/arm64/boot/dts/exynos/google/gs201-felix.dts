@@ -421,13 +421,6 @@
 	status = "okay";
 };
 
-/* watchdog_cl1 stays disabled: the s3c2410-wdt of_match table maps
- * google,gs201-wdt → drv_data_gs101_cl0 only, so cl1 would inherit
- * cluster-0 PMU register offsets. */
-&watchdog_cl1 {
-	status = "disabled";
-};
-
 /*
  * Override the ramoops carveout layout from gs201-android-handoff.dtsi.
  * Original (AOSP) had only console-size + pmsg-size = 2 MiB + 2 MiB,
