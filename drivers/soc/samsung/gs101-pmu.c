@@ -330,6 +330,30 @@ const struct exynos_pmu_data gs101_pmu_data = {
 };
 
 /*
+ * gs201 shares the gs101 PMU layout apart from WAKEUP2_STAT, which is not
+ * implemented: a read of 0x3954 takes an external abort (a SIGBUS through
+ * /dev/mem, an SError panic from the kernel, e.g. by dumping the regmap
+ * through debugfs). Every other gs101 readable register reads fine.
+ */
+static const struct regmap_range gs201_pmu_unreadable_registers[] = {
+	regmap_reg_range(GS101_WAKEUP2_STAT, GS101_WAKEUP2_STAT),
+};
+
+static const struct regmap_access_table gs201_pmu_rd_table = {
+	.yes_ranges = gs101_pmu_registers,
+	.n_yes_ranges = ARRAY_SIZE(gs101_pmu_registers),
+	.no_ranges = gs201_pmu_unreadable_registers,
+	.n_no_ranges = ARRAY_SIZE(gs201_pmu_unreadable_registers),
+};
+
+const struct exynos_pmu_data gs201_pmu_data = {
+	.pmu_secure = true,
+	.pmu_cpuhp = true,
+	.rd_table = &gs201_pmu_rd_table,
+	.wr_table = &gs101_pmu_wr_table,
+};
+
+/*
  * Tensor SoCs are configured so that PMU_ALIVE registers can only be written
  * from EL3, but are still read accessible. As Linux needs to write some of
  * these registers, the following functions are provided and exposed via
